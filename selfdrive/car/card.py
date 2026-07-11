@@ -25,6 +25,7 @@ from openpilot.common.constants import CV
 from openpilot.selfdrive.car.cruise import VCruiseHelper, IMPERIAL_INCREMENT, V_CRUISE_MAX, V_CRUISE_MIN
 from openpilot.selfdrive.car.redneck_cruise import RedneckCruise, select_redneck_target_speed
 from openpilot.selfdrive.car.car_specific import MockCarState
+from openpilot.selfdrive.car.eps_telemetry import EpsTelemetryPoller
 
 from openpilot.starpilot.common.starpilot_variables import get_starpilot_toggles, update_starpilot_toggles
 from openpilot.starpilot.controls.starpilot_card import StarPilotCard
@@ -78,7 +79,7 @@ class Car:
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
     self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'radarState', 'longitudinalPlan'])
-    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'])
+    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks', 'epsTelemetry'])
 
     self.can_rcv_cum_timeout_counter = 0
 
@@ -202,11 +203,24 @@ class Car:
     self.sm = self.sm.extend(['starpilotOnroadEvents', 'starpilotPlan', 'starpilotSelfdriveState', 'liveCalibration', 'selfdriveState'])
     self.pm = self.pm.extend(['starpilotCarState'])
 
+    # EPS gentle-EME UDS RAM telemetry poller: Honda (Accord) only, opt-in via the
+    # EpsTelemetryEnabled param (default off -> no CAN TX). Reuses card's sole sendcan
+    # publisher; the panda Honda safety model independently gates the diagnostic frames.
+    self.eps_telemetry_enabled = self.params.get_bool("EpsTelemetryEnabled")
+    self._eps_samples: list = []
+    self.eps_poller = EpsTelemetryPoller(self.can_callbacks[1]) if self.CP.brand == "honda" else None
+
   def state_update(self) -> tuple[car.CarState, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
+
+    # Poll EPS gentle-EME UDS telemetry (opt-in). Reads this tick's CAN for the
+    # response and sends the next request via card's sendcan; samples get published
+    # below. Read-only SID 0x22/0x3E frames; panda safety gates them independently.
+    if self.eps_poller is not None:
+      self._eps_samples = self.eps_poller.update(can_list, int(time.monotonic() * 1e9), self.eps_telemetry_enabled)
 
     # Update carState from CAN
     CS, FPCS = self.CI.update(can_list, self.starpilot_toggles)
@@ -313,6 +327,23 @@ class Car:
     fpcs_send.valid = CS.canValid
     fpcs_send.starpilotCarState = FPCS
     self.pm.send('starpilotCarState', fpcs_send)
+
+    # publish any EPS UDS telemetry samples decoded this tick (timestamped in rlog)
+    for sample in self._eps_samples:
+      et_send = messaging.new_message('epsTelemetry')
+      et_send.valid = True
+      et = et_send.epsTelemetry
+      et.valid = sample.valid
+      et.voterMax = sample.voter_max
+      et.voterAvg = sample.voter_avg
+      et.colTorque = sample.col_torque
+      et.angle = sample.angle
+      et.did = sample.did
+      et.requestMonoTime = sample.request_mono_ns
+      et.responseMonoTime = sample.response_mono_ns
+      et.rawResponse = sample.raw
+      self.pm.send('epsTelemetry', et_send)
+    self._eps_samples = []
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl):
     """control update loop, driven by carControl"""
@@ -441,6 +472,7 @@ class Car:
       self.safe_mode = self.params.get_bool("SafeMode")
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl and not self.safe_mode
+      self.eps_telemetry_enabled = self.params.get_bool("EpsTelemetryEnabled")
       time.sleep(0.1)
 
   def card_thread(self):

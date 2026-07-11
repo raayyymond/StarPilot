@@ -38,6 +38,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"DoUninstall", {CLEAR_ON_MANAGER_START, BOOL}},
     {"DriverTooDistracted", {CLEAR_ON_MANAGER_START | CLEAR_ON_IGNITION_ON, BOOL}},
     {"EcuDisableFailed", {CLEAR_ON_MANAGER_START, BOOL}},
+    {"EpsTelemetryEnabled", {PERSISTENT, BOOL, "0"}},  // StarPilot: opt-in EPS UDS RAM telemetry polling (Accord gentle-EME debug)
     {"AlphaLongitudinalEnabled", {PERSISTENT, BOOL}},
     {"ExperimentalLongitudinalEnabled", {PERSISTENT, BOOL}},
     {"ExperimentalMode", {PERSISTENT, BOOL}},

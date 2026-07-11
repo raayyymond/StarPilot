@@ -282,7 +282,19 @@ struct StarPilotLateralManeuverPlanDEPRECATED @0xcb9fd56c7057593a {
   desiredCurvature @0 :Float32;  # 1/m
 }
 
-struct CustomReserved11 @0xc2243c65e0340384 {
+struct EpsTelemetry @0xc2243c65e0340384 {
+  # 2020 Accord (39990-TVA-A160) EPS gentle-EME RAM telemetry, read over UDS-over-CAN
+  # from repurposed DID 0x4801 (request 0x18DA30F1 -> response 0x18DAF130). Decoded
+  # from the 8-byte RDBI payload as 4x little-endian u16. See card.py / eps_telemetry.py.
+  valid @0 :Bool;             # true = a full 8-byte response decoded this sample
+  voterMax @1 :UInt16;        # gp-0x6a62  voter-MAX column torque  (crosses cal 0xC6312=320 -> disengage)
+  voterAvg @2 :UInt16;        # gp-0x6a5e  voter-AVG column torque
+  colTorque @3 :UInt16;       # gp-0x4f68  |column torque|
+  angle @4 :UInt16;           # gp-0x6cc4  steering angle
+  did @5 :UInt16;             # DataIdentifier polled (0x4801)
+  requestMonoTime @6 :UInt64; # monotonic ns when the UDS request was sent
+  responseMonoTime @7 :UInt64;# monotonic ns when the response finished reassembling
+  rawResponse @8 :Data;       # raw UDS response bytes (62 48 01 <8 data>) for re-decode
 }
 
 struct CustomReserved12 @0x9ccdc8676701b412 {

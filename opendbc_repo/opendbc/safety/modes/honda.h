@@ -298,6 +298,25 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // StarPilot: EPS gentle-EME RAM telemetry. Allow UDS diagnostic reads to the EPS
+  // tester address (0x18DA30F1) so openpilot can poll DID 0x4801 during LKAS. Only
+  // ReadDataByIdentifier (0x22) / TesterPresent (0x3E) single frames and ISO-TP flow
+  // control (0x30 clear-to-send) are permitted -- all state-changeless reads. This
+  // mirrors the 0x18DAB0F1 guard above but allows any RDBI DID rather than one frame.
+  if (msg->addr == 0x18DA30F1U) {
+    bool eps_read_allowed = false;
+    unsigned int pci = msg->data[0] >> 4;
+    if (pci == 0x0U) {  // ISO-TP single frame -> gate on the service id
+      unsigned int sid = msg->data[1];
+      eps_read_allowed = (sid == 0x22U) || (sid == 0x3EU);
+    } else if (pci == 0x3U) {  // ISO-TP flow control (0x30)
+      eps_read_allowed = true;
+    }
+    if (!eps_read_allowed) {
+      tx = false;
+    }
+  }
+
   // GAS: safety check (interceptor)
   if (msg->addr == 0x200U) {
     if (longitudinal_interceptor_checks(msg)) {
@@ -378,11 +397,13 @@ static safety_config honda_nidec_init(uint16_t param) {
 
 static safety_config honda_bosch_init(uint16_t param) {
   static CanMsg HONDA_BOSCH_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0xE5, 0, 8, .check_relay = true}, {0x296, 1, 4, .check_relay = false},
-                                         {0x33D, 0, 5, .check_relay = true}, {0x33D, 0, 8, .check_relay = true}, {0x33DA, 0, 5, .check_relay = true}, {0x33DB, 0, 8, .check_relay = true}};  // Bosch
+                                         {0x33D, 0, 5, .check_relay = true}, {0x33D, 0, 8, .check_relay = true}, {0x33DA, 0, 5, .check_relay = true}, {0x33DB, 0, 8, .check_relay = true},
+                                         {0x18DA30F1, 1, 8, .check_relay = false}};  // Bosch (last entry = StarPilot EPS UDS telemetry read, bus 1)
 
   static CanMsg HONDA_BOSCH_LONG_TX_MSGS[] = {{0xE4, 1, 5, .check_relay = true}, {0x1DF, 1, 8, .check_relay = true}, {0x1EF, 1, 8, .check_relay = false},
                                               {0x1FA, 1, 8, .check_relay = false}, {0x30C, 1, 8, .check_relay = false}, {0x33D, 1, 5, .check_relay = true},
                                               {0x33DA, 1, 5, .check_relay = true}, {0x33DB, 1, 8, .check_relay = true}, {0x39F, 1, 8, .check_relay = false},
+                                              {0x18DA30F1, 1, 8, .check_relay = false},  // StarPilot EPS UDS telemetry read, bus 1
                                               {0x18DAB0F1, 1, 8, .check_relay = false}};  // Bosch w/ gas and brakes
 
   static CanMsg HONDA_RADARLESS_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x296, 2, 4, .check_relay = false}, {0x33D, 0, 8, .check_relay = true}};  // Bosch radarless
