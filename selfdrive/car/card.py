@@ -203,10 +203,10 @@ class Car:
     self.sm = self.sm.extend(['starpilotOnroadEvents', 'starpilotPlan', 'starpilotSelfdriveState', 'liveCalibration', 'selfdriveState'])
     self.pm = self.pm.extend(['starpilotCarState'])
 
-    # EPS gentle-EME UDS RAM telemetry poller: Honda (Accord) only, opt-in via the
-    # EpsTelemetryEnabled param (default off -> no CAN TX). Reuses card's sole sendcan
+    # EPS gentle-EME UDS RAM telemetry poller: Honda (Accord) only, ON by default via
+    # the EpsTelemetryEnabled param (set to 0 to disable). Reuses card's sole sendcan
     # publisher; the panda Honda safety model independently gates the diagnostic frames.
-    self.eps_telemetry_enabled = self.params.get_bool("EpsTelemetryEnabled")
+    self.eps_telemetry_enabled = self.params.get_bool("EpsTelemetryEnabled", default=True)
     self._eps_samples: list = []
     self.eps_poller = EpsTelemetryPoller(self.can_callbacks[1]) if self.CP.brand == "honda" else None
 
@@ -472,7 +472,7 @@ class Car:
       self.safe_mode = self.params.get_bool("SafeMode")
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl and not self.safe_mode
-      self.eps_telemetry_enabled = self.params.get_bool("EpsTelemetryEnabled")
+      self.eps_telemetry_enabled = self.params.get_bool("EpsTelemetryEnabled", default=True)
       time.sleep(0.1)
 
   def card_thread(self):

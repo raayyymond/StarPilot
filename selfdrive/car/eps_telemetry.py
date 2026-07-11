@@ -21,8 +21,9 @@ Safety:
   * The panda Honda safety model INDEPENDENTLY enforces that only these frames are
     allowed on 0x18DA30F1 (opendbc/safety/modes/honda.h). A bug here cannot bypass
     that on-panda guard; worst case is a dropped/blocked frame.
-  * Polling only happens when the `EpsTelemetryEnabled` param is set (opt-in, default
-    off) -- no new CAN TX for anyone who has not explicitly turned it on.
+  * Polling is ON by default (the `EpsTelemetryEnabled` param defaults to 1); set that
+    param to 0 to stop all diagnostic CAN TX. Honda cars only (the poller is not even
+    constructed on other brands).
 
 Read logic is ported from the bench tool tools/bench_uds_telem_read.py in the
 accord-eps-torque-mod kit (the proven working transport for this ECU).
