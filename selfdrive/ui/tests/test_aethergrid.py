@@ -170,6 +170,7 @@ def _install_panel_stubs(aethergrid):
   sectioned_mod.TileSection = type("TileSection", (), {})
   starpilot_variables_mod = types.ModuleType("openpilot.starpilot.common.starpilot_variables")
   starpilot_variables_mod.update_starpilot_toggles = lambda: None
+  starpilot_variables_mod.LAT_ACCEL_FACTOR_MAX_MULT = 10.0
 
   _register_modules({
     SECTIONED_PANEL_MODULE_NAME: sectioned_mod,

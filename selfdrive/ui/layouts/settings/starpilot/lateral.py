@@ -6,6 +6,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import DialogResult
 
+from openpilot.starpilot.common.starpilot_variables import LAT_ACCEL_FACTOR_MAX_MULT
 from openpilot.selfdrive.ui.layouts.settings.starpilot.panel import _SettingsPage
 from openpilot.selfdrive.ui.layouts.settings.starpilot.aethergrid import (
   DEFAULT_PANEL_STYLE,
@@ -309,8 +310,12 @@ class StarPilotLateralLayout(_SettingsPage):
         "SteerLatAccel", "value", tr_noop("Lateral Acceleration"),
         subtitle=tr_noop("Maps steering torque to turning response."),
         get_value=lambda: f"{p.get_float('SteerLatAccel'):.2f}",
+        # Ceiling must track starpilot_variables.LAT_ACCEL_FACTOR_MAX_MULT, which is the
+        # clamp the toggle is actually read back through. A hard-coded 1.5x here silently
+        # capped the slider at 2.53 on the Accord while the backend allowed 16.89.
         on_click=lambda: self._show_slider("SteerLatAccel", max(0.01, cs.latAccelFactor) * 0.5,
-                                           max(0.01, cs.latAccelFactor) * 1.5, step=0.01, value_type="float"),
+                                           max(0.01, cs.latAccelFactor) * LAT_ACCEL_FACTOR_MAX_MULT,
+                                           step=0.01, value_type="float"),
         visible=lambda: alt_on() and cs.latAccelFactor != 0 and cs.isTorqueCar and not cs.isAngleCar,
       ),
       SettingRow(
