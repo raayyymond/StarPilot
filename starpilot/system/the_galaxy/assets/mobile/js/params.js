@@ -108,8 +108,13 @@ export function numericBounds(param, values) {
     return { min: +(base * 0.5).toFixed(2), max: +(base * 1.5).toFixed(2), step: 0.01 }
   }
   if (param.key === "SteerLatAccel") {
+    // Ceiling must track starpilot_variables.LAT_ACCEL_FACTOR_MAX_MULT (10.0), the clamp the
+    // toggle is actually read back through. The old 1.25x capped this slider at 2.11 on the
+    // Accord while the backend accepted 16.89. Raising only the max is the safe direction:
+    // output_torque = lateral_acceleration / latAccelFactor, so a larger value commands LESS
+    // torque; the 0.5x floor guards the dangerous direction and is unchanged.
     const base = toFinite(values?.SteerLatAccelStock) || toFinite(values?.SteerLatAccel) || 2.0
-    return { min: +(base * 0.5).toFixed(2), max: +(base * 1.25).toFixed(2), step: 0.01 }
+    return { min: +(base * 0.5).toFixed(2), max: +(base * 10.0).toFixed(2), step: 0.01 }
   }
   if (param.key === "SteerRatio") {
     const base = toFinite(values?.SteerRatioStock) || toFinite(values?.SteerRatio) || 15.0
