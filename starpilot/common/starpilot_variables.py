@@ -426,6 +426,17 @@ def migrate_ford_lkas_button_default(car_make: str, params: Params | None = None
   return True
 
 
+# Ceiling multiplier for the SteerLatAccel toggle.
+# Raised from 1.5 to 10.0 for the Accord: the plant's measured lat-accel-per-torque is
+# 12-15 (IV at 0.2 s = 12-15, FIR DC 12.9, |P(0.1 Hz)| = 10.7 on one route), so the
+# platform default of 1.689 is 6-7x below truth and the feedforward over-commands by
+# that factor -- the integrator then spends most of its range cancelling it. The old
+# 1.5x ceiling (2.534 on this car) could not reach the measured value.
+# Raising only the MAX is the safe direction: output_torque = output_lataccel /
+# latAccelFactor, so a larger value commands LESS torque. The 0.5x min guard, which
+# protects the dangerous direction, is unchanged.
+LAT_ACCEL_FACTOR_MAX_MULT = 10.0
+
 class StarPilotVariables:
   def __init__(self):
     self.params = Params(return_defaults=True)
@@ -761,7 +772,7 @@ class StarPilotVariables:
     toggle.friction = self.get_value("SteerFriction", cast=float, condition=advanced_lateral_tuning, default=friction, min=0, max=1)
     toggle.use_custom_friction = bool(round(toggle.friction, 2) != round(friction, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off
     toggle.steerKp = [[0], [self.get_value("SteerKP", cast=float, condition=advanced_lateral_tuning and is_torque_car and not is_angle_car, default=steerKp, min=steerKp * 0.5, max=steerKp * 1.5)]]
-    toggle.latAccelFactor = self.get_value("SteerLatAccel", cast=float, condition=advanced_lateral_tuning, default=latAccelFactor, min=latAccelFactor * 0.5, max=latAccelFactor * 1.5)
+    toggle.latAccelFactor = self.get_value("SteerLatAccel", cast=float, condition=advanced_lateral_tuning, default=latAccelFactor, min=latAccelFactor * 0.5, max=latAccelFactor * LAT_ACCEL_FACTOR_MAX_MULT)
     toggle.use_custom_latAccelFactor = bool(round(toggle.latAccelFactor, 2) != round(latAccelFactor, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off
     toggle.steerRatio = self.get_value("SteerRatio", cast=float, condition=advanced_lateral_tuning, default=steerRatio, min=steerRatio * 0.5, max=steerRatio * 1.5)
     toggle.use_custom_steerRatio = bool(round(toggle.steerRatio, 2) != round(steerRatio, 2)) and not toggle.force_auto_tune or toggle.force_auto_tune_off
