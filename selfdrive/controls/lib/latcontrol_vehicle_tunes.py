@@ -73,7 +73,17 @@ BOLT_2017_CARS = (
   GM_CAR.CHEVROLET_BOLT_CC_2017,
 )
 BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
-HONDA_ACCORD_STEER_RATIO_SCALE = 14.0 / 16.33
+# Measured on this car: 427 min over 47 routes, ratio derived four independent ways
+# (yaw+rear-axle speed, yaw+front, rear differential without IMU, wheel speeds alone),
+# left and right measured separately -- symmetric to within 1.5%. Flat at ~16:1 out to
+# ~48 deg, then quickening monotonically to ~11.1:1 at lock. Speed control passed, so
+# this is rack geometry, not a speed-dependent artefact: index on |angle| only.
+# The old single 14.0/16.33 scale was this curve sampled at ~95 deg and applied at every
+# angle: too quick on centre, too slow at lock.
+# Breakpoints are |steering wheel angle| in degrees off the learned centre; values are the
+# measured ratio there. np.interp holds the ends, so the ratio is bounded on [11.06, 16.00].
+HONDA_ACCORD_STEER_RATIO_ANGLE_BP = [0.0, 48.0, 60.0, 76.0, 95.0, 121.0, 191.0, 236.0, 303.0, 380.0]  # deg
+HONDA_ACCORD_STEER_RATIO_V = [16.00, 16.00, 15.02, 14.52, 13.97, 13.75, 13.50, 12.81, 11.67, 11.06]  # :1
 HONDA_ACCORD_TORQUE_KP = 0.8
 HONDA_ACCORD_TORQUE_KI = 0.15
 HONDA_ACCORD_TURN_FF_REDUCTION_MAX = 0.10
@@ -2111,8 +2121,9 @@ def get_bolt_2017_steer_ratio_scale(v_ego: float) -> float:
   return 1.0 + ((BOLT_2017_STEER_RATIO_TEST_SCALE - 1.0) * _bolt_2017_high_speed_factor(v_ego))
 
 
-def get_honda_accord_steer_ratio_scale(_v_ego: float) -> float:
-  return HONDA_ACCORD_STEER_RATIO_SCALE
+def get_honda_accord_steer_ratio(steer_angle_deg: float) -> float:
+  """Local ratio of the Accord's variable-ratio rack at the current wheel angle."""
+  return float(np.interp(abs(steer_angle_deg), HONDA_ACCORD_STEER_RATIO_ANGLE_BP, HONDA_ACCORD_STEER_RATIO_V))
 
 
 def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:

@@ -32,7 +32,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   BOLT_2018_2021_STEER_RATIO_TEST_SCALE,
   LatControlTorque,
   get_bolt_2017_steer_ratio_scale,
-  get_honda_accord_steer_ratio_scale,
+  get_honda_accord_steer_ratio,
 )
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.car.cruise_state import should_cancel_stock_cruise
@@ -467,18 +467,18 @@ class Controls:
     lp = self.sm['liveParameters']
     x = max(lp.stiffnessFactor, 0.1)
     sr = max(lp.steerRatio, 0.1)
-    custom_accord_ratio = getattr(self.starpilot_toggles, "steerRatio", self.CP.steerRatio)
-    accord_ratio_is_explicit = getattr(self.starpilot_toggles, "use_custom_steerRatio", False) and \
-      abs(custom_accord_ratio - self.CP.steerRatio) > 0.01
+    steer_angle_deg = CS.steeringAngleDeg - lp.angleOffsetDeg
     if self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2017:
       sr *= get_bolt_2017_steer_ratio_scale(CS.vEgo)
     elif self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2018_2021:
       sr *= BOLT_2018_2021_STEER_RATIO_TEST_SCALE
-    elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and not accord_ratio_is_explicit:
-      sr *= get_honda_accord_steer_ratio_scale(CS.vEgo)
+    elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD:
+      # Variable-ratio rack: the map IS the ratio, so neither the learner nor the
+      # SteerRatio toggle can bias it. Both are ignored for this platform by design.
+      sr = get_honda_accord_steer_ratio(steer_angle_deg)
     self.VM.update_params(x, sr)
 
-    steer_angle_without_offset = math.radians(CS.steeringAngleDeg - lp.angleOffsetDeg)
+    steer_angle_without_offset = math.radians(steer_angle_deg)
     self.curvature = -self.VM.calc_curvature(steer_angle_without_offset, CS.vEgo, lp.roll)
 
     # Update Torque Params

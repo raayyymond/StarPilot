@@ -44,6 +44,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   get_prius_center_taper_scale,
   PRIUS_STANDARD_FRICTION_JERK_DEADZONE_MAX,
   KIA_FORTE_BASE_LAT_ACCEL_FACTOR_MULT,
+  HONDA_ACCORD_STEER_RATIO_V,
   HONDA_ACCORD_TORQUE_KI,
   HONDA_ACCORD_TORQUE_KP,
   RAM_1500_BASE_LAT_ACCEL_FACTOR_MULT,
@@ -102,7 +103,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_genesis_gv70_unwind_ff_scale,
   get_honda_accord_ff_scale,
   get_elantra_non_scc_ff_scale,
-  get_honda_accord_steer_ratio_scale,
+  get_honda_accord_steer_ratio,
   get_palisade_ff_scale,
   get_palisade_center_output_scale,
   get_palisade_center_taper_scale,
@@ -1927,10 +1928,15 @@ class TestLatControl:
     assert controller.pid._k_p[1][-1] == pytest.approx(HONDA_ACCORD_TORQUE_KP)
     assert controller.pid._k_i[1] == pytest.approx([HONDA_ACCORD_TORQUE_KI] * len(controller.pid._k_i[1]))
 
-  def test_honda_accord_steer_ratio_calibration(self):
-    expected_scale = 14.0 / 16.33
-    assert get_honda_accord_steer_ratio_scale(0.0) == pytest.approx(expected_scale)
-    assert get_honda_accord_steer_ratio_scale(20.0) == pytest.approx(expected_scale)
+  def test_honda_accord_steer_ratio_is_variable_and_symmetric(self):
+    centre = get_honda_accord_steer_ratio(0.0)
+    assert centre == pytest.approx(HONDA_ACCORD_STEER_RATIO_V[0])
+    # flat across the on-centre band, then quickening toward lock, identically both sides
+    assert get_honda_accord_steer_ratio(48.0) == pytest.approx(centre)
+    assert get_honda_accord_steer_ratio(180.0) < centre
+    assert get_honda_accord_steer_ratio(-180.0) == pytest.approx(get_honda_accord_steer_ratio(180.0))
+    # np.interp holds the endpoints, so the ratio stays bounded past the last knot
+    assert get_honda_accord_steer_ratio(1e4) == pytest.approx(HONDA_ACCORD_STEER_RATIO_V[-1])
 
   def test_honda_accord_turn_feedforward_taper(self):
     assert get_honda_accord_ff_scale(0.0) > get_honda_accord_ff_scale(0.8)
