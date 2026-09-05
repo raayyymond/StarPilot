@@ -81,9 +81,9 @@ BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
 # The old single 14.0/16.33 scale was this curve sampled at ~95 deg and applied at every
 # angle: too quick on centre, too slow at lock.
 # Breakpoints are |steering wheel angle| in degrees off the learned centre; values are the
-# measured ratio there. np.interp holds the ends, so the ratio is bounded on [11.06, 16.00].
+# measured ratio there. np.interp holds the ends, so the ratio is bounded on [12.06, 16.00].
 HONDA_ACCORD_STEER_RATIO_ANGLE_BP = [0.0, 48.0, 60.0, 76.0, 95.0, 121.0, 191.0, 236.0, 303.0, 380.0]  # deg
-HONDA_ACCORD_STEER_RATIO_V = [16.00, 16.00, 15.02, 14.52, 13.97, 13.75, 13.50, 12.81, 11.67, 11.06]  # :1
+HONDA_ACCORD_STEER_RATIO_V = [16.00, 16.00, 16.00, 15.83, 15.23, 14.99, 14.72, 13.96, 12.72, 12.06]  # :1
 HONDA_ACCORD_TORQUE_KP = 0.8
 HONDA_ACCORD_TORQUE_KI = 0.15
 HONDA_ACCORD_TURN_FF_REDUCTION_MAX = 0.10
