@@ -473,9 +473,15 @@ class Controls:
     elif self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2018_2021:
       sr *= BOLT_2018_2021_STEER_RATIO_TEST_SCALE
     elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD:
-      # Variable-ratio rack: the map IS the ratio, so neither the learner nor the
-      # SteerRatio toggle can bias it. Both are ignored for this platform by design.
-      sr = get_honda_accord_steer_ratio(steer_angle_deg)
+      # Variable-ratio rack.  The map carries the rack SHAPE; the SteerRatio toggle carries
+      # the on-centre LEVEL, so the whole curve slides together and the level can be swept
+      # from Galaxy without a code push.  The learner is still ignored for this platform.
+      # (Before this commit the map overrode the toggle outright, which silently removed the
+      # only lever that had ever moved this car's curve behaviour on-road.)
+      accord_sr_level = None
+      if getattr(self.starpilot_toggles, "use_custom_steerRatio", False):
+        accord_sr_level = float(self.starpilot_toggles.steerRatio)
+      sr = get_honda_accord_steer_ratio(steer_angle_deg, accord_sr_level)
     self.VM.update_params(x, sr)
 
     steer_angle_without_offset = math.radians(steer_angle_deg)

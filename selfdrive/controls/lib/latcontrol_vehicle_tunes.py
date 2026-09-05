@@ -84,6 +84,12 @@ BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
 # measured ratio there. np.interp holds the ends, so the ratio is bounded on [12.06, 16.00].
 HONDA_ACCORD_STEER_RATIO_ANGLE_BP = [0.0, 48.0, 60.0, 76.0, 95.0, 121.0, 191.0, 236.0, 303.0, 380.0]  # deg
 HONDA_ACCORD_STEER_RATIO_V = [16.00, 16.00, 16.00, 15.83, 15.23, 14.99, 14.72, 13.96, 12.72, 12.06]  # :1
+# The map above is the rack SHAPE, normalised so that on-centre reads NOMINAL.  The SteerRatio
+# toggle sets the LEVEL: sr = shape * (toggle / NOMINAL), so the whole curve slides together and
+# the geometry is preserved.  Measured neutral point is ~14.3 (see get_honda_accord_steer_ratio).
+HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.00
+HONDA_ACCORD_STEER_RATIO_LEVEL_MIN = 0.60   # toggle 9.60
+HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 20.00
 HONDA_ACCORD_TORQUE_KP = 0.8
 HONDA_ACCORD_TORQUE_KI = 0.15
 HONDA_ACCORD_TURN_FF_REDUCTION_MAX = 0.30
@@ -2121,9 +2127,29 @@ def get_bolt_2017_steer_ratio_scale(v_ego: float) -> float:
   return 1.0 + ((BOLT_2017_STEER_RATIO_TEST_SCALE - 1.0) * _bolt_2017_high_speed_factor(v_ego))
 
 
-def get_honda_accord_steer_ratio(steer_angle_deg: float) -> float:
-  """Local ratio of the Accord's variable-ratio rack at the current wheel angle."""
-  return float(np.interp(abs(steer_angle_deg), HONDA_ACCORD_STEER_RATIO_ANGLE_BP, HONDA_ACCORD_STEER_RATIO_V))
+def get_honda_accord_steer_ratio(steer_angle_deg: float, level: float | None = None) -> float:
+  """Local ratio of the Accord's variable-ratio rack at the current wheel angle.
+
+  `level` is the desired ON-CENTRE ratio (the SteerRatio toggle).  It scales the whole
+  curve by level / NOMINAL, so the rack geometry measured off the car is preserved and
+  only the calibration level moves.  None (or NOMINAL) leaves the map untouched.
+
+  sR sits in the MEASUREMENT path -- VehicleModel.calc_curvature -- so a lower level makes
+  the controller read more curvature than it has, and the closed loop settles below its
+  command.  Unlike a feedforward trim this is not undone by the integrator, because the
+  integrator drives the (biased) error to zero.  Measured on r39/r3a/r3c (V282, n=38 curves)
+  the steady-state delivered/desired lateral accel is 1.116 [1.035, 1.164] by the yaw-rate
+  instrument, i.e. ~11.6 % over-delivery with no significant dependence on command amplitude
+  (rho=0.17, p=0.28), speed (p=0.59) or angle (p=0.71).  A FLAT defect wants a FLAT fix:
+  neutral is level = 16.00 / 1.116 = 14.3.  The pose instrument reads 1.012 on the same
+  curves and does not agree; the operator's repeated on-road report of oversteer breaks the
+  tie toward the yaw-rate instrument.
+  """
+  ratio = float(np.interp(abs(steer_angle_deg), HONDA_ACCORD_STEER_RATIO_ANGLE_BP, HONDA_ACCORD_STEER_RATIO_V))
+  if level is not None:
+    scale = float(level) / HONDA_ACCORD_STEER_RATIO_NOMINAL
+    ratio *= min(max(scale, HONDA_ACCORD_STEER_RATIO_LEVEL_MIN), HONDA_ACCORD_STEER_RATIO_LEVEL_MAX)
+  return ratio
 
 
 def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:
