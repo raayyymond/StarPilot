@@ -56,6 +56,8 @@ SAFE_MODE_MANAGED_KEYS = (
   "AccordFFRateGain",
   "AccordTorqueKi",
   "AccordTurnFFTaper",
+  "AccordEpsGainScale",
+  "AccordEpsSpringScale",
   "CameraOffset",
   "LaneCentering",
   "LaneCenteringPauseOnSignal",
