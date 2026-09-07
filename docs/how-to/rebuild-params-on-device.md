@@ -63,6 +63,23 @@ sudo reboot        # controlsd, the_galaxy and the UI all import the .so at star
 
 After the reboot the new toggles are editable in Galaxy and readable everywhere.
 
+## Rebuilding from Galaxy or the on-device Software panel
+
+The Galaxy Software page ("Rebuild Params and Reboot") and the on-device Software panel ("Rebuild
+Params") run the same steps through `starpilot/common/rebuild_params.py`. Two things to know:
+
+- **A failed rebuild restores the previous library.** The three artifacts are copied aside before
+  `scons` runs. If the build fails, times out (15 minutes) or the rebuilt `.so` still does not know the
+  header keys, the copies are put back (falling back to `git checkout -- <artifact>` if a copy is
+  missing) and the error says so. The device keeps booting with the library it had; the new keys just
+  stay unknown until the next successful rebuild. Only if the `.so` cannot be restored at all does the
+  error tell you to run the `git checkout` yourself before rebooting.
+- **A later fast update replaces the rebuilt `.so` with the committed one.** Fast update does
+  `git reset --hard FETCH_HEAD`, so the on-device build is thrown away in favour of whatever
+  `common/params_pyx.so` is at that commit. If the header changed and no `build:` commit followed it,
+  rebuild again after the update (the Software page shows how many header keys the compiled library is
+  missing). Committing the artifacts from the device, as in step 3 above, avoids the repeat.
+
 ## Why not just rebuild on boot?
 
 Deleting the `prebuilt` marker makes the device run a full `scons` on every boot (many minutes on a

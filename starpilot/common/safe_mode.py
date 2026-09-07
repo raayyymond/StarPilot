@@ -258,12 +258,22 @@ def _load_backup(params_raw: Params) -> dict[str, dict]:
   return backup if isinstance(backup, dict) else {}
 
 
-def _current_entry(params_raw: Params, key: str) -> dict[str, object]:
-  value = params_raw.get(key)
+def _current_entry(params_raw: Params, key: str) -> dict[str, object] | None:
+  """Backup entry for a key, or None when the compiled params library does not know the key.
+
+  The Dom branch ships a prebuilt params_pyx.so; a key added to common/params_keys.h stays unknown
+  to the library until it is rebuilt (see starpilot/common/rebuild_params.py). Safe Mode must not
+  crash starpilot_process on such a key, so unknown keys are simply left alone.
+  """
+  try:
+    value = params_raw.get(key)
+  except UnknownKeyName:
+    return None
   return {"present": value is not None, "value": value}
 
 
 def _safe_value(params: Params, key: str):
+  """Value Safe Mode forces for a key. Raises UnknownKeyName for keys the library does not know."""
   if key in SAFE_MODE_FIXED_VALUES:
     return SAFE_MODE_FIXED_VALUES[key]
 
@@ -309,18 +319,27 @@ def apply_safe_mode(params: Params, params_raw: Params, params_memory: Params | 
     preserved_entries = {key: backup[key] for key in SAFE_MODE_PRESERVED_KEYS if key in backup}
     missing_backup_keys = [key for key in SAFE_MODE_MANAGED_KEYS if key not in backup]
     if missing_backup_keys or preserved_entries:
-      backup = dict(backup)
+      new_backup = dict(backup)
       for key in missing_backup_keys:
-        backup[key] = _current_entry(params_raw, key)
+        entry = _current_entry(params_raw, key)
+        # Unknown to the compiled library: nothing to back up (and nothing gets applied below), so the
+        # key is picked up on a later apply once the library has been rebuilt.
+        if entry is not None:
+          new_backup[key] = entry
       for key, entry in preserved_entries.items():
         restore_value = entry.get("value") if entry.get("present") else None
         changed |= _apply_value(params_raw, key, restore_value)
-        backup.pop(key, None)
-      params_raw.put(SAFE_MODE_BACKUP_PARAM, backup)
-      changed = True
+        new_backup.pop(key, None)
+      if new_backup != backup:
+        params_raw.put(SAFE_MODE_BACKUP_PARAM, new_backup)
+        changed = True
 
   for key in SAFE_MODE_MANAGED_KEYS:
-    changed |= _apply_value(params_raw, key, _safe_value(params, key))
+    try:
+      safe_value = _safe_value(params, key)
+    except UnknownKeyName:
+      continue
+    changed |= _apply_value(params_raw, key, safe_value)
 
   if params_memory is not None:
     for key, value in SAFE_MODE_MEMORY_VALUES.items():
@@ -359,6 +378,8 @@ def restore_safe_mode(params_raw: Params, params_memory: Params | None = None) -
   for key in restore_keys:
     entry = backup.get(key, {"present": False, "value": None})
     restore_value = entry.get("value") if entry.get("present") else None
+    # _apply_value is a no-op for keys the compiled library does not know (never applied, or a backup
+    # written by a build that knew a key this one does not), so a stale library cannot crash restore.
     changed |= _apply_value(params_raw, key, restore_value)
 
   if params_raw.get(SAFE_MODE_BACKUP_PARAM) is not None:

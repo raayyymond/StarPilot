@@ -149,7 +149,8 @@ class LatControlTorque(LatControl):
     self.torque_deadzone_boost = float(getattr(self.torque_params, "kfDEPRECATED", 0.0))
     self.torque_ki_mult = 1.0
     if self.is_honda_accord:
-      self.pid._k_p = [self.pid._k_p[0], [*self.pid._k_p[1][:-1], HONDA_ACCORD_TORQUE_KP]]
+      # Kp is not set here: controlsd overwrites pid._k_p every frame with the SteerKP toggle
+      # (see the note next to HONDA_ACCORD_TORQUE_KI in latcontrol_vehicle_tunes.py).
       self.pid._k_i = [self.pid._k_i[0], [HONDA_ACCORD_TORQUE_KI] * len(self.pid._k_i[1])]
       # rate-plant feedforward state (see get_honda_accord_rate_plant_ff)
       self.accord_angle_des_rate_filter = FirstOrderFilter(0.0, HONDA_ACCORD_FF_RATE_RC, self.dt)
@@ -254,7 +255,11 @@ class LatControlTorque(LatControl):
       self.ioniq_6_directional_taper_filter.x = 1.0
       if self.is_honda_accord:
         self.accord_angle_des_rate_filter.x = 0.0
-        self.accord_prev_angle_des = math.degrees(VM.get_steer_from_curvature(-desired_curvature, CS.vEgo, params.roll))
+        # prime with the same offset-corrected curvature the active branch targets, so the first
+        # active frame sees no angle_des step (and no rate-term spike) from the learned offset
+        prime_fade = np.interp(CS.vEgo, FF_ROLL_OFFSET_FADE_BP, FF_ROLL_OFFSET_FADE_V)
+        prime_curvature = desired_curvature - self.torque_params.latAccelOffset * prime_fade / max(CS.vEgo ** 2, 1.0)
+        self.accord_prev_angle_des = math.degrees(VM.get_steer_from_curvature(-prime_curvature, CS.vEgo, params.roll))
     else:
       if self.prev_steering_pressed and not CS.steeringPressed:
         self.pid.i *= self.steer_release_i_decay
@@ -560,7 +565,18 @@ class LatControlTorque(LatControl):
         # feedforward above is replaced by a torque feedforward from the identified plant.  Only
         # the friction/deadzone-boost part of `ff` is kept (converted to torque as before); P and
         # I stay in lateral-acceleration space and still go through latAccelFactor.
-        curv_des = setpoint / max(CS.vEgo ** 2, 1.0)
+        #
+        # latAccelOffset is the learner's lateral-accel bias left after roll compensation (the
+        # generic path subtracts it from `ff` above).  It is folded into the curvature the plant
+        # targets rather than added as a torque, because on a rate servo a lat-accel bias is a
+        # steering-ANGLE bias: this shifts the hold term by exactly k*d(angle)/G, the torque that
+        # holds the corrected angle, whereas an additive torque_from_lateral_accel term would size
+        # it with latAccelFactor (which this feedforward does not use).  The offset also enters
+        # angle_des_rate, but it is the learner's slowly filtered estimate (the fade only moves
+        # below 2.5 m/s), so its derivative is negligible; the inactive branch primes
+        # accord_prev_angle_des with the same corrected curvature so re-engaging does not step
+        # angle_des.  With latAccelOffset == 0 this is unchanged.
+        curv_des = (setpoint - self.torque_params.latAccelOffset * roll_offset_fade) / max(CS.vEgo ** 2, 1.0)
         angle_des = math.degrees(VM.get_steer_from_curvature(-curv_des, CS.vEgo, params.roll * roll_offset_fade))
         angle_des_rate = self.accord_angle_des_rate_filter.update((angle_des - self.accord_prev_angle_des) / self.dt)
         self.accord_prev_angle_des = angle_des
@@ -572,9 +588,14 @@ class LatControlTorque(LatControl):
         plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, angle_des_rate, CS.vEgo, rate_gain, gain_scale, spring_scale)
         friction_torque = self.torque_from_lateral_accel(ff - ff_before_friction, self.torque_params)
         ff_torque = plant_ff_torque + friction_torque
-        pi_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=0.0, freeze_integrator=freeze_integrator)
-        output_torque = float(np.clip(self.torque_from_lateral_accel(pi_lataccel, self.torque_params) + ff_torque, -self.steer_max, self.steer_max))
-        self.pid.f = self.lateral_accel_from_torque(ff_torque, self.torque_params)  # keep pid_log.f meaningful
+        # The torque feedforward goes through the PID in lateral-accel space (the conversion is
+        # linear for this car) so the integrator anti-windup clamp sees it.  The PID limits are
+        # +/-steer_max converted the same way, so clipping the PID output and converting back is
+        # the same as clipping the torque sum, and pid.f / pid_log.f stay meaningful.  Unsaturated,
+        # this is (P + I + ff_torque * LAF) / LAF == (P + I) / LAF + ff_torque, as before.
+        ff_lataccel = self.lateral_accel_from_torque(ff_torque, self.torque_params)
+        output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff_lataccel, freeze_integrator=freeze_integrator)
+        output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)
       else:
         output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff, freeze_integrator=freeze_integrator)
         output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)

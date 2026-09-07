@@ -46,7 +46,9 @@ from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   KIA_FORTE_BASE_LAT_ACCEL_FACTOR_MULT,
   HONDA_ACCORD_STEER_RATIO_V,
   HONDA_ACCORD_TORQUE_KI,
-  HONDA_ACCORD_TORQUE_KP,
+  HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP,
+  HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V,
+  STANDARD_FRICTION_THRESHOLD,
   RAM_1500_BASE_LAT_ACCEL_FACTOR_MULT,
   RAM_1500_MAX_LAT_JERK_UP,
   get_gmc_yukon_cc_ff_scale,
@@ -61,6 +63,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   set_flm_runtime_overrides,
 )
 from openpilot.selfdrive.controls.lib.latcontrol_torque import (
+  JERK_GAIN,
   get_civic_bosch_modified_a_center_taper_scale,
   get_center_chatter_friction_jerk_deadzone,
   LatControlTorque,
@@ -102,6 +105,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_genesis_gv70_high_speed_error_scale,
   get_genesis_gv70_unwind_ff_scale,
   get_honda_accord_ff_scale,
+  get_honda_accord_ff_move_torque_limit,
   get_honda_accord_rate_plant_ff,
   get_elantra_non_scc_ff_scale,
   get_honda_accord_steer_ratio,
@@ -1926,7 +1930,7 @@ class TestLatControl:
     controller, _, _, _, _ = self._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
 
     assert controller.is_honda_accord
-    assert controller.pid._k_p[1][-1] == pytest.approx(HONDA_ACCORD_TORQUE_KP)
+    # Kp is toggle-driven (controlsd overwrites pid._k_p every frame), so only Ki is set here
     assert controller.pid._k_i[1] == pytest.approx([HONDA_ACCORD_TORQUE_KI] * len(controller.pid._k_i[1]))
 
   def test_honda_accord_steer_ratio_is_variable_and_symmetric(self):
@@ -1952,20 +1956,84 @@ class TestLatControl:
     # angle is clipped so a runaway setpoint cannot demand unbounded torque
     assert get_honda_accord_rate_plant_ff(1e6, 0.0, 12.5) == pytest.approx(get_honda_accord_rate_plant_ff(400.0, 0.0, 12.5))
 
-  def test_honda_accord_torque_controller_uses_rate_plant_feedforward(self):
-    controller, VM, CS, params, toggles = self._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+  def test_honda_accord_rate_plant_ff_move_term_clamp(self):
+    # the limit is 1.0 at/below 8 m/s, 1.4 at/above 10 m/s, linear between
+    assert get_honda_accord_ff_move_torque_limit(0.0) == pytest.approx(HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V[0])
+    assert get_honda_accord_ff_move_torque_limit(HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP[0]) == pytest.approx(1.0)
+    assert get_honda_accord_ff_move_torque_limit(9.0) == pytest.approx(1.2)
+    assert get_honda_accord_ff_move_torque_limit(HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP[1]) == pytest.approx(1.4)
+    assert get_honda_accord_ff_move_torque_limit(35.0) == pytest.approx(HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V[1])
+    # below the limit the move term is untouched: at 12.5 m/s (G=95) 100 deg/s * 0.5 -> 0.526
+    hold = get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5)
+    assert get_honda_accord_rate_plant_ff(20.0, 100.0, 12.5) - hold == pytest.approx(0.5 * 100.0 / 95.0, rel=1e-6)
+    # the largest move term the planner's jerk limit can produce at 10 m/s is ~0.68, well under 1.4
+    hold_10 = get_honda_accord_rate_plant_ff(20.0, 0.0, 10.0)
+    assert get_honda_accord_rate_plant_ff(20.0, 140.5, 10.0) - hold_10 < 1.4
+    assert get_honda_accord_rate_plant_ff(20.0, 140.5, 10.0) - hold_10 == pytest.approx(0.5 * 140.5 / (120.0 + (95.0 - 120.0) * (10.0 - 5.0) / (12.5 - 5.0)), rel=1e-6)
+    # above the limit only the move term is clipped, symmetrically, and the hold term still adds
+    hold_5 = get_honda_accord_rate_plant_ff(20.0, 0.0, 5.0)
+    assert get_honda_accord_rate_plant_ff(20.0, 1000.0, 5.0) == pytest.approx(hold_5 + 1.0)
+    assert get_honda_accord_rate_plant_ff(20.0, -1000.0, 5.0) == pytest.approx(hold_5 - 1.0)
+    assert get_honda_accord_rate_plant_ff(20.0, 1e6, 15.0) == pytest.approx(get_honda_accord_rate_plant_ff(20.0, 0.0, 15.0) + 1.4)
+    # the clamp does not depend on the gain/spring scales (it bounds torque, not rate)
+    assert get_honda_accord_rate_plant_ff(0.0, 1e6, 5.0, gain_scale=0.5) == pytest.approx(1.0)
+
+  @staticmethod
+  def _run_honda_accord_rate_plant(lat_accel_offset, seconds=2.0):
+    controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
     CS.vEgo = 15.0
     CS.steeringAngleDeg = 0.0
+    # on-road values: LAF 6.0 keeps the output well inside +/-1 (stock 1.69 saturates this scenario)
+    lat_accel_factor, friction = 6.0, 0.01
+    controller.update_live_torque_params(lat_accel_factor, lat_accel_offset, friction)
+    # one inactive frame primes the request buffer and the rate-plant angle state (as on the car)
+    controller.update(False, CS, VM, params, False, 0.0, False, 0.2, None, None, toggles)
     desired_curvature = 0.004  # ~0.9 m/s^2 at 15 m/s, in the controller's (negative-left) frame
-    for _ in range(round(1.0 / DT_CTRL)):
+    for _ in range(round(seconds / DT_CTRL)):
       output_torque, _, lac_log = controller.update(True, CS, VM, params, False, desired_curvature, False, 0.2, None, None, toggles)
+    return controller, VM, CS, lac_log, output_torque, lat_accel_factor, friction
+
+  def test_honda_accord_torque_controller_uses_rate_plant_feedforward(self):
+    controller, VM, CS, lac_log, output_torque, lat_accel_factor, friction = self._run_honda_accord_rate_plant(0.0)
     assert lac_log.active
     # feedforward carries the sign of the setpoint and is a torque-derived quantity, not setpoint/LAF
     assert lac_log.f * lac_log.desiredLateralAccel > 0.0
     assert abs(lac_log.f) < abs(lac_log.desiredLateralAccel)
-    # output is finite, bounded and points the same way as the setpoint
-    assert abs(output_torque) <= 1.0
-    assert output_torque * lac_log.desiredLateralAccel > 0.0
+    # after 2 s the setpoint has settled (desired jerk ~0) so the move term is ~0 and the plant
+    # feedforward is just the hold torque for the desired angle; the friction term is saturated
+    # (error well past the threshold) and equals friction * LAF.  Recompute both independently.
+    v2 = CS.vEgo ** 2
+    setpoint = lac_log.desiredLateralAccel
+    assert setpoint == pytest.approx(0.004 * v2, abs=0.01)
+    assert abs(lac_log.desiredLateralJerk) < 0.01
+    assert lac_log.error > STANDARD_FRICTION_THRESHOLD + JERK_GAIN * abs(lac_log.desiredLateralJerk)
+    angle_des = math.degrees(VM.get_steer_from_curvature(-setpoint / v2, CS.vEgo, 0.0))
+    assert angle_des < 0.0  # positive internal-frame setpoint is a right turn, i.e. negative wheel angle
+    plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, 0.0, CS.vEgo)
+    friction_torque = friction  # get_friction saturates at friction * LAF (lat accel) = friction (torque)
+    expected_f = controller.lateral_accel_from_torque(plant_ff_torque + friction_torque, controller.torque_params)
+    assert expected_f > 0.0
+    assert lac_log.f == pytest.approx(expected_f, abs=0.01)
+    # controller.update returns the +left frame (== lac_log.output == -internal torque): a positive
+    # internal setpoint drives a negative returned torque, and the internal sum is P + I + f
+    assert output_torque == pytest.approx(lac_log.output)
+    assert abs(output_torque) < 1.0
+    assert output_torque * lac_log.desiredLateralAccel < 0.0
+    assert lac_log.output == pytest.approx(-(lac_log.p + lac_log.i + lac_log.f) / lat_accel_factor, abs=1e-6)
+
+  def test_honda_accord_rate_plant_feedforward_keeps_learned_lat_accel_offset(self):
+    _, VM, CS, log_zero, torque_zero, lat_accel_factor, _ = self._run_honda_accord_rate_plant(0.0)
+    _, _, _, log_off, torque_off, _, _ = self._run_honda_accord_rate_plant(0.3)
+    # the offset is a lateral-accel bias: it does not touch the error, so P and I are identical...
+    assert log_off.p == pytest.approx(log_zero.p, abs=1e-6)
+    assert log_off.i == pytest.approx(log_zero.i, abs=1e-6)
+    # ...and it only shifts the plant target, by the hold torque of the angle the offset maps to
+    v2 = CS.vEgo ** 2
+    delta_angle = math.degrees(VM.get_steer_from_curvature(0.3 / v2, CS.vEgo, 0.0))
+    expected_torque_shift = get_honda_accord_rate_plant_ff(delta_angle, 0.0, CS.vEgo)  # +left frame
+    assert expected_torque_shift > 0.0
+    assert torque_off - torque_zero == pytest.approx(expected_torque_shift, abs=1e-3)
+    assert log_off.f - log_zero.f == pytest.approx(-expected_torque_shift * lat_accel_factor, abs=1e-3 * lat_accel_factor)
 
   def test_honda_accord_turn_feedforward_taper(self):
     assert get_honda_accord_ff_scale(0.0) > get_honda_accord_ff_scale(0.8)

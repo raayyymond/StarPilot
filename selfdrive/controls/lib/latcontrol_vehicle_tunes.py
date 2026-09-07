@@ -90,7 +90,10 @@ HONDA_ACCORD_STEER_RATIO_V = [16.00, 16.00, 16.00, 15.83, 15.23, 14.99, 14.72, 1
 HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.00
 HONDA_ACCORD_STEER_RATIO_LEVEL_MIN = 0.60   # toggle 9.60
 HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 20.00
-HONDA_ACCORD_TORQUE_KP = 0.8
+# Kp for the Accord torque controller is NOT a constant here: controlsd overwrites
+# LatControlTorque.pid._k_p every frame with the SteerKP toggle (a flat [[0], [SteerKP]]), so a
+# construction-time override would be dead code.  Ki is applied at construction and then
+# re-applied from the AccordTorqueKi toggle every frame (default below).
 HONDA_ACCORD_TORQUE_KI = 0.30
 HONDA_ACCORD_TURN_FF_REDUCTION_MAX = 0.30
 HONDA_ACCORD_TURN_FF_ONSET = 0.45
@@ -109,6 +112,20 @@ HONDA_ACCORD_EPS_K_V = [0.17, 0.28, 0.35, 0.45, 0.50]  # 1/s (return-spring: rat
 HONDA_ACCORD_FF_RATE_GAIN = 0.5    # fraction of the d(angle_des)/dt term; 1.0 over-drives entries on the plant
 HONDA_ACCORD_FF_RATE_RC = 0.10     # s, first-order filter on d(angle_des)/dt
 HONDA_ACCORD_FF_ANGLE_LIMIT_DEG = 400.0
+# Clamp on the MOVE term (rate_gain * d(angle_des)/dt / G) of the rate-plant feedforward.  The
+# planner's jerk limit (clip_curvature, 5 m/s^3) becomes a steering-rate limit that scales as
+# 1/v^2, so below ~8 m/s the move term alone exceeds full-scale torque, and the G/k tables are
+# extrapolated flat below 5 m/s.  Sized as a strict no-op for the normal regime: simulated with
+# the on-road settings (rate gain 0.5, gain/spring scale 1.0, sR 16.0) on a planner-limited
+# 0 -> 2.5 m/s^2 ramp (jerk filter + 0.2 s look-ahead included, closed loop on the identified
+# plant) the largest |move| torque seen was
+#     10 m/s: 0.680   12.5: 0.489   15: 0.369   20: 0.250   25: 0.196   30: 0.165   35: 0.137
+#      9 m/s: 0.804    8: 0.976     7: 1.226    6: 1.608    5: 2.236
+# so the limit is 1.4 (2.06x the 10 m/s peak) at and above 10 m/s, tapering to 1.0 (the whole
+# actuator range, i.e. the fastest rate the servo can produce anyway) at 8 m/s and below.  On
+# that ramp it first bites at ~7.9 m/s.
+HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP = [8.0, 10.0]  # m/s
+HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V = [1.0, 1.4]    # torque, units of the [-1, 1] output
 VOLT_STANDARD_CARS = (
   GM_CAR.CHEVROLET_VOLT,
   GM_CAR.CHEVROLET_VOLT_2019,
@@ -2189,7 +2206,15 @@ def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: flo
   # from Galaxy after an EPS firmware change, until the plant is re-identified and the tables updated.
   gain = float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V)) * max(float(gain_scale), 0.1)
   spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V)) * float(spring_scale)
-  return (spring * angle_des_deg + rate_gain * angle_des_rate_dps) / gain
+  hold_torque = spring * angle_des_deg / gain
+  move_limit = get_honda_accord_ff_move_torque_limit(v_ego)
+  move_torque = float(np.clip(rate_gain * angle_des_rate_dps / gain, -move_limit, move_limit))
+  return hold_torque + move_torque
+
+
+def get_honda_accord_ff_move_torque_limit(v_ego: float) -> float:
+  """Magnitude limit on the move term of get_honda_accord_rate_plant_ff (see the constants)."""
+  return float(np.interp(v_ego, HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP, HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V))
 
 
 def get_bolt_2017_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> float:

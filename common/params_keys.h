@@ -364,13 +364,15 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NAPRadarOffset", {PERSISTENT, FLOAT, "0.0", "0.0", 0, SETTINGS_SIMPLE}},
     {"ForceAutoTune", {PERSISTENT, BOOL, "0", "0", 3}},
     {"ForceAutoTuneOff", {PERSISTENT, BOOL, "1", "0", 2}},
-    // Custom-patch switches (Galaxy "Custom Patches" section). stock_value = pre-patch behaviour.
-    {"KeepLearnedLatAccelOffset", {PERSISTENT, BOOL, "1", "1", 2, SETTINGS_SIMPLE}},
+    // Custom-patch switches (Galaxy "Custom Patches" section). stock_value (Safe Mode) = every patch off,
+    // i.e. the generic torque-controller path with the pre-patch Ki. The old always-on 10% turn-FF taper
+    // no longer exists (the switch is now 0% or 30%), so its stock is off.
+    {"KeepLearnedLatAccelOffset", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     {"AccordVariableSteerRatio", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     {"AccordRatePlantFF", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     {"AccordFFRateGain", {PERSISTENT, FLOAT, "0.5", "0.5", 2, SETTINGS_SIMPLE}},
     {"AccordTorqueKi", {PERSISTENT, FLOAT, "0.30", "0.15", 2, SETTINGS_SIMPLE}},
-    {"AccordTurnFFTaper", {PERSISTENT, BOOL, "0", "1", 2, SETTINGS_SIMPLE}},
+    {"AccordTurnFFTaper", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"AccordEpsGainScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
     {"AccordEpsSpringScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
