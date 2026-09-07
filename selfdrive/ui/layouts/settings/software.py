@@ -333,7 +333,9 @@ class SoftwareLayout(Widget):
     threading.Thread(target=_run_worker, daemon=True).start()
 
   def _on_rebuild_params(self):
-    if _get_fast_update_state().stage != FastUpdateStage.IDLE:
+    # ERROR is a terminal state of a finished fast update (the worker released the lock), so a failed
+    # download must not leave the Rebuild button dead; starting a rebuild clears that error.
+    if _get_fast_update_state().stage not in (FastUpdateStage.IDLE, FastUpdateStage.ERROR):
       return
     def on_confirm(result):
       if result == DialogResult.CONFIRM:
@@ -366,9 +368,12 @@ class SoftwareLayout(Widget):
         time.sleep(_FAST_UPDATE_REBOOT_NOTICE_S)
         HARDWARE.reboot()
       except Exception as e:
-        _set_fast_update_state(stage=FastUpdateStage.ERROR, error=str(e)[:1000], status="")
-        self._rebuild_params_btn.action_item.set_value(tr("Rebuild failed: ") + str(e)[:40])
+        # Report on the Rebuild row and hand the shared fast-update state back to IDLE. Leaving it at
+        # ERROR would put the message on the Download button (as RETRY) and make this button return
+        # early until Download was pressed. Nothing overwrites this row's value, so the text sticks.
+        self._rebuild_params_btn.action_item.set_value(tr("Rebuild failed: ") + str(e).splitlines()[0][:60])
         self._rebuild_params_btn.action_item.set_enabled(True)
+        _set_fast_update_state(stage=FastUpdateStage.IDLE, error="", status="")
         cloudlog.exception("Params rebuild failed")
       finally:
         _fast_update_lock.release()

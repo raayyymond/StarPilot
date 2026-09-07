@@ -232,9 +232,14 @@ class TorqueEstimator(ParameterEstimator):
     if with_points:
       liveTorqueParameters.points = self.filtered_points.get_points()[:, [0, 2]].tolist()
 
-    liveTorqueParameters.latAccelFactorFiltered = float(self.filtered_params['latAccelFactor'].x if not self.starpilot_toggles.use_custom_latAccelFactor else self.starpilot_toggles.latAccelFactor)
+    # Always publish the learner's own filter state. The custom SteerLatAccel / SteerFriction toggles are
+    # substituted by the consumers themselves (controlsd.get_torque_control_params, the developer
+    # sidebar), and this same message is cached to LiveTorqueParameters and restored as the filters'
+    # initial state at the next boot: publishing the toggle here made a user who ran a custom value and
+    # then reset to stock start the next drive with the learner parked at the old toggle value.
+    liveTorqueParameters.latAccelFactorFiltered = float(self.filtered_params['latAccelFactor'].x)
     liveTorqueParameters.latAccelOffsetFiltered = float(self.filtered_params['latAccelOffset'].x)
-    liveTorqueParameters.frictionCoefficientFiltered = float(self.filtered_params['frictionCoefficient'].x if not self.starpilot_toggles.use_custom_friction else self.starpilot_toggles.friction)
+    liveTorqueParameters.frictionCoefficientFiltered = float(self.filtered_params['frictionCoefficient'].x)
     liveTorqueParameters.totalBucketPoints = len(self.filtered_points)
     liveTorqueParameters.calPerc = self.filtered_points.get_valid_percent()
     liveTorqueParameters.decay = self.decay
