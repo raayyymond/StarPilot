@@ -16,6 +16,8 @@ const state = reactive({
   branchesBusy: false,
   switchBusy: false,
   rollbackBusy: false,
+  rebuildParamsBusy: false,
+  rebuildParamsMissing: null,
   recoveryBusy: false,
   selectedBranchAgnosUpdate: null,
   selectedBranchAgnosBusy: false,
@@ -493,6 +495,53 @@ async function setAutomaticUpdates(enabled) {
   }
 }
 
+async function loadRebuildParamsStatus() {
+  try {
+    const response = await fetch("/api/update/rebuild_params/status")
+    const payload = await readJsonPayload(response)
+    state.rebuildParamsMissing = Array.isArray(payload.missing) ? payload.missing : []
+  } catch (_error) {
+    state.rebuildParamsMissing = null
+  }
+}
+
+async function runRebuildParams() {
+  if (state.rebuildParamsBusy) return
+  if (state.status?.running) {
+    showSnackbar("Another update action is already running.")
+    return
+  }
+  if (state.status?.isOnroad) {
+    showSnackbar("Actions are blocked while onroad.", "error")
+    return
+  }
+  const confirmed = window.confirm(
+    "Rebuild the params library?\n\n" +
+    "- Runs scons on the device (about a minute).\n" +
+    "- Needed after common/params_keys.h changes, otherwise new toggles are \"not editable\".\n" +
+    "- The device reboots when the build finishes.\n\n" +
+    "Continue?"
+  )
+  if (!confirmed) return
+
+  state.rebuildParamsBusy = true
+  try {
+    reconnectPending = false
+    rebootNoticeShown = false
+    const response = await fetch("/api/update/rebuild_params", { method: "POST" })
+    const payload = await readJsonPayload(response)
+    if (!response.ok) {
+      throw new Error(payload.error || response.statusText || "Failed to start the params rebuild")
+    }
+    showSnackbar(payload.message || "Params rebuild started.")
+    await fetchStatus(false)
+  } catch (error) {
+    showSnackbar(error?.message || "Failed to start the params rebuild", "error")
+  } finally {
+    state.rebuildParamsBusy = false
+  }
+}
+
 async function runFastUpdate(skipConfirmation = false) {
   if (state.updateBusy) return
   if (state.status?.running) {
@@ -764,7 +813,7 @@ function initialize() {
     state.showAdvancedOptions = false
   }
 
-  const initTasks = [fetchStatus(false)]
+  const initTasks = [fetchStatus(false), loadRebuildParamsStatus()]
   if (state.showAdvancedOptions) {
     initTasks.push(fetchBranches(false))
   }
@@ -886,6 +935,32 @@ export function UpdateManager() {
               ${() => state.branchesError ? html`<p class="updateError"><strong>Branch List:</strong> ${state.branchesError}</p>` : ""}
             </div>
 
+            <div class="updateRollbackSection updateRebuildParamsSection">
+              <div class="updateBranchHeader">
+                <strong>Rebuild Params</strong>
+              </div>
+              <p class="updateAdvancedNote">
+                Recompiles common/params_pyx.so on the device so keys added to common/params_keys.h become
+                editable (this branch ships the library prebuilt). Takes about a minute, then reboots.
+              </p>
+              <div class="updateRollbackMeta">
+                <p><strong>Header keys missing from the compiled library:</strong>
+                  ${() => state.rebuildParamsMissing === null
+                    ? "unknown"
+                    : (state.rebuildParamsMissing.length === 0
+                      ? "none (library is current)"
+                      : `${state.rebuildParamsMissing.length}: ${state.rebuildParamsMissing.slice(0, 6).join(", ")}${state.rebuildParamsMissing.length > 6 ? ", ..." : ""}`)}
+                </p>
+              </div>
+              <button
+                class="updateButton"
+                disabled="${() => !!state.status?.isOnroad || !!state.status?.running || state.rebuildParamsBusy}"
+                @click="${() => runRebuildParams()}">
+                ${() => (state.status?.running && state.status?.lastMode === "rebuild-params")
+                  ? "Rebuilding..."
+                  : (state.rebuildParamsBusy ? "Starting..." : "Rebuild Params and Reboot")}
+              </button>
+            </div>
             <div class="updateRollbackSection">
               <div class="updateBranchHeader">
                 <strong>Rollback</strong>

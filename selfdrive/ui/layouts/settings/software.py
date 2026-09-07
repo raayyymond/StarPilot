@@ -10,6 +10,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.starpilot_version import starpilot_display_description
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.hardware import HARDWARE
+from openpilot.starpilot.common import rebuild_params as _rebuild_params_mod
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, trn
 from openpilot.system.ui.widgets import Widget, DialogResult
@@ -133,6 +134,10 @@ class SoftwareLayout(Widget):
     self._branch_btn.action_item.set_value(ui_state.ui_params.get("UpdaterTargetBranch") or "")
     self._branch_dialog: MultiOptionDialog | None = None
 
+    # Rebuild the compiled params library (prebuilt branch): needed after common/params_keys.h changes.
+    self._rebuild_params_btn = button_item(lambda: tr("Rebuild Params"), lambda: tr("REBUILD"), callback=self._on_rebuild_params)
+    self._rebuild_params_btn.action_item.set_value(tr("Recompile params_pyx.so, then reboot"))
+
     self._scroller = Scroller(
       [
         self._onroad_label,
@@ -141,6 +146,7 @@ class SoftwareLayout(Widget):
         self._download_btn,
         self._install_btn,
         self._branch_btn,
+        self._rebuild_params_btn,
         button_item(lambda: tr("Uninstall"), lambda: tr("UNINSTALL"), callback=self._on_uninstall),
         button_item(lambda: tr("Error Log"), lambda: tr("VIEW"), callback=self._on_error_log),
       ],
@@ -321,6 +327,49 @@ class SoftwareLayout(Widget):
       except Exception as e:
         _set_fast_update_state(stage=FastUpdateStage.ERROR, error=str(e)[:1000], status="")
         cloudlog.exception("Fast update failed")
+      finally:
+        _fast_update_lock.release()
+
+    threading.Thread(target=_run_worker, daemon=True).start()
+
+  def _on_rebuild_params(self):
+    if _get_fast_update_state().stage != FastUpdateStage.IDLE:
+      return
+    def on_confirm(result):
+      if result == DialogResult.CONFIRM:
+        self._execute_rebuild_params()
+    gui_app.push_widget(ConfirmDialog(
+      tr("Rebuild the params library with scons (about a minute) and reboot? Needed after common/params_keys.h changes."),
+      tr("Rebuild Params"), callback=on_confirm,
+    ))
+
+  def _execute_rebuild_params(self):
+    if ui_state.is_onroad():
+      self._rebuild_params_btn.action_item.set_value(tr("Cannot rebuild while driving"))
+      return
+    if not _fast_update_lock.acquire(blocking=False):
+      return
+    _set_fast_update_state(stage=FastUpdateStage.PREPARING, status=tr("Rebuilding params..."), error="")
+    self._rebuild_params_btn.action_item.set_enabled(False)
+    self._rebuild_params_btn.action_item.set_value(tr("Rebuilding params..."))
+
+    def _progress(step, label, percent, detail):
+      self._rebuild_params_btn.action_item.set_value(f"{label}: {detail}"[:60])
+
+    def _run_worker():
+      repo_path = str(Path(__file__).resolve().parents[4])
+      try:
+        _set_fast_update_state(stage=FastUpdateStage.APPLYING, status=tr("Rebuilding params..."))
+        _rebuild_params_mod.rebuild_params(repo_path, progress=_progress)
+        _set_fast_update_state(stage=FastUpdateStage.REBOOTING, status=tr("Params rebuilt, rebooting..."))
+        self._rebuild_params_btn.action_item.set_value(tr("Params rebuilt, rebooting..."))
+        time.sleep(_FAST_UPDATE_REBOOT_NOTICE_S)
+        HARDWARE.reboot()
+      except Exception as e:
+        _set_fast_update_state(stage=FastUpdateStage.ERROR, error=str(e)[:1000], status="")
+        self._rebuild_params_btn.action_item.set_value(tr("Rebuild failed: ") + str(e)[:40])
+        self._rebuild_params_btn.action_item.set_enabled(True)
+        cloudlog.exception("Params rebuild failed")
       finally:
         _fast_update_lock.release()
 

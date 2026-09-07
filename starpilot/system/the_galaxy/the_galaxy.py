@@ -103,6 +103,7 @@ from openpilot.starpilot.common.favorite_slots import (
 )
 from openpilot.starpilot.common.lateral_delay import full_lateral_delay
 from openpilot.starpilot.common.starpilot_utilities import delete_file, get_lock_status, run_cmd
+from openpilot.starpilot.common import rebuild_params as _rebuild_params_mod
 from openpilot.starpilot.common.starpilot_variables import ACTIVE_THEME_PATH, BUTTON_FUNCTIONS, ERROR_LOGS_PATH, EXCLUDED_KEYS, LEGACY_STARPILOT_PARAM_RENAMES, MAPS_PATH, MODELS_PATH, RESOURCES_REPO, SCREEN_RECORDINGS_PATH, STOCK_THEME_PATH, THEME_SAVE_PATH,\
                                                            default_ev_tuning_enabled, migrate_cancel_button_controls, update_starpilot_toggles
 from openpilot.starpilot.common.testing_grounds import (
@@ -3135,6 +3136,32 @@ def _rollback_worker():
     )
   except Exception as exception:
     _set_fast_update_error_state("Rollback failed.", exception)
+
+def _rebuild_params_worker():
+  """Rebuild common/params_pyx.so on the device (see starpilot/common/rebuild_params.py), then reboot.
+
+  Reuses the fast-update state machine so the Software page shows the same progress card.
+  """
+  repo_path = str(_get_openpilot_root())
+  _set_fast_update_state(
+    running=True,
+    stage="updating",
+    message="Rebuilding the params library...",
+    lastError="",
+    lastMode="rebuild-params",
+    startedAt=time.time(),
+    finishedAt=0.0,
+  )
+  try:
+    summary = _rebuild_params_mod.rebuild_params(repo_path, progress=_set_fast_update_progress)
+    added = summary.get("missing_before") or []
+    detail = f"Rebuilt in {summary['seconds']} s"
+    if added:
+      detail += "; newly available: " + ", ".join(added[:8]) + (" ..." if len(added) > 8 else "")
+    _finish_update_and_reboot("Params library rebuilt. " + detail + ". Rebooting so every process loads it.")
+  except Exception as exception:
+    _set_fast_update_error_state("Params rebuild failed", exception)
+
 
 def _get_openpilot_root():
   global _openpilot_root_cache
@@ -7839,6 +7866,42 @@ def setup(app):
       "remoteCommit": remote_commit,
       "agnosUpdate": agnos_update,
     }), 200
+
+  @app.route("/api/update/rebuild_params", methods=["POST"])
+  def run_rebuild_params():
+    if params.get_bool("IsOnroad"):
+      return jsonify({"error": "Cannot rebuild params while driving."}), 409
+
+    with _fast_update_lock:
+      if _fast_update_state.get("running"):
+        return jsonify({"error": "Another update action is already in progress."}), 409
+      _fast_update_state.update({
+        "running": True,
+        "stage": "starting",
+        "message": "Starting params rebuild...",
+        "lastError": "",
+        "lastMode": "rebuild-params",
+        "startedAt": time.time(),
+        "finishedAt": 0.0,
+        "progressStep": 1,
+        "progressTotalSteps": _FAST_UPDATE_TOTAL_STEPS,
+        "progressStepPercent": 0.0,
+        "progressPercent": 0.0,
+        "progressLabel": "Preparing",
+        "progressDetail": "Checking the build toolchain...",
+      })
+
+    threading.Thread(target=_rebuild_params_worker, name="galaxy-rebuild-params", daemon=True).start()
+    return jsonify({"message": "Params rebuild started. The device will reboot when it finishes."}), 202
+
+  @app.route("/api/update/rebuild_params/status", methods=["GET"])
+  def rebuild_params_status():
+    repo_path = str(_get_openpilot_root())
+    try:
+      missing = _rebuild_params_mod.missing_keys(repo_path)
+      return jsonify({"missing": missing, "headerKeys": len(_rebuild_params_mod.header_keys(repo_path)), "error": ""}), 200
+    except Exception as exception:
+      return jsonify({"missing": [], "headerKeys": 0, "error": str(exception)}), 200
 
   @app.route("/api/update/fast", methods=["POST"])
   def run_fast_update():
