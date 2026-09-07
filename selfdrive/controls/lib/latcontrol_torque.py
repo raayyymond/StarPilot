@@ -151,6 +151,9 @@ class LatControlTorque(LatControl):
     if self.is_honda_accord:
       self.pid._k_p = [self.pid._k_p[0], [*self.pid._k_p[1][:-1], HONDA_ACCORD_TORQUE_KP]]
       self.pid._k_i = [self.pid._k_i[0], [HONDA_ACCORD_TORQUE_KI] * len(self.pid._k_i[1])]
+      # rate-plant feedforward state (see get_honda_accord_rate_plant_ff)
+      self.accord_angle_des_rate_filter = FirstOrderFilter(0.0, HONDA_ACCORD_FF_RATE_RC, self.dt)
+      self.accord_prev_angle_des = 0.0
     if self.is_palisade:
       self.torque_params.latAccelFactor *= PALISADE_BASE_LAT_ACCEL_FACTOR_MULT
     if self.is_ioniq_5:
@@ -249,6 +252,9 @@ class LatControlTorque(LatControl):
       self.jerk_filter.x = 0.0
       self.prev_desired_lateral_accel = future_desired_lateral_accel
       self.ioniq_6_directional_taper_filter.x = 1.0
+      if self.is_honda_accord:
+        self.accord_angle_des_rate_filter.x = 0.0
+        self.accord_prev_angle_des = math.degrees(VM.get_steer_from_curvature(-desired_curvature, CS.vEgo, params.roll))
     else:
       if self.prev_steering_pressed and not CS.steeringPressed:
         self.pid.i *= self.steer_release_i_decay
@@ -476,7 +482,7 @@ class LatControlTorque(LatControl):
         friction_threshold = CIVIC_BOSCH_MODIFIED_B_FIXED_FRICTION_THRESHOLD
         friction_scale = get_civic_bosch_modified_b_friction_scale(CS.vEgo, setpoint, desired_lateral_jerk)
         friction_scale = 1.0 + ((friction_scale - 1.0) * civic_bosch_modified_a_center_taper)
-      if self.is_honda_accord:
+      if self.is_honda_accord and getattr(starpilot_toggles, "accord_turn_ff_taper", False):
         ff *= get_honda_accord_ff_scale(setpoint)
       if flm_surface_active and self.flm_surface_profile_key and not ioniq_6_active:
         universal_flm_profile = self.flm_surface_profile_key == FLM_UNIVERSAL_PROFILE_KEY
@@ -533,6 +539,7 @@ class LatControlTorque(LatControl):
       )
       friction_jerk = math.copysign(max(abs(desired_lateral_jerk) - friction_jerk_deadzone, 0.0),
                                     desired_lateral_jerk)
+      ff_before_friction = ff
       ff += friction_scale * get_friction(error_with_lsf + JERK_GAIN * friction_jerk, lateral_accel_deadzone, friction_threshold, self.torque_params)
       deadzone_boost_active = False
       if self.torque_deadzone_boost > 0.0 and abs(gravity_adjusted_future_lateral_accel) < DEADZONE_BOOST_LAT_ACCEL:
@@ -544,8 +551,31 @@ class LatControlTorque(LatControl):
         self.pid.reset()
       freeze_integrator = (steer_limited_by_safety or CS.steeringPressed or
                            CS.vEgo < self.low_speed_reset_threshold or unwind_detected)
-      output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff, freeze_integrator=freeze_integrator)
-      output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)
+      if self.is_honda_accord:
+        accord_ki = float(getattr(starpilot_toggles, "accord_torque_ki", HONDA_ACCORD_TORQUE_KI))
+        if self.pid._k_i[1][0] != accord_ki:
+          self.pid._k_i = [self.pid._k_i[0], [accord_ki] * len(self.pid._k_i[1])]
+      if self.is_honda_accord and getattr(starpilot_toggles, "accord_rate_plant_ff", True):
+        # The Accord's modified EPS is a rate servo (torque -> steering rate), so the lat-accel
+        # feedforward above is replaced by a torque feedforward from the identified plant.  Only
+        # the friction/deadzone-boost part of `ff` is kept (converted to torque as before); P and
+        # I stay in lateral-acceleration space and still go through latAccelFactor.
+        curv_des = setpoint / max(CS.vEgo ** 2, 1.0)
+        angle_des = math.degrees(VM.get_steer_from_curvature(-curv_des, CS.vEgo, params.roll * roll_offset_fade))
+        angle_des_rate = self.accord_angle_des_rate_filter.update((angle_des - self.accord_prev_angle_des) / self.dt)
+        self.accord_prev_angle_des = angle_des
+        # plant FF is in the steering-angle (+left) frame; the controller's torque frame is the
+        # opposite sign (pid_log.output = -output_torque, measurement = -calc_curvature)
+        rate_gain = float(getattr(starpilot_toggles, "accord_ff_rate_gain", HONDA_ACCORD_FF_RATE_GAIN))
+        plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, angle_des_rate, CS.vEgo, rate_gain)
+        friction_torque = self.torque_from_lateral_accel(ff - ff_before_friction, self.torque_params)
+        ff_torque = plant_ff_torque + friction_torque
+        pi_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=0.0, freeze_integrator=freeze_integrator)
+        output_torque = float(np.clip(self.torque_from_lateral_accel(pi_lataccel, self.torque_params) + ff_torque, -self.steer_max, self.steer_max))
+        self.pid.f = self.lateral_accel_from_torque(ff_torque, self.torque_params)  # keep pid_log.f meaningful
+      else:
+        output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff, freeze_integrator=freeze_integrator)
+        output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)
       if bolt_2022_2023_tuned_path_active:
         output_torque *= get_bolt_2022_2023_center_output_scale(setpoint, CS.vEgo)
         low_speed_center_output_limit = get_bolt_2022_2023_low_speed_center_output_limit(setpoint, CS.vEgo)

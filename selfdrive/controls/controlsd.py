@@ -359,10 +359,16 @@ def get_torque_control_params(CP, torque_params, starpilot_toggles, use_live_par
   use_custom_lat_accel = getattr(starpilot_toggles, "use_custom_latAccelFactor", False)
   use_custom_friction = getattr(starpilot_toggles, "use_custom_friction", False)
 
+  # latAccelOffset is the learner's estimate of the lateral-accel bias left over after roll compensation
+  # (device roll misalignment lands here because calibrationd never estimates roll). It has nothing to
+  # do with the LAF/friction values a custom toggle replaces, so keep using it even when the
+  # SteerLatAccel toggle is custom. Before this change a custom LAF silently dropped the offset to 0.
+  keep_learned_offset = getattr(starpilot_toggles, "keep_learned_lat_accel_offset", True)
   if use_live_params:
+    if not use_custom_lat_accel or keep_learned_offset:
+      lat_accel_offset = torque_params.latAccelOffsetFiltered
     if not use_custom_lat_accel:
       lat_accel_factor = torque_params.latAccelFactorFiltered
-      lat_accel_offset = torque_params.latAccelOffsetFiltered
     if not use_custom_friction:
       friction = torque_params.frictionCoefficientFiltered
 
@@ -472,8 +478,9 @@ class Controls:
       sr *= get_bolt_2017_steer_ratio_scale(CS.vEgo)
     elif self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2018_2021:
       sr *= BOLT_2018_2021_STEER_RATIO_TEST_SCALE
-    elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD:
-      # Variable-ratio rack.  The map carries the rack SHAPE; the SteerRatio toggle carries
+    elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and getattr(self.starpilot_toggles, "accord_variable_steer_ratio", True):
+      # Variable-ratio rack (AccordVariableSteerRatio off -> the generic static toggle/learner path above).
+      # The map carries the rack SHAPE; the SteerRatio toggle carries
       # the on-centre LEVEL, so the whole curve slides together and the level can be swept
       # from Galaxy without a code push.  The learner is still ignored for this platform.
       # (Before this commit the map overrode the toggle outright, which silently removed the

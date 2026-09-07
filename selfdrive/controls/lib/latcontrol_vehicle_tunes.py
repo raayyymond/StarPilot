@@ -91,10 +91,24 @@ HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.00
 HONDA_ACCORD_STEER_RATIO_LEVEL_MIN = 0.60   # toggle 9.60
 HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 20.00
 HONDA_ACCORD_TORQUE_KP = 0.8
-HONDA_ACCORD_TORQUE_KI = 0.15
+HONDA_ACCORD_TORQUE_KI = 0.30
 HONDA_ACCORD_TURN_FF_REDUCTION_MAX = 0.30
 HONDA_ACCORD_TURN_FF_ONSET = 0.45
 HONDA_ACCORD_TURN_FF_WIDTH = 0.12
+# Rate-plant feedforward for the Accord's modified EPS (V280+ LKAS rate loop).  Identified on
+# r34/r35/r39/r3a/r3c (2026-09-02..04, 20 Hz grid, engaged hands-off, R 0.95-0.99 at zero lag):
+#     steering wheel rate [deg/s] = G(v) * torque - k(v) * angle        torque in [-1, 1]
+# so openpilot's torque request commands a steering RATE, not a lateral acceleration.  The
+# torque that HOLDS an angle is k*angle/G (0.03-0.06 for 5-25 deg) and the torque that MOVES
+# the wheel is rate/G.  A lat-accel feedforward (setpoint / latAccelFactor) is 3-10x too much
+# torque on this plant; the P term then has to cancel it and the loop settles above command.
+HONDA_ACCORD_EPS_G_BP = [5.0, 12.5, 18.5, 28.5]        # m/s
+HONDA_ACCORD_EPS_G_V = [120.0, 95.0, 85.0, 70.0]       # deg/s per unit torque
+HONDA_ACCORD_EPS_K_BP = [4.0, 8.0, 12.5, 18.5, 28.5]   # m/s
+HONDA_ACCORD_EPS_K_V = [0.17, 0.28, 0.35, 0.45, 0.50]  # 1/s (return-spring: rate per deg of angle)
+HONDA_ACCORD_FF_RATE_GAIN = 0.5    # fraction of the d(angle_des)/dt term; 1.0 over-drives entries on the plant
+HONDA_ACCORD_FF_RATE_RC = 0.10     # s, first-order filter on d(angle_des)/dt
+HONDA_ACCORD_FF_ANGLE_LIMIT_DEG = 400.0
 VOLT_STANDARD_CARS = (
   GM_CAR.CHEVROLET_VOLT,
   GM_CAR.CHEVROLET_VOLT_2019,
@@ -2157,6 +2171,22 @@ def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:
   turn_weight = _sigmoid((abs(desired_lateral_accel) - HONDA_ACCORD_TURN_FF_ONSET) /
                          HONDA_ACCORD_TURN_FF_WIDTH)
   return 1.0 - (HONDA_ACCORD_TURN_FF_REDUCTION_MAX * turn_weight)
+
+
+def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: float, v_ego: float,
+                                   rate_gain: float = HONDA_ACCORD_FF_RATE_GAIN) -> float:
+  """Feedforward TORQUE (units of the [-1, 1] output) for the Accord's rate-servo EPS.
+
+  hold term  k(v) * angle / G(v)   -- the torque that balances the return spring at angle_des
+  move term  gain * d(angle)/dt / G(v) -- the torque that drives the wheel toward angle_des
+  Both are in the steering-angle sign frame (positive = left); the caller converts to the
+  controller's internal frame.  The P/I terms stay in lateral-acceleration space and are
+  unchanged, so the SteerLatAccel toggle scales only P/I once this feedforward is in use.
+  """
+  angle_des_deg = float(np.clip(angle_des_deg, -HONDA_ACCORD_FF_ANGLE_LIMIT_DEG, HONDA_ACCORD_FF_ANGLE_LIMIT_DEG))
+  gain = float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V))
+  spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V))
+  return (spring * angle_des_deg + rate_gain * angle_des_rate_dps) / gain
 
 
 def get_bolt_2017_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> float:

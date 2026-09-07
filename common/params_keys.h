@@ -364,6 +364,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NAPRadarOffset", {PERSISTENT, FLOAT, "0.0", "0.0", 0, SETTINGS_SIMPLE}},
     {"ForceAutoTune", {PERSISTENT, BOOL, "0", "0", 3}},
     {"ForceAutoTuneOff", {PERSISTENT, BOOL, "1", "0", 2}},
+    // Custom-patch switches (Galaxy "Custom Patches" section). stock_value = pre-patch behaviour.
+    {"KeepLearnedLatAccelOffset", {PERSISTENT, BOOL, "1", "1", 2, SETTINGS_SIMPLE}},
+    {"AccordVariableSteerRatio", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    {"AccordRatePlantFF", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    {"AccordFFRateGain", {PERSISTENT, FLOAT, "0.5", "0.5", 2, SETTINGS_SIMPLE}},
+    {"AccordTorqueKi", {PERSISTENT, FLOAT, "0.30", "0.15", 2, SETTINGS_SIMPLE}},
+    {"AccordTurnFFTaper", {PERSISTENT, BOOL, "0", "1", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

@@ -102,6 +102,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_genesis_gv70_high_speed_error_scale,
   get_genesis_gv70_unwind_ff_scale,
   get_honda_accord_ff_scale,
+  get_honda_accord_rate_plant_ff,
   get_elantra_non_scc_ff_scale,
   get_honda_accord_steer_ratio,
   get_palisade_ff_scale,
@@ -1937,6 +1938,34 @@ class TestLatControl:
     assert get_honda_accord_steer_ratio(-180.0) == pytest.approx(get_honda_accord_steer_ratio(180.0))
     # np.interp holds the endpoints, so the ratio stays bounded past the last knot
     assert get_honda_accord_steer_ratio(1e4) == pytest.approx(HONDA_ACCORD_STEER_RATIO_V[-1])
+
+  def test_honda_accord_rate_plant_ff_hold_and_move_terms(self):
+    # hold torque balances the return spring at the 12.5 m/s knots: k=0.35, G=95 -> 20 deg needs 0.074
+    hold = get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5)
+    assert hold == pytest.approx(0.35 * 20.0 / 95.0, rel=1e-6)
+    assert get_honda_accord_rate_plant_ff(-20.0, 0.0, 12.5) == pytest.approx(-hold)
+    # moving the wheel adds torque in the direction of the rate
+    assert get_honda_accord_rate_plant_ff(20.0, 30.0, 12.5) > hold
+    assert get_honda_accord_rate_plant_ff(20.0, -30.0, 12.5) < hold
+    # the spring stiffens and the servo gain drops with speed, so the hold torque for the same angle rises with speed
+    assert get_honda_accord_rate_plant_ff(20.0, 0.0, 25.0) > hold
+    # angle is clipped so a runaway setpoint cannot demand unbounded torque
+    assert get_honda_accord_rate_plant_ff(1e6, 0.0, 12.5) == pytest.approx(get_honda_accord_rate_plant_ff(400.0, 0.0, 12.5))
+
+  def test_honda_accord_torque_controller_uses_rate_plant_feedforward(self):
+    controller, VM, CS, params, toggles = self._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+    CS.vEgo = 15.0
+    CS.steeringAngleDeg = 0.0
+    desired_curvature = 0.004  # ~0.9 m/s^2 at 15 m/s, in the controller's (negative-left) frame
+    for _ in range(round(1.0 / DT_CTRL)):
+      output_torque, _, lac_log = controller.update(True, CS, VM, params, False, desired_curvature, False, 0.2, None, None, toggles)
+    assert lac_log.active
+    # feedforward carries the sign of the setpoint and is a torque-derived quantity, not setpoint/LAF
+    assert lac_log.f * lac_log.desiredLateralAccel > 0.0
+    assert abs(lac_log.f) < abs(lac_log.desiredLateralAccel)
+    # output is finite, bounded and points the same way as the setpoint
+    assert abs(output_torque) <= 1.0
+    assert output_torque * lac_log.desiredLateralAccel > 0.0
 
   def test_honda_accord_turn_feedforward_taper(self):
     assert get_honda_accord_ff_scale(0.0) > get_honda_accord_ff_scale(0.8)

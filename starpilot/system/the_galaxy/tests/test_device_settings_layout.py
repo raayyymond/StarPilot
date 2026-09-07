@@ -407,3 +407,31 @@ def test_pip_preview_is_under_driving_screen_widgets_and_configured_only_in_gala
     REPO_ROOT / "selfdrive/ui/layouts/settings/starpilot/appearance.py",
   )
   assert all("PIPPreview" not in path.read_text(encoding="utf-8") for path in physical_settings)
+
+
+CUSTOM_PATCH_KEYS = {
+  "KeepLearnedLatAccelOffset", "AccordVariableSteerRatio", "AccordRatePlantFF",
+  "AccordFFRateGain", "AccordTorqueKi", "AccordTurnFFTaper",
+}
+
+
+def test_galaxy_layout_custom_patches_section_tracks_every_patch_switch():
+  layout = _layout()
+  sections = _params_by_section(layout)
+  assert "Custom Patches" in sections
+  patches = sections["Custom Patches"]
+  assert set(patches) == CUSTOM_PATCH_KEYS
+  for key, param in patches.items():
+    # every switch is declared as a param (so Galaxy can read/write it) and is always visible
+    assert _declared_default(key) != ""
+    assert param["settings_tier"] == "simple"
+    if key.startswith("Accord"):
+      assert param.get("vehicle_makes") == ["Honda"]
+  # the switches live in exactly one section
+  all_params = [param["key"] for section in layout for param in section.get("params", [])]
+  for key in CUSTOM_PATCH_KEYS:
+    assert all_params.count(key) == 1
+  # defaults are the patched behaviour; stock values (safe mode) are the pre-patch behaviour
+  assert _declared_default("KeepLearnedLatAccelOffset") == "1"
+  assert _declared_default("AccordRatePlantFF") == "1"
+  assert _declared_default("AccordTurnFFTaper") == "0"

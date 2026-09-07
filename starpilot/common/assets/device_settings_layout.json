@@ -4813,6 +4813,87 @@
     ]
   },
   {
+    "name": "Custom Patches",
+    "icon": "bi-wrench-adjustable",
+    "params": [
+      {
+        "key": "KeepLearnedLatAccelOffset",
+        "label": "Keep Learned Lateral Accel Offset",
+        "description": "Keep applying torqued's learned latAccelOffset (the lateral-accel bias left after roll compensation, e.g. from device roll misalignment) even when the Lateral Acceleration toggle is custom. The fork used to drop it to 0 whenever SteerLatAccel was set, which produced the consistent left-lane hugging on the Accord.",
+        "picker_description": "Keeps the learned lateral-accel offset with a custom LAF.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordVariableSteerRatio",
+        "label": "Accord: Variable Steer Ratio Map",
+        "description": "Use the measured variable-ratio rack map (16.0 on centre, quickening past 48 deg) for the steering-angle-to-curvature measurement; the Steer Ratio toggle then sets the map level. Off: the plain Steer Ratio toggle / learner path like every other car.",
+        "picker_description": "Measured Accord rack map instead of a single ratio.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordRatePlantFF",
+        "label": "Accord: Rate-Plant Feedforward",
+        "description": "Replace the lateral-accel feedforward (setpoint / LAF) with a torque feedforward from the identified EPS rate-servo plant: hold torque k(v)*angle/G(v) plus a rate term. P/I stay in lateral-accel space, so SteerLatAccel then scales only P/I (6.0 recommended). Off: stock torque-controller feedforward.",
+        "picker_description": "Feedforward built for the modified EPS rate servo.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordFFRateGain",
+        "label": "Accord: FF Rate Term Gain",
+        "description": "Fraction of d(angle_des)/dt fed forward by the rate-plant feedforward. 0.5 fitted best in simulation; raise toward 0.8 if turn-in is late, lower toward 0.3 if it overshoots.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 1.5,
+        "step": 0.05,
+        "precision": 2,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordTorqueKi",
+        "label": "Accord: Torque Ki",
+        "description": "Integral gain of the Accord torque controller (lat-accel space, divided by LAF). Fork constant was 0.15; 0.30 removes the last 5-10 % steady over-delivery in simulation.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.05,
+        "max": 1.0,
+        "step": 0.01,
+        "precision": 2,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordTurnFFTaper",
+        "label": "Accord: Sharp-Turn FF Taper",
+        "description": "The older 30 % feedforward cut above 0.45 m/s^2. Redundant with the rate-plant feedforward and off by default; only meaningful with the stock feedforward.",
+        "picker_description": "Legacy 30 % feedforward taper in sharp turns.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      }
+    ]
+  },
+  {
     "name": "Developer",
     "icon": "bi-exclamation-triangle",
     "params": [
