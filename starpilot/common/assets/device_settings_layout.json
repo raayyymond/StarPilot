@@ -67,8 +67,8 @@
       },
       {
         "key": "SteerKP",
-        "label": "Kp Factor",
-        "description": "Kp Factor",
+        "label": "Kp Factor (torque controller)",
+        "description": "Proportional gain of the torque lateral controller, in lateral-accel space (the torque it produces is this divided by Lateral Acceleration). Applies to every torque-controlled car, including the Accord; the Accord's matching Ki is \"Accord: Torque Ki\" under Custom Patches. Not related to the Honda PID scales in Developer, which only touch Honda PID-lateral cars.",
         "data_type": "float",
         "ui_type": "numeric",
         "step": 0.01,
@@ -4866,8 +4866,8 @@
       },
       {
         "key": "AccordTorqueKi",
-        "label": "Accord: Torque Ki",
-        "description": "Integral gain of the Accord torque controller (lat-accel space, divided by LAF). Fork constant was 0.15; 0.30 removes the last 5-10 % steady over-delivery in simulation.",
+        "label": "Accord: Torque Ki (pairs with Kp Factor)",
+        "description": "Integral gain of the Accord's torque lateral controller, in lateral-accel space like \"Kp Factor (torque controller)\" in Lateral (Steering); both are divided by Lateral Acceleration to become torque. Fork constant was 0.15; 0.30 removes the last 5-10 % steady over-delivery in simulation. Unrelated to the Honda PID scales in Developer.",
         "data_type": "float",
         "ui_type": "numeric",
         "min": 0.05,
@@ -5163,8 +5163,8 @@
       },
       {
         "key": "HondaLateralPidKpScale",
-        "label": "Honda PID Kp Scale",
-        "description": "Scale the active Honda lateralTuning.pid.kpV values from openDBC. Applies live to Honda PID lateral only.",
+        "label": "Honda PID-Lateral Kp Scale (not torque control)",
+        "description": "Scales the openDBC lateralTuning.pid.kpV table for Hondas that run the PID (angle-error) lateral controller, e.g. older Nidec cars. Inert on torque-controlled cars such as the Accord: use \"Kp Factor (torque controller)\" and \"Accord: Torque Ki\" there.",
         "data_type": "float",
         "ui_type": "numeric",
         "min": 0.1,
@@ -5175,8 +5175,8 @@
       },
       {
         "key": "HondaLateralPidKiScale",
-        "label": "Honda PID Ki Scale",
-        "description": "Scale the active Honda lateralTuning.pid.kiV values from openDBC. Applies live to Honda PID lateral only.",
+        "label": "Honda PID-Lateral Ki Scale (not torque control)",
+        "description": "Scales the openDBC lateralTuning.pid.kiV table for Hondas that run the PID (angle-error) lateral controller. Inert on torque-controlled cars such as the Accord: use \"Accord: Torque Ki\" under Custom Patches there.",
         "data_type": "float",
         "ui_type": "numeric",
         "min": 0.1,

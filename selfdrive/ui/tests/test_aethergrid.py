@@ -171,6 +171,8 @@ def _install_panel_stubs(aethergrid):
   starpilot_variables_mod = types.ModuleType("openpilot.starpilot.common.starpilot_variables")
   starpilot_variables_mod.update_starpilot_toggles = lambda: None
   starpilot_variables_mod.LAT_ACCEL_FACTOR_MAX_MULT = 10.0
+  starpilot_variables_mod.STEER_KP_MAX_MULT = 5.0
+  starpilot_variables_mod.STEER_KP_MIN = 0.05
 
   _register_modules({
     SECTIONED_PANEL_MODULE_NAME: sectioned_mod,

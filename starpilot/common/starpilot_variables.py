@@ -436,6 +436,10 @@ def migrate_ford_lkas_button_default(car_make: str, params: Params | None = None
 # latAccelFactor, so a larger value commands LESS torque. The 0.5x min guard, which
 # protects the dangerous direction, is unchanged.
 LAT_ACCEL_FACTOR_MAX_MULT = 10.0
+# SteerKP toggle ceiling as a multiple of the platform Kp. The old 1.5x clamp (0.9 on the Accord) sat
+# below what the identified rate-servo plant tolerates; the floor stays low but non-zero.
+STEER_KP_MIN = 0.05
+STEER_KP_MAX_MULT = 5.0
 
 class StarPilotVariables:
   def __init__(self):
@@ -771,7 +775,7 @@ class StarPilotVariables:
     toggle.use_custom_steerActuatorDelay = advanced_lateral_tuning and not toggle.use_auto_steer_delay
     toggle.friction = self.get_value("SteerFriction", cast=float, condition=advanced_lateral_tuning, default=friction, min=0, max=1)
     toggle.use_custom_friction = bool(round(toggle.friction, 2) != round(friction, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off
-    toggle.steerKp = [[0], [self.get_value("SteerKP", cast=float, condition=advanced_lateral_tuning and is_torque_car and not is_angle_car, default=steerKp, min=steerKp * 0.5, max=steerKp * 1.5)]]
+    toggle.steerKp = [[0], [self.get_value("SteerKP", cast=float, condition=advanced_lateral_tuning and is_torque_car and not is_angle_car, default=steerKp, min=STEER_KP_MIN, max=steerKp * STEER_KP_MAX_MULT)]]
     toggle.latAccelFactor = self.get_value("SteerLatAccel", cast=float, condition=advanced_lateral_tuning, default=latAccelFactor, min=latAccelFactor * 0.5, max=latAccelFactor * LAT_ACCEL_FACTOR_MAX_MULT)
     toggle.use_custom_latAccelFactor = bool(round(toggle.latAccelFactor, 2) != round(latAccelFactor, 2)) and is_torque_car and not toggle.force_auto_tune or toggle.force_auto_tune_off
     toggle.steerRatio = self.get_value("SteerRatio", cast=float, condition=advanced_lateral_tuning, default=steerRatio, min=steerRatio * 0.5, max=steerRatio * 1.5)

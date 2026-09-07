@@ -531,8 +531,10 @@ function numericBounds(param) {
   }
 
   if (param.key === "SteerKP") {
+    // Must track starpilot_variables.STEER_KP_MIN / STEER_KP_MAX_MULT (0.05 / 5.0), the clamp the
+    // toggle is read back through. Tuning is never limited by the slider: widen both together.
     const base = toFinite(state.values.SteerKPStock) || toFinite(state.values.SteerKP) || 0.6
-    return { min: +(base * 0.5).toFixed(2), max: +(base * 1.5).toFixed(2), step: 0.01 }
+    return { min: 0.05, max: +(base * 5.0).toFixed(2), step: 0.01 }
   }
   if (param.key === "SteerLatAccel") {
     // Ceiling must track starpilot_variables.LAT_ACCEL_FACTOR_MAX_MULT (10.0), the clamp the

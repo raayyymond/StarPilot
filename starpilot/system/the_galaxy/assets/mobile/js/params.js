@@ -104,8 +104,9 @@ export function numericBounds(param, values) {
     return { min: 25, max: 200, step: 1 }
   }
   if (param.key === "SteerKP") {
+    // Tracks starpilot_variables.STEER_KP_MIN / STEER_KP_MAX_MULT (0.05 / 5.0).
     const base = toFinite(values?.SteerKPStock) || toFinite(values?.SteerKP) || 0.6
-    return { min: +(base * 0.5).toFixed(2), max: +(base * 1.5).toFixed(2), step: 0.01 }
+    return { min: 0.05, max: +(base * 5.0).toFixed(2), step: 0.01 }
   }
   if (param.key === "SteerLatAccel") {
     // Ceiling must track starpilot_variables.LAT_ACCEL_FACTOR_MAX_MULT (10.0), the clamp the
