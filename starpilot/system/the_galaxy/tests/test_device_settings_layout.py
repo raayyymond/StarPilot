@@ -412,6 +412,7 @@ def test_pip_preview_is_under_driving_screen_widgets_and_configured_only_in_gala
 CUSTOM_PATCH_KEYS = {
   "KeepLearnedLatAccelOffset", "AccordVariableSteerRatio", "AccordRatePlantFF",
   "AccordFFRateGain", "AccordTorqueKi", "AccordTurnFFTaper",
+  "AccordEpsGainScale", "AccordEpsSpringScale",
 }
 
 

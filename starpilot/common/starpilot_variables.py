@@ -778,13 +778,18 @@ class StarPilotVariables:
     toggle.use_custom_steerRatio = bool(round(toggle.steerRatio, 2) != round(steerRatio, 2)) and not toggle.force_auto_tune or toggle.force_auto_tune_off
     # Custom-patch switches (see the Galaxy "Custom Patches" section). Each one gates a fork patch so it
     # can be turned off on the road without a code push; defaults are the patched behaviour.
-    toggle.keep_learned_lat_accel_offset = self.get_value("KeepLearnedLatAccelOffset", condition=is_torque_car and not is_angle_car, default=True)
+    # A key is only read if the compiled params library (common/params_pyx.so, rebuilt by the "build"
+    # commits) knows it; on an older .so the switch silently keeps its default instead of raising.
+    known = self.default_values.__contains__
+    toggle.keep_learned_lat_accel_offset = self.get_value("KeepLearnedLatAccelOffset", condition=is_torque_car and not is_angle_car and known("KeepLearnedLatAccelOffset"), default=True)
     is_honda_accord = str(getattr(CP, "carFingerprint", "")) == "HONDA_ACCORD"
-    toggle.accord_variable_steer_ratio = self.get_value("AccordVariableSteerRatio", condition=is_honda_accord, default=True)
-    toggle.accord_rate_plant_ff = self.get_value("AccordRatePlantFF", condition=is_honda_accord, default=True)
-    toggle.accord_ff_rate_gain = self.get_value("AccordFFRateGain", cast=float, condition=is_honda_accord, default=0.5, min=0.0, max=1.5)
-    toggle.accord_torque_ki = self.get_value("AccordTorqueKi", cast=float, condition=is_honda_accord, default=0.30, min=0.05, max=1.0)
-    toggle.accord_turn_ff_taper = self.get_value("AccordTurnFFTaper", condition=is_honda_accord, default=False)
+    toggle.accord_variable_steer_ratio = self.get_value("AccordVariableSteerRatio", condition=is_honda_accord and known("AccordVariableSteerRatio"), default=True)
+    toggle.accord_rate_plant_ff = self.get_value("AccordRatePlantFF", condition=is_honda_accord and known("AccordRatePlantFF"), default=True)
+    toggle.accord_ff_rate_gain = self.get_value("AccordFFRateGain", cast=float, condition=is_honda_accord and known("AccordFFRateGain"), default=0.5, min=0.0, max=1.5)
+    toggle.accord_torque_ki = self.get_value("AccordTorqueKi", cast=float, condition=is_honda_accord and known("AccordTorqueKi"), default=0.30, min=0.05, max=1.0)
+    toggle.accord_turn_ff_taper = self.get_value("AccordTurnFFTaper", condition=is_honda_accord and known("AccordTurnFFTaper"), default=False)
+    toggle.accord_eps_gain_scale = self.get_value("AccordEpsGainScale", cast=float, condition=is_honda_accord and known("AccordEpsGainScale"), default=1.0, min=0.5, max=2.0)
+    toggle.accord_eps_spring_scale = self.get_value("AccordEpsSpringScale", cast=float, condition=is_honda_accord and known("AccordEpsSpringScale"), default=1.0, min=0.0, max=2.0)
     honda_pid_lateral = toggle.car_make == "honda" and CP.lateralTuning.which() == "pid" and not is_angle_car
     toggle.honda_lateral_pid_kp_scale = self.get_value("HondaLateralPidKpScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
     toggle.honda_lateral_pid_ki_scale = self.get_value("HondaLateralPidKiScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)

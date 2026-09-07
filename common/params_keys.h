@@ -371,6 +371,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AccordFFRateGain", {PERSISTENT, FLOAT, "0.5", "0.5", 2, SETTINGS_SIMPLE}},
     {"AccordTorqueKi", {PERSISTENT, FLOAT, "0.30", "0.15", 2, SETTINGS_SIMPLE}},
     {"AccordTurnFFTaper", {PERSISTENT, BOOL, "0", "1", 2, SETTINGS_SIMPLE}},
+    {"AccordEpsGainScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
+    {"AccordEpsSpringScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

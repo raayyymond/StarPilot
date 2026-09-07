@@ -567,7 +567,9 @@ class LatControlTorque(LatControl):
         # plant FF is in the steering-angle (+left) frame; the controller's torque frame is the
         # opposite sign (pid_log.output = -output_torque, measurement = -calc_curvature)
         rate_gain = float(getattr(starpilot_toggles, "accord_ff_rate_gain", HONDA_ACCORD_FF_RATE_GAIN))
-        plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, angle_des_rate, CS.vEgo, rate_gain)
+        gain_scale = float(getattr(starpilot_toggles, "accord_eps_gain_scale", 1.0))
+        spring_scale = float(getattr(starpilot_toggles, "accord_eps_spring_scale", 1.0))
+        plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, angle_des_rate, CS.vEgo, rate_gain, gain_scale, spring_scale)
         friction_torque = self.torque_from_lateral_accel(ff - ff_before_friction, self.torque_params)
         ff_torque = plant_ff_torque + friction_torque
         pi_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=0.0, freeze_integrator=freeze_integrator)

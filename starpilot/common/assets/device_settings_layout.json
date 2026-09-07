@@ -4890,6 +4890,36 @@
           "Honda"
         ],
         "settings_tier": "simple"
+      },
+      {
+        "key": "AccordEpsGainScale",
+        "label": "Accord: EPS Gain Scale",
+        "description": "Multiplies the identified rate-servo gain G(v) (deg/s of steering per unit torque) used by the rate-plant feedforward. 1.0 = the V280-V282 fit. After an EPS firmware change, raise it if the feedforward turns in too hard, lower it if turn-in is weak, until the plant is re-identified.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.5,
+        "max": 2.0,
+        "step": 0.05,
+        "precision": 2,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordEpsSpringScale",
+        "label": "Accord: EPS Spring Scale",
+        "description": "Multiplies the identified return-spring term k(v) used for the hold torque in the rate-plant feedforward. 1.0 = the V280-V282 fit; 0 = no hold torque (V283-like velocity servo). A steady integrator term in a held turn means this is off.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 2.0,
+        "step": 0.05,
+        "precision": 2,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
       }
     ]
   },

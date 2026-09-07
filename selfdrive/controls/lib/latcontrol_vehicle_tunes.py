@@ -2174,7 +2174,8 @@ def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:
 
 
 def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: float, v_ego: float,
-                                   rate_gain: float = HONDA_ACCORD_FF_RATE_GAIN) -> float:
+                                   rate_gain: float = HONDA_ACCORD_FF_RATE_GAIN,
+                                   gain_scale: float = 1.0, spring_scale: float = 1.0) -> float:
   """Feedforward TORQUE (units of the [-1, 1] output) for the Accord's rate-servo EPS.
 
   hold term  k(v) * angle / G(v)   -- the torque that balances the return spring at angle_des
@@ -2184,8 +2185,10 @@ def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: flo
   unchanged, so the SteerLatAccel toggle scales only P/I once this feedforward is in use.
   """
   angle_des_deg = float(np.clip(angle_des_deg, -HONDA_ACCORD_FF_ANGLE_LIMIT_DEG, HONDA_ACCORD_FF_ANGLE_LIMIT_DEG))
-  gain = float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V))
-  spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V))
+  # gain_scale / spring_scale (AccordEpsGainScale / AccordEpsSpringScale) let the tables be corrected
+  # from Galaxy after an EPS firmware change, until the plant is re-identified and the tables updated.
+  gain = float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V)) * max(float(gain_scale), 0.1)
+  spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V)) * float(spring_scale)
   return (spring * angle_des_deg + rate_gain * angle_des_rate_dps) / gain
 
 
