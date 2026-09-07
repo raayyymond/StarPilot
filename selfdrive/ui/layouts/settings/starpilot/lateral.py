@@ -6,7 +6,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import DialogResult
 
-from openpilot.starpilot.common.starpilot_variables import LAT_ACCEL_FACTOR_MAX_MULT
+from openpilot.starpilot.common.starpilot_variables import LAT_ACCEL_FACTOR_MAX_MULT, STEER_KP_MAX_MULT, STEER_KP_MIN
 from openpilot.selfdrive.ui.layouts.settings.starpilot.panel import _SettingsPage
 from openpilot.selfdrive.ui.layouts.settings.starpilot.aethergrid import (
   DEFAULT_PANEL_STYLE,
@@ -303,7 +303,7 @@ class StarPilotLateralLayout(_SettingsPage):
         "SteerKP", "value", tr_noop("Kp Factor"),
         subtitle=tr_noop("How strongly openpilot corrects lateral position."),
         get_value=lambda: f"{p.get_float('SteerKP'):.2f}",
-        on_click=lambda: self._show_slider("SteerKP", max(0.01, cs.steerKp) * 0.5, max(0.01, cs.steerKp) * 1.5, step=0.01, value_type="float"),
+        on_click=lambda: self._show_slider("SteerKP", STEER_KP_MIN, max(0.01, cs.steerKp) * STEER_KP_MAX_MULT, step=0.01, value_type="float"),
         visible=lambda: alt_on() and cs.steerKp != 0 and cs.isTorqueCar and not cs.isAngleCar,
       ),
       SettingRow(
