@@ -73,23 +73,53 @@ BOLT_2017_CARS = (
   GM_CAR.CHEVROLET_BOLT_CC_2017,
 )
 BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
-# Measured on this car: 427 min over 47 routes, ratio derived four independent ways
-# (yaw+rear-axle speed, yaw+front, rear differential without IMU, wheel speeds alone),
-# left and right measured separately -- symmetric to within 1.5%. Flat at ~16:1 out to
-# ~48 deg, then quickening monotonically to ~11.1:1 at lock. Speed control passed, so
-# this is rack geometry, not a speed-dependent artefact: index on |angle| only.
-# The old single 14.0/16.33 scale was this curve sampled at ~95 deg and applied at every
-# angle: too quick on centre, too slow at lock.
-# Breakpoints are |steering wheel angle| in degrees off the learned centre; values are the
-# measured ratio there. np.interp holds the ends, so the ratio is bounded on [12.06, 16.00].
-HONDA_ACCORD_STEER_RATIO_ANGLE_BP = [0.0, 48.0, 60.0, 76.0, 95.0, 121.0, 191.0, 236.0, 303.0, 380.0]  # deg
-HONDA_ACCORD_STEER_RATIO_V = [16.00, 16.00, 16.00, 15.83, 15.23, 14.99, 14.72, 13.96, 12.72, 12.06]  # :1
+# Re-measured 2026-09-11 over 82 routes / 894 segments / 14.2 h, on an instrument that contains no
+# steering ratio at all:  sR = curvature_factor(v)*sa / (-yaw_cal/v - roll_comp), fitted with a
+# PER-ROUTE FREE INTERCEPT and one common slope, so liveParameters.angleOffsetDeg never enters and
+# no single route has to identify the slope alone.  Kinematic -- wheel angle to yaw rate -- so
+# engaged and manual driving both count and the result is independent of the EPS firmware.  Checked:
+# a stock-firmware 98%-manual route reads 15.82 at |sa| 35-400 deg where a V289r1 83%-engaged route
+# reads 15.88.  Gates: calibrated, v > 4 m/s, |steeringRateDeg| < 20.
+#
+# The previous map was too FLAT.  The rack falls 2.16 :1 between 20-45 and 130-165 deg (95% CI
+# [2.09, 2.22], systematic +/-0.12); the old curve fell 1.15 over the same span -- it quickened at
+# 53% of the true rate.  Against the served curve it ran ~0.57 too LOW below 36 deg and up to +0.62
+# (+4.3%) too HIGH at 165-210 deg.  Too high a served ratio makes calc_curvature UNDER-read, which
+# the loop answers by OVER-delivering: the reported oversteer on roundabouts and 90 deg+ corners,
+# absent on the motorway because the sign flips at ~50 deg.
+#
+# Values are ABSOLUTE served ratios (V[0] == NOMINAL), so the array reads as real ratios and the
+# SteerRatio toggle means exactly "the on-centre ratio": set it to 16.89 for scale 1.0000.
+# Three segments are NOT measurements:
+#   0-23 deg    pinned by convention.  Below ~20 deg the estimator is NOT IDENTIFIED -- three-
+#               estimator bracket width 1.55/0.55/0.25, denominator SNR 2.5 -- and every split that
+#               disagreed anywhere (driver torque, engaged/manual, firmware arm) disagreed only
+#               there.  The offset is identified at low angle, the slope at high angle, neither at both.
+#   31-61 deg   interpolated across the 36-45 and 45-55 deg bins, which FAILED the lag-plateau test
+#               (monotone, sweep variation 1.7 and 0.5 against a 0.30 pass threshold) and were dropped.
+#   236+ deg    FROZEN at the old curve's served values (13.96/12.72/12.06 rescaled by 16.33/16.00;
+#               unchanged to <=0.002 at 236/260/303/340/380/450).  1306 s of data exists above
+#               303 deg but its median speed is 1.41 m/s -- parking -- and 0.1 s survives v > 4.  The
+#               estimator divides yaw by speed, so that end is structurally out of reach.  The
+#               227->236 step (14.09 -> 14.25, +0.16) is a deliberate discontinuity where measurement
+#               meets extrapolation; smoothing it would mean silently editing a frozen knot.
+# This is a COMPENSATION curve, not physical rack geometry: calc_curvature uses k = d/L rather than
+# tan(d)/L, so a perfectly constant rack would read 1.4% low at 200 deg and 3.3% at 300 deg.  That
+# cancels against the consumer (the map feeds the same function) so it is excluded from the band --
+# but do not cite these numbers as the rack's true ratio.
+# Bands: SHAPE +/-0.12, LEVEL +/-0.57.  The level term is the 4% gyro-vs-wheel-speed yaw-scale
+# disagreement, which asymptotes flat from 50 deg up and is therefore multiplicative and constant:
+# it moves both ends together and cancels in the shape.  A reshape consumes the shape.
+HONDA_ACCORD_STEER_RATIO_ANGLE_BP = [0.0, 23.0, 31.0, 61.0, 76.0, 95.0, 116.0, 151.0,
+                                     178.0, 227.0, 236.0, 303.0, 380.0]  # deg
+HONDA_ACCORD_STEER_RATIO_V = [16.89, 16.89, 16.89, 16.26, 15.97, 15.46, 15.02, 14.67,
+                              14.45, 14.09, 14.25, 12.98, 12.31]  # :1
 # The map above is the rack SHAPE, normalised so that on-centre reads NOMINAL.  The SteerRatio
 # toggle sets the LEVEL: sr = shape * (toggle / NOMINAL), so the whole curve slides together and
-# the geometry is preserved.  Measured neutral point is ~14.3 (see get_honda_accord_steer_ratio).
-HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.00
-HONDA_ACCORD_STEER_RATIO_LEVEL_MIN = 0.60   # toggle 9.60
-HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 20.00
+# the geometry is preserved.  Set the toggle to 16.89 to serve the measured curve unscaled.
+HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.89
+HONDA_ACCORD_STEER_RATIO_LEVEL_MIN = 0.60   # toggle 10.13
+HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 21.11
 # Kp for the Accord torque controller is NOT a constant here: controlsd overwrites
 # LatControlTorque.pid._k_p every frame with the SteerKP toggle (a flat [[0], [SteerKP]]), so a
 # construction-time override would be dead code.  Ki is applied at construction and then
@@ -2165,16 +2195,24 @@ def get_honda_accord_steer_ratio(steer_angle_deg: float, level: float | None = N
   curve by level / NOMINAL, so the rack geometry measured off the car is preserved and
   only the calibration level moves.  None (or NOMINAL) leaves the map untouched.
 
-  sR sits in the MEASUREMENT path -- VehicleModel.calc_curvature -- so a lower level makes
-  the controller read more curvature than it has, and the closed loop settles below its
-  command.  Unlike a feedforward trim this is not undone by the integrator, because the
-  integrator drives the (biased) error to zero.  Measured on r39/r3a/r3c (V282, n=38 curves)
-  the steady-state delivered/desired lateral accel is 1.116 [1.035, 1.164] by the yaw-rate
-  instrument, i.e. ~11.6 % over-delivery with no significant dependence on command amplitude
-  (rho=0.17, p=0.28), speed (p=0.59) or angle (p=0.71).  A FLAT defect wants a FLAT fix:
-  neutral is level = 16.00 / 1.116 = 14.3.  The pose instrument reads 1.012 on the same
-  curves and does not agree; the operator's repeated on-road report of oversteer breaks the
-  tie toward the yaw-rate instrument.
+  sR sits in the MEASUREMENT path -- VehicleModel.calc_curvature -- so a HIGHER level makes the
+  controller read LESS curvature than it has, and the closed loop settles ABOVE its command.
+  Unlike a feedforward trim this is not undone by the integrator, because the integrator drives
+  the (biased) error to zero: the loop converges perfectly onto the wrong road curvature while
+  pid_log.error still reads 0.  On this fork sR enters a SECOND time -- the rate-plant feedforward
+  builds angle_des through it -- so a high level asks for more angle AND reads back less curvature.
+  Both push the same way, and neither produces an error the controller can see.
+
+  🛑 SUPERSEDED 2026-09-11: the old "a FLAT defect wants a FLAT fix, neutral is 16.00/1.116 = 14.3"
+  derivation is WITHDRAWN.  It rested on r39/r3a/r3c (n=38 curves) and on the claim that the
+  over-delivery was angle-independent (p=0.71).  Re-measured over 82 routes with a per-route free
+  intercept, the defect is NOT flat: the served curve ran ~0.57 too LOW below 36 deg and up to
+  +0.62 too HIGH at 165-210 deg, with the sign flipping at ~50 deg.  A flat level change would have
+  traded the corner for the straight.  The fix was a RESHAPE of the knots above, not a level move;
+  see the comment on HONDA_ACCORD_STEER_RATIO_V for the measurement, the bands and the three
+  segments that are conventions rather than data.  The level lever remains available and is now
+  honestly bounded: LEVEL +/-0.57 (the gyro-vs-wheel-speed yaw-scale term, multiplicative and
+  constant), against SHAPE +/-0.12.
   """
   ratio = float(np.interp(abs(steer_angle_deg), HONDA_ACCORD_STEER_RATIO_ANGLE_BP, HONDA_ACCORD_STEER_RATIO_V))
   if level is not None:

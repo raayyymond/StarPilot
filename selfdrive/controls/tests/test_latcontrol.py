@@ -45,6 +45,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   PRIUS_STANDARD_FRICTION_JERK_DEADZONE_MAX,
   KIA_FORTE_BASE_LAT_ACCEL_FACTOR_MULT,
   HONDA_ACCORD_STEER_RATIO_V,
+  HONDA_ACCORD_STEER_RATIO_NOMINAL,
   HONDA_ACCORD_TORQUE_KI,
   HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP,
   HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V,
@@ -1936,12 +1937,33 @@ class TestLatControl:
   def test_honda_accord_steer_ratio_is_variable_and_symmetric(self):
     centre = get_honda_accord_steer_ratio(0.0)
     assert centre == pytest.approx(HONDA_ACCORD_STEER_RATIO_V[0])
-    # flat across the on-centre band, then quickening toward lock, identically both sides
-    assert get_honda_accord_steer_ratio(48.0) == pytest.approx(centre)
-    assert get_honda_accord_steer_ratio(180.0) < centre
+    # flat only across the pinned on-centre band (0-31 deg), then quickening toward lock.
+    # 🛑 the flat band used to run to 48 deg; the 2026-09-11 re-measurement over 82 routes found the
+    # rack already quickening by 31 deg, and that shortening is the point of the reshape -- serving
+    # a flat ratio out to 48 deg is what over-delivered on 90 deg+ corners.
+    assert get_honda_accord_steer_ratio(31.0) == pytest.approx(centre)
+    assert get_honda_accord_steer_ratio(48.0) < centre
+    assert get_honda_accord_steer_ratio(180.0) < get_honda_accord_steer_ratio(48.0)
     assert get_honda_accord_steer_ratio(-180.0) == pytest.approx(get_honda_accord_steer_ratio(180.0))
     # np.interp holds the endpoints, so the ratio stays bounded past the last knot
     assert get_honda_accord_steer_ratio(1e4) == pytest.approx(HONDA_ACCORD_STEER_RATIO_V[-1])
+
+  def test_honda_accord_steer_ratio_level_is_the_on_centre_ratio(self):
+    # V[0] == NOMINAL, so the toggle reads as an absolute on-centre ratio and scale 1.0 sits
+    # mid-bracket. If a future edit rescales the map without moving NOMINAL, this fails.
+    assert HONDA_ACCORD_STEER_RATIO_V[0] == pytest.approx(HONDA_ACCORD_STEER_RATIO_NOMINAL)
+    assert get_honda_accord_steer_ratio(0.0, HONDA_ACCORD_STEER_RATIO_NOMINAL) == \
+      pytest.approx(HONDA_ACCORD_STEER_RATIO_NOMINAL)
+
+  def test_honda_accord_steer_ratio_frozen_tail_is_unmeasured_extrapolation(self):
+    # 236/303/380 deg are FROZEN at what the pre-reshape map served (old V x 16.33/16.00): above
+    # 303 deg the corpus has 1306 s of data but median speed 1.41 m/s, and 0.1 s survives v > 4, so
+    # the yaw/v estimator cannot reach it. Truncating the array here would make np.interp hold
+    # ~14.09 to full lock instead of falling to 12.31 -- a +1.8 unit change in unmeasured territory.
+    for angle, served in ((236.0, 13.96), (303.0, 12.72), (380.0, 12.06)):
+      assert get_honda_accord_steer_ratio(angle) == pytest.approx(served * 16.33 / 16.00, abs=0.01)
+    # the 227 -> 236 join is a deliberate non-monotone step where measurement meets extrapolation
+    assert get_honda_accord_steer_ratio(236.0) > get_honda_accord_steer_ratio(227.0)
 
   def test_honda_accord_rate_plant_ff_hold_and_move_terms(self):
     # hold torque balances the return spring at the 12.5 m/s knots: k=0.35, G=95 -> 20 deg needs 0.074
