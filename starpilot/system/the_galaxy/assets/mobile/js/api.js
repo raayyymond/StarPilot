@@ -232,6 +232,8 @@ export const api = {
   getUpdateFastStatus() { return request("/api/update/fast/status") },
   updateRecover() { return request("/api/update/recover", { method: "POST" }) },
   updateRollback() { return request("/api/update/rollback", { method: "POST" }) },
+  rebuildParams() { return request("/api/update/rebuild_params", { method: "POST" }) },
+  getRebuildParamsStatus() { return request("/api/update/rebuild_params/status") },
   factoryReset() { return request("/api/update/factory_reset", { method: "POST" }) },
   getAgnosStatus() { return requestOk("/api/update/agnos_status") },
 

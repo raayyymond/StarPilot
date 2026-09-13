@@ -32,6 +32,8 @@ export const SystemTools = {
       tailscaleInstalled: false,
       tailscaleLoaded: false,
       tailscaleBusy: false,
+      rebuildParamsBusy: false,
+      rebuildParamsMissing: null,
     }
   },
   created() {
@@ -41,7 +43,7 @@ export const SystemTools = {
     })
     this.poll.start()
   },
-  mounted() { this.loadBranches(); this.loadProfiles(); this.loadTailscale() },
+  mounted() { this.loadBranches(); this.loadProfiles(); this.loadTailscale(); this.loadRebuildParamsStatus() },
   beforeUnmount() { this.poll?.destroy() },
   computed: {
     updateAvailable() { return this.checkedForUpdates && !!this.fastStatus?.updateAvailable && !this.fastStatus?.running },
@@ -257,6 +259,34 @@ export const SystemTools = {
         this.busy = ""
       }
     },
+    async loadRebuildParamsStatus() {
+      try {
+        const data = await api.getRebuildParamsStatus()
+        this.rebuildParamsMissing = Array.isArray(data?.missing) ? data.missing : []
+      } catch (e) {
+        this.rebuildParamsMissing = null
+      }
+    },
+    async runRebuildParams() {
+      if (this.rebuildParamsBusy || this.isOnroad) return
+      if (this.fastStatus?.running) { showSnackbar("Another update action is already running."); return }
+      if (!(await GalaxyConfirm({
+        title: "Rebuild the params library?",
+        message: "Runs scons on the device (about a minute). Needed after common/params_keys.h changes, otherwise new toggles are \"not editable\".\n\nThe device reboots when the build finishes.",
+        confirmLabel: "Rebuild & Reboot",
+        danger: true,
+      }))) return
+      this.rebuildParamsBusy = true
+      try {
+        const payload = await api.rebuildParams()
+        showSnackbar(payload?.message || "Params rebuild started.")
+        await this.loadFastStatus()
+      } catch (e) {
+        showSnackbar(e?.message || "Failed to start the params rebuild.", "error")
+      } finally {
+        this.rebuildParamsBusy = false
+      }
+    },
     async factoryReset() {
       if (!(await GalaxyConfirm({ title: "Factory reset (SAVE ME)?", message: "This wipes params, backups, themes, models, maps, and route data, then reboots. This cannot be undone.", confirmLabel: "Factory Reset", danger: true }))) return
       try {
@@ -408,6 +438,24 @@ export const SystemTools = {
             <p v-if="checkedForUpdates && !updateAvailable && !fastStatus?.running" class="gx-note">
               The device is up to date. Update becomes available only after a check finds a newer commit.
             </p>
+
+            <div class="gx-card" style="margin-top:12px;">
+              <div class="gx-section__header"><i class="bi bi-hammer"></i><span class="gx-section__title">Rebuild Params</span></div>
+              <div style="padding: var(--sp-3);">
+                <p class="gx-note" style="margin-top:0;">Recompiles common/params_pyx.so on the device so keys added to common/params_keys.h become editable (this branch ships the library prebuilt). Takes about a minute, then reboots.</p>
+                <p class="gx-note">
+                  <strong>Header keys missing from the compiled library:</strong>
+                  <template v-if="rebuildParamsMissing === null"> unknown</template>
+                  <template v-else-if="rebuildParamsMissing.length === 0"> none (library is current)</template>
+                  <template v-else> {{ rebuildParamsMissing.length }}: {{ rebuildParamsMissing.slice(0, 6).join(', ') }}{{ rebuildParamsMissing.length > 6 ? ', ...' : '' }}</template>
+                </p>
+                <button type="button" class="gx-btn gx-btn--tonal" :disabled="!!rebuildParamsBusy || isOnroad || !!fastStatus?.running" @click="runRebuildParams">
+                  <i v-if="rebuildParamsBusy || (fastStatus?.running && fastStatus?.lastMode === 'rebuild-params')" class="bi bi-arrow-repeat gx-spin"></i>
+                  <i v-else class="bi bi-hammer"></i>
+                  {{ (fastStatus?.running && fastStatus?.lastMode === 'rebuild-params') ? 'Rebuilding...' : (rebuildParamsBusy ? 'Starting...' : 'Rebuild Params and Reboot') }}
+                </button>
+              </div>
+            </div>
           </template>
         </div>
       </GalaxySection>
