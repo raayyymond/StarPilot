@@ -159,6 +159,11 @@ HONDA_ACCORD_TURN_FF_WIDTH = 0.12
 # 0.0023 / 0.0041 torque per deg at <=4 / 5 / 8 / 10 m/s (about 25 % under the extrapolation at 8-10, 25 % over
 # the bound at 5 -- both inside what one drive can say).  Adversarial pass:
 # accord-eps-torque-mod/docs/review/ADV-REV2-FORK-PACKAGE-2026-09-13.md.
+# KNOT PLACEMENT: the fit's bands are centred at 4.9 / 12.0 / 18.9 / 22.8 m/s, not at the knots.  The 28.5 m/s
+# knot is EXTRAPOLATED (G 167, K 3.91) so that the interpolation reproduces the measurement at 22.8 m/s
+# (hold 0.0154, viscous 0.0047 vs measured 0.0154 / 0.0049); writing the 22.8 values into the 28.5 knot, as a
+# first cut did, under-held by 16 % at 22.8.  Likewise the 12.5 knot (K 2.30) reproduces the 12.0 m/s cell
+# (0.0074 vs 0.0076).  Above 25 m/s (the drive's p95) the hold is a linear extrapolation -- BELIEF.
 # Kit report: accord-eps-torque-mod/rlog-tools/studies/grind/V293-PLANT-IDENT-2026-09-13.md.
 # The pole k these tables imply (0.2-0.5 Hz) is their weak part; the feedforward consumes only
 # k/G (hold) and 1/G (move), never k alone.
@@ -168,9 +173,9 @@ HONDA_ACCORD_TURN_FF_WIDTH = 0.12
 # (no single AccordEpsSpringScale maps one set onto the other: the ratio is 1.2x at 5 m/s and
 # 2.1x from 12.5 m/s up).
 HONDA_ACCORD_EPS_G_BP = [5.0, 12.5, 18.5, 28.5]        # m/s
-HONDA_ACCORD_EPS_G_V = [550.0, 271.0, 246.0, 205.0]    # deg/s per unit torque (= 1/b)
+HONDA_ACCORD_EPS_G_V = [550.0, 271.0, 246.0, 167.0]    # deg/s per unit torque (= 1/b)
 HONDA_ACCORD_EPS_K_BP = [4.0, 8.0, 12.5, 18.5, 28.5]   # m/s
-HONDA_ACCORD_EPS_K_V = [0.30, 1.00, 2.15, 2.77, 3.15]  # 1/s (= a/b; k/G is the hold torque per deg)
+HONDA_ACCORD_EPS_K_V = [0.30, 1.00, 2.30, 2.77, 3.91]  # 1/s (= a/b; k/G is the hold torque per deg)
 HONDA_ACCORD_FF_RATE_GAIN = 0.5    # fraction of the d(angle_des)/dt term (toggle AccordFFRateGain).  With the V293
                                    # tables 1/G IS the measured viscous term, but the term is fed the derivative of a
                                    # PLANNER-LIMITED reference (1098 deg/s allowed at 3 m/s = 2.0 torque through

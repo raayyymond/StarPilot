@@ -2087,9 +2087,9 @@ class TestLatControl:
     assert get_honda_accord_steer_ratio(236.0) > get_honda_accord_steer_ratio(227.0)
 
   def test_honda_accord_rate_plant_ff_hold_and_move_terms(self):
-    # hold torque balances the return spring at the 12.5 m/s knots (V293 tables): k=2.15, G=271 -> 20 deg needs 0.159
+    # hold torque balances the return spring at the 12.5 m/s knots (V293 tables): k=2.30, G=271 -> 20 deg needs 0.170
     hold = get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5)
-    assert hold == pytest.approx(2.15 * 20.0 / 271.0, rel=1e-6)
+    assert hold == pytest.approx(2.30 * 20.0 / 271.0, rel=1e-6)
     assert get_honda_accord_rate_plant_ff(-20.0, 0.0, 12.5) == pytest.approx(-hold)
     # moving the wheel adds torque in the direction of the rate
     assert get_honda_accord_rate_plant_ff(20.0, 30.0, 12.5) > hold
