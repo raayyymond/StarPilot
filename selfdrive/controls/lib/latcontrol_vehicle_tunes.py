@@ -134,18 +134,38 @@ HONDA_ACCORD_TORQUE_KI = 0.30
 HONDA_ACCORD_TURN_FF_REDUCTION_MAX = 0.30
 HONDA_ACCORD_TURN_FF_ONSET = 0.45
 HONDA_ACCORD_TURN_FF_WIDTH = 0.12
-# Rate-plant feedforward for the Accord's modified EPS (V280+ LKAS rate loop).  Identified on
-# r34/r35/r39/r3a/r3c (2026-09-02..04, 20 Hz grid, engaged hands-off, R 0.95-0.99 at zero lag):
+# Plant feedforward for the Accord's modified EPS.  The model is the same first-order balance
+# under both EPS firmwares the fork has driven:
 #     steering wheel rate [deg/s] = G(v) * torque - k(v) * angle        torque in [-1, 1]
-# so openpilot's torque request commands a steering RATE, not a lateral acceleration.  The
-# torque that HOLDS an angle is k*angle/G (0.03-0.06 for 5-25 deg) and the torque that MOVES
-# the wheel is rate/G.  A lat-accel feedforward (setpoint / latAccelFactor) is 3-10x too much
-# torque on this plant; the P term then has to cancel it and the loop settles above command.
+# The torque that HOLDS an angle is k*angle/G and the torque that MOVES the wheel is rate/G.
+# A lat-accel feedforward (setpoint / latAccelFactor) is the wrong SHAPE on this plant: it has no
+# speed law and no friction term, so the P/I terms have to cancel it and the loop settles off
+# command (measured on V293 route 70: 0.88x at 8-15 m/s, 1.12x above 22 m/s).
+#
+# TABLES = EPS firmware V293+ ("torque mode": the EPS LKAS lane is an open-loop torque map, its
+# 1 kHz rate loop removed).  Identified on route 75604b0a432fdc89_00000070--717f5a7866
+# (2026-09-13, 858 s laterally engaged, 27 clean hands-off stretches / 738 s), joint fit of
+# u = a(v)*angle + b*angle_rate + F*sign(angle_rate) + u0 with a 2000-resample block bootstrap:
+# G = 1/b, k = a/b, hold k/G = a.  Coulomb F = 0.010-0.012 (that is SteerFriction's own unit; set the
+# toggle, it is NOT in these tables).  On V293 the plant is a SPRING: torque sets an angle, and the
+# torque per degree is speed-flat above ~12 m/s (0.0079 / 0.0113 / 0.0154 per deg at 12.5 / 18.5 /
+# 28.5 m/s) and much softer below 8 m/s (the 4-5 m/s knots are LOW CONFIDENCE: b's CI crosses zero
+# there; the conservative, smaller hold was taken).  28.5 m/s is extrapolated (drive p95 25 m/s).
+# Kit report: accord-eps-torque-mod/rlog-tools/studies/grind/V293-PLANT-IDENT-2026-09-13.md.
+# The pole k these tables imply (0.2-0.5 Hz) is their weak part; the feedforward consumes only
+# k/G (hold) and 1/G (move), never k alone.
+# Previous tables, identified on the V280-V292 RATE-LOOP firmware (routes r34/r35/r39/r3a/r3c,
+# 2026-09-02..04) -- restore these if the EPS goes back to a V282-class image:
+#     G_V = [120.0, 95.0, 85.0, 70.0]   K_V = [0.17, 0.28, 0.35, 0.45, 0.50]
+# (no single AccordEpsSpringScale maps one set onto the other: the ratio is 1.2x at 5 m/s and
+# 2.1x from 12.5 m/s up).
 HONDA_ACCORD_EPS_G_BP = [5.0, 12.5, 18.5, 28.5]        # m/s
-HONDA_ACCORD_EPS_G_V = [120.0, 95.0, 85.0, 70.0]       # deg/s per unit torque
+HONDA_ACCORD_EPS_G_V = [550.0, 271.0, 246.0, 205.0]    # deg/s per unit torque (= 1/b)
 HONDA_ACCORD_EPS_K_BP = [4.0, 8.0, 12.5, 18.5, 28.5]   # m/s
-HONDA_ACCORD_EPS_K_V = [0.17, 0.28, 0.35, 0.45, 0.50]  # 1/s (return-spring: rate per deg of angle)
-HONDA_ACCORD_FF_RATE_GAIN = 0.5    # fraction of the d(angle_des)/dt term; 1.0 over-drives entries on the plant
+HONDA_ACCORD_EPS_K_V = [0.93, 1.64, 2.15, 2.77, 3.15]  # 1/s (= a/b; k/G is the hold torque per deg)
+HONDA_ACCORD_FF_RATE_GAIN = 0.5    # fraction of the d(angle_des)/dt term (toggle AccordFFRateGain).  With the V293
+                                   # tables 1/G IS the measured viscous term, so 1.0 is the model-consistent value;
+                                   # the old tables needed ~0.35 (the 0.5 default was sized on the rate loop)
 HONDA_ACCORD_FF_RATE_RC = 0.10     # s, first-order filter on d(angle_des)/dt
 HONDA_ACCORD_FF_ANGLE_LIMIT_DEG = 400.0
 # Clamp on the MOVE term (rate_gain * d(angle_des)/dt / G) of the rate-plant feedforward.  The

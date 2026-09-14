@@ -2087,9 +2087,9 @@ class TestLatControl:
     assert get_honda_accord_steer_ratio(236.0) > get_honda_accord_steer_ratio(227.0)
 
   def test_honda_accord_rate_plant_ff_hold_and_move_terms(self):
-    # hold torque balances the return spring at the 12.5 m/s knots: k=0.35, G=95 -> 20 deg needs 0.074
+    # hold torque balances the return spring at the 12.5 m/s knots (V293 tables): k=2.15, G=271 -> 20 deg needs 0.159
     hold = get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5)
-    assert hold == pytest.approx(0.35 * 20.0 / 95.0, rel=1e-6)
+    assert hold == pytest.approx(2.15 * 20.0 / 271.0, rel=1e-6)
     assert get_honda_accord_rate_plant_ff(-20.0, 0.0, 12.5) == pytest.approx(-hold)
     # moving the wheel adds torque in the direction of the rate
     assert get_honda_accord_rate_plant_ff(20.0, 30.0, 12.5) > hold
@@ -2106,17 +2106,18 @@ class TestLatControl:
     assert get_honda_accord_ff_move_torque_limit(9.0) == pytest.approx(1.2)
     assert get_honda_accord_ff_move_torque_limit(HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP[1]) == pytest.approx(1.4)
     assert get_honda_accord_ff_move_torque_limit(35.0) == pytest.approx(HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V[1])
-    # below the limit the move term is untouched: at 12.5 m/s (G=95) 100 deg/s * 0.5 -> 0.526
+    # below the limit the move term is untouched: at 12.5 m/s (G=271) 100 deg/s * 0.5 -> 0.185
     hold = get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5)
-    assert get_honda_accord_rate_plant_ff(20.0, 100.0, 12.5) - hold == pytest.approx(0.5 * 100.0 / 95.0, rel=1e-6)
+    assert get_honda_accord_rate_plant_ff(20.0, 100.0, 12.5) - hold == pytest.approx(0.5 * 100.0 / 271.0, rel=1e-6)
     # the largest move term the planner's jerk limit can produce at 10 m/s is ~0.68, well under 1.4
     hold_10 = get_honda_accord_rate_plant_ff(20.0, 0.0, 10.0)
     assert get_honda_accord_rate_plant_ff(20.0, 140.5, 10.0) - hold_10 < 1.4
-    assert get_honda_accord_rate_plant_ff(20.0, 140.5, 10.0) - hold_10 == pytest.approx(0.5 * 140.5 / (120.0 + (95.0 - 120.0) * (10.0 - 5.0) / (12.5 - 5.0)), rel=1e-6)
+    assert get_honda_accord_rate_plant_ff(20.0, 140.5, 10.0) - hold_10 == pytest.approx(0.5 * 140.5 / (550.0 + (271.0 - 550.0) * (10.0 - 5.0) / (12.5 - 5.0)), rel=1e-6)
     # above the limit only the move term is clipped, symmetrically, and the hold term still adds
     hold_5 = get_honda_accord_rate_plant_ff(20.0, 0.0, 5.0)
-    assert get_honda_accord_rate_plant_ff(20.0, 1000.0, 5.0) == pytest.approx(hold_5 + 1.0)
-    assert get_honda_accord_rate_plant_ff(20.0, -1000.0, 5.0) == pytest.approx(hold_5 - 1.0)
+    # (5000 deg/s: with the V293 G of 550 at 5 m/s, 1000 deg/s * 0.5 is only 0.91 and would not reach the clamp)
+    assert get_honda_accord_rate_plant_ff(20.0, 5000.0, 5.0) == pytest.approx(hold_5 + 1.0)
+    assert get_honda_accord_rate_plant_ff(20.0, -5000.0, 5.0) == pytest.approx(hold_5 - 1.0)
     assert get_honda_accord_rate_plant_ff(20.0, 1e6, 15.0) == pytest.approx(get_honda_accord_rate_plant_ff(20.0, 0.0, 15.0) + 1.4)
     # the clamp does not depend on the gain/spring scales (it bounds torque, not rate)
     assert get_honda_accord_rate_plant_ff(0.0, 1e6, 5.0, gain_scale=0.5) == pytest.approx(1.0)
