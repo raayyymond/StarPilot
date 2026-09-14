@@ -1,3 +1,4 @@
+import math
 import pytest
 from parameterized import parameterized
 from types import SimpleNamespace

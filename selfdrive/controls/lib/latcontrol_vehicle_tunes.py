@@ -80,6 +80,12 @@ BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
 # engaged and manual driving both count and the result is independent of the EPS firmware.  Checked:
 # a stock-firmware 98%-manual route reads 15.82 at |sa| 35-400 deg where a V289r1 83%-engaged route
 # reads 15.88.  Gates: calibrated, v > 4 m/s, |steeringRateDeg| < 20.
+# Refit 2026-09-12 with route 0000006c--2bc842dbac added (83 routes; flown on this map at toggle 16.84,
+# 62 segments, mostly motorway).  The fit never sees the served map or the toggle, so routes flown on
+# unknown maps/settings count equally.  With 6c left out the fit reproduces every previous knot exactly;
+# with it every bin moved <= 0.024 (inside every CI and the +/-0.12 shape band), shape 2.171 -> 2.154.
+# 6c alone, where it has data: served-minus-measured -0.02 at 20-28, -0.01 at 45-55, -0.15/+0.08 at
+# 130-210 deg.  The route CONFIRMS the reshape; the knots below are the 83-route values.
 #
 # The previous map was too FLAT.  The rack falls 2.16 :1 between 20-45 and 130-165 deg (95% CI
 # [2.09, 2.22], systematic +/-0.12); the old curve fell 1.15 over the same span -- it quickened at
@@ -89,7 +95,7 @@ BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
 # absent on the motorway because the sign flips at ~50 deg.
 #
 # Values are ABSOLUTE served ratios (V[0] == NOMINAL), so the array reads as real ratios and the
-# SteerRatio toggle means exactly "the on-centre ratio": set it to 16.89 for scale 1.0000.
+# SteerRatio toggle means exactly "the on-centre ratio": set it to 16.88 for scale 1.0000.
 # Three segments are NOT measurements:
 #   0-23 deg    pinned by convention.  Below ~20 deg the estimator is NOT IDENTIFIED -- three-
 #               estimator bracket width 1.55/0.55/0.25, denominator SNR 2.5 -- and every split that
@@ -112,14 +118,14 @@ BOLT_CARS = BOLT_2022_2023_CARS + BOLT_2018_2021_CARS + BOLT_2017_CARS
 # it moves both ends together and cancels in the shape.  A reshape consumes the shape.
 HONDA_ACCORD_STEER_RATIO_ANGLE_BP = [0.0, 23.0, 31.0, 61.0, 76.0, 95.0, 116.0, 151.0,
                                      178.0, 227.0, 236.0, 303.0, 380.0]  # deg
-HONDA_ACCORD_STEER_RATIO_V = [16.89, 16.89, 16.89, 16.26, 15.97, 15.46, 15.02, 14.67,
+HONDA_ACCORD_STEER_RATIO_V = [16.88, 16.88, 16.88, 16.25, 15.97, 15.45, 15.03, 14.68,
                               14.45, 14.09, 14.25, 12.98, 12.31]  # :1
 # The map above is the rack SHAPE, normalised so that on-centre reads NOMINAL.  The SteerRatio
 # toggle sets the LEVEL: sr = shape * (toggle / NOMINAL), so the whole curve slides together and
-# the geometry is preserved.  Set the toggle to 16.89 to serve the measured curve unscaled.
-HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.89
+# the geometry is preserved.  Set the toggle to 16.88 to serve the measured curve unscaled.
+HONDA_ACCORD_STEER_RATIO_NOMINAL = 16.88
 HONDA_ACCORD_STEER_RATIO_LEVEL_MIN = 0.60   # toggle 10.13
-HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 21.11
+HONDA_ACCORD_STEER_RATIO_LEVEL_MAX = 1.25   # toggle 21.10
 # Kp for the Accord torque controller is NOT a constant here: controlsd overwrites
 # LatControlTorque.pid._k_p every frame with the SteerKP toggle (a flat [[0], [SteerKP]]), so a
 # construction-time override would be dead code.  Ki is applied at construction and then
