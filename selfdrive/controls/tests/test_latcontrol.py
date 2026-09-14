@@ -114,6 +114,11 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_honda_accord_ff_scale,
   get_honda_accord_ff_move_torque_limit,
   get_honda_accord_rate_plant_ff,
+  get_honda_accord_hold_torque,
+  get_honda_accord_mode_hz,
+  get_honda_accord_rate_loop_gain,
+  honda_accord_friction_hysteresis,
+  HondaAccordErrorNotch,
   get_elantra_non_scc_ff_scale,
   get_honda_accord_steer_ratio,
   get_palisade_ff_scale,
@@ -2153,9 +2158,14 @@ class TestLatControl:
     assert lac_log.error > STANDARD_FRICTION_THRESHOLD + JERK_GAIN * abs(lac_log.desiredLateralJerk)
     angle_des = math.degrees(VM.get_steer_from_curvature(-setpoint / v2, CS.vEgo, 0.0))
     assert angle_des < 0.0  # positive internal-frame setpoint is a right turn, i.e. negative wheel angle
-    plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, 0.0, CS.vEgo)
+    # rev-3 defaults (2026-09-14): the hold comes from the measured map, the static-friction hysteresis is
+    # saturated in the turn's direction (+0.015 internal for a right turn), and the rate loop is at rest
+    # (desired rate ~0, CS.steeringRateDeg 0)
+    plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, 0.0, CS.vEgo, hold_map=True)
+    assert plant_ff_torque == pytest.approx(-get_honda_accord_hold_torque(angle_des, CS.vEgo))
     friction_torque = friction  # get_friction saturates at friction * LAF (lat accel) = friction (torque)
-    expected_f = controller.lateral_accel_from_torque(plant_ff_torque + friction_torque, controller.torque_params)
+    hysteresis_torque = 0.015   # AccordFrictionHyst default, saturated after > 3 deg of desired travel
+    expected_f = controller.lateral_accel_from_torque(plant_ff_torque + friction_torque + hysteresis_torque, controller.torque_params)
     assert expected_f > 0.0
     assert lac_log.f == pytest.approx(expected_f, abs=0.01)
     # controller.update returns the +left frame (== lac_log.output == -internal torque): a positive
@@ -2174,8 +2184,12 @@ class TestLatControl:
     # ...and it only shifts the plant target, by the hold torque of the angle the offset maps to
     v2 = CS.vEgo ** 2
     delta_angle = math.degrees(VM.get_steer_from_curvature(0.3 / v2, CS.vEgo, 0.0))
-    expected_torque_shift = get_honda_accord_rate_plant_ff(delta_angle, 0.0, CS.vEgo)  # +left frame
+    # the hold map is nonlinear (saturating), so the shift is the map DIFFERENCE between the two targets
+    angle_zero = math.degrees(VM.get_steer_from_curvature(-log_zero.desiredLateralAccel / v2, CS.vEgo, 0.0))
+    expected_torque_shift = (get_honda_accord_hold_torque(angle_zero + delta_angle, CS.vEgo)
+                             - get_honda_accord_hold_torque(angle_zero, CS.vEgo))  # +left frame
     assert expected_torque_shift > 0.0
+    assert delta_angle > 0.0
     assert torque_off - torque_zero == pytest.approx(expected_torque_shift, abs=1e-3)
     assert log_off.f - log_zero.f == pytest.approx(-expected_torque_shift * lat_accel_factor, abs=1e-3 * lat_accel_factor)
 
@@ -2183,6 +2197,99 @@ class TestLatControl:
     assert get_honda_accord_ff_scale(0.0) > get_honda_accord_ff_scale(0.8)
     assert get_honda_accord_ff_scale(-0.8) == pytest.approx(get_honda_accord_ff_scale(0.8))
     assert get_honda_accord_ff_scale(0.0) == pytest.approx(1.0, abs=0.01)
+
+  def test_honda_accord_hold_map_is_a_saturating_spring(self):
+    # odd, monotone in the angle, saturating past the tyre's aligning-torque peak, clipped at 400 deg
+    assert get_honda_accord_hold_torque(-30.0, 12.0) == pytest.approx(-get_honda_accord_hold_torque(30.0, 12.0))
+    assert get_honda_accord_hold_torque(0.0, 12.0) == 0.0
+    for v in (4.0, 10.0, 20.0, 28.0):
+      values = [get_honda_accord_hold_torque(a, v) for a in (5.0, 15.0, 30.0, 60.0, 120.0)]
+      assert all(b > a for a, b in zip(values, values[1:]))
+    # 10 m/s: measured 0.30 torque at both 55 and 77 deg (the peak) -- the map is within 12 % there
+    assert get_honda_accord_hold_torque(77.0, 10.0) == pytest.approx(get_honda_accord_hold_torque(55.0, 10.0), rel=0.12)
+    assert get_honda_accord_hold_torque(1e6, 4.0) == pytest.approx(get_honda_accord_hold_torque(400.0, 4.0))
+    # against the linear tables: 3-5x at 6 m/s / 24 deg (routes 70+71), 0.5-0.75x at 28 m/s / 12 deg
+    assert 3.0 < get_honda_accord_hold_torque(24.0, 6.0) / get_honda_accord_rate_plant_ff(24.0, 0.0, 6.0) < 5.0
+    assert 0.5 < get_honda_accord_hold_torque(12.0, 28.0) / get_honda_accord_rate_plant_ff(12.0, 0.0, 28.0) < 0.75
+    # the two measured anchors (map = measured cell minus the 0.020 static-friction intercept)
+    assert get_honda_accord_hold_torque(28.0, 8.0) == pytest.approx(0.138, abs=0.02)
+    assert get_honda_accord_hold_torque(23.0, 20.2) == pytest.approx(0.199, abs=0.02)
+    # the rate-plant feedforward takes the map only when asked, and scales it with spring_scale
+    assert get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5, hold_map=True) == pytest.approx(get_honda_accord_hold_torque(20.0, 12.5))
+    assert get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5, spring_scale=0.5, hold_map=True) == pytest.approx(0.5 * get_honda_accord_hold_torque(20.0, 12.5))
+    assert get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5) == pytest.approx(2.30 * 20.0 / 271.0, rel=1e-6)
+    # the move term is the same in both arms
+    move = get_honda_accord_rate_plant_ff(20.0, 100.0, 12.5, hold_map=True) - get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5, hold_map=True)
+    assert move == pytest.approx(0.5 * 100.0 / 271.0, rel=1e-6)
+
+  def test_honda_accord_mode_frequency_and_rate_loop_taper(self):
+    # sqrt(k(v) / J) / 2pi: 1.0 Hz at 4.5 m/s rising to ~2.05 Hz above 20 (route 71: 2.34 Hz limit cycle at 21.8 m/s)
+    assert get_honda_accord_mode_hz(4.5) == pytest.approx(1.01, abs=0.06)
+    assert get_honda_accord_mode_hz(12.0) == pytest.approx(1.67, abs=0.06)
+    assert get_honda_accord_mode_hz(22.8) == pytest.approx(2.04, abs=0.06)
+    assert get_honda_accord_mode_hz(28.0) > get_honda_accord_mode_hz(12.0) > get_honda_accord_mode_hz(4.5)
+    assert get_honda_accord_rate_loop_gain(5.0, 0.0006) == pytest.approx(0.0006)
+    assert get_honda_accord_rate_loop_gain(12.0, 0.0006) == pytest.approx(0.0006)
+    assert get_honda_accord_rate_loop_gain(24.0, 0.0006) == pytest.approx(0.0003)
+    assert get_honda_accord_rate_loop_gain(24.0, 0.0) == 0.0
+
+  def test_honda_accord_friction_hysteresis_operator(self):
+    z = 0.0
+    for _ in range(10):
+      z = honda_accord_friction_hysteresis(z, 0.5, 0.015)   # 5 deg of leftward desired travel saturates it
+    assert z == pytest.approx(0.015)
+    z = honda_accord_friction_hysteresis(z, -1.5, 0.015)    # half the 3 deg band back
+    assert z == pytest.approx(0.0075)
+    z = honda_accord_friction_hysteresis(z, -10.0, 0.015)
+    assert z == pytest.approx(-0.015)
+    assert honda_accord_friction_hysteresis(z, 0.0, 0.015) == pytest.approx(-0.015)  # a still reference holds the state
+    assert honda_accord_friction_hysteresis(0.01, 1.0, 0.0) == 0.0                   # friction 0 = off
+
+  def test_honda_accord_error_notch(self):
+    notch = HondaAccordErrorNotch(DT_CTRL)
+
+    def steady_peak(f_hz, f_notch=2.0, q=1.0, seconds=8.0):
+      notch.reset(0.0)
+      y = [notch.update(math.sin(2 * math.pi * f_hz * i * DT_CTRL), f_notch, q) for i in range(round(seconds / DT_CTRL))]
+      return max(y[-200:])
+
+    assert steady_peak(2.0) < 0.1            # >= 20 dB at the mode
+    assert steady_peak(0.5) > 0.84           # < 1.5 dB loss two octaves below (where the P loop crosses over)
+    assert steady_peak(5.0) > 0.84           # and above
+    notch.reset(0.0)
+    for _ in range(300):
+      dc = notch.update(1.0, 2.0, 1.0)
+    assert dc == pytest.approx(1.0, abs=1e-3)  # DC gain 1: the integrator sees the whole steady error
+    notch.reset(0.0)
+    assert notch.update(0.37, 2.0, 0.0) == 0.37  # Q 0 = pass-through
+    assert math.isfinite(notch.update(1.0, 500.0, 1.0))
+
+  def test_honda_accord_rate_loop_damps_the_measured_wheel_rate(self):
+    # two identical runs except the measured wheel rate: the rate loop must add -Kv * (rate) torque (internal frame)
+    def run(rate_dps, gain):
+      controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+      toggles.accord_rate_loop_gain = gain
+      CS.vEgo = 15.0
+      CS.steeringAngleDeg = 0.0
+      controller.update_live_torque_params(6.0, 0.0, 0.0)
+      controller.update(False, CS, VM, params, False, 0.0, False, 0.2, None, None, toggles)
+      CS.steeringRateDeg = rate_dps
+      for _ in range(round(1.0 / DT_CTRL)):
+        output_torque, _, lac_log = controller.update(True, CS, VM, params, False, 0.004, False, 0.2, None, None, toggles)
+      return output_torque, lac_log
+
+    torque_still, log_still = run(0.0, 0.0006)
+    torque_moving, log_moving = run(20.0, 0.0006)   # the wheel turning left at 20 deg/s while the plan is steady
+    torque_off, _ = run(20.0, 0.0)
+    # P and I do not see the wheel rate (the angle is held at 0 in both runs), only the feedforward word moves
+    assert log_moving.p == pytest.approx(log_still.p, abs=1e-6)
+    assert log_moving.i == pytest.approx(log_still.i, abs=1e-6)
+    # +left frame: a leftward wheel rate is opposed by -Kv(v) * 20 of torque (the rate loop's damping); at 15 m/s
+    # the gain is tapered to 0.0006 * 12/15 = 0.00048, so -0.0096
+    expected = -get_honda_accord_rate_loop_gain(15.0, 0.0006) * 20.0
+    assert expected == pytest.approx(-0.0096)
+    assert torque_moving - torque_still == pytest.approx(expected, abs=1e-3)
+    assert torque_off == pytest.approx(torque_still, abs=1e-3)
 
   def test_subaru_impreza_pid_output_scale_preserves_small_errors(self):
     assert get_subaru_impreza_pid_output_scale(0.0) == 1.0

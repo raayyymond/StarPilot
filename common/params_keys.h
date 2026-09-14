@@ -392,6 +392,14 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AccordTurnFFTaper", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"AccordEpsGainScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
     {"AccordEpsSpringScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
+    // V293 torque-mode EPS (2026-09-14, routes 70+71): measured hold map, static-friction hysteresis feedforward,
+    // 100 Hz rate loop, speed-scheduled error notch at the 1-2 Hz steering mode, reference shaping.
+    // stock_value (Safe Mode) = every term off; the defaults are the rev-3 flight settings.
+    {"AccordHoldMap", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    {"AccordFrictionHyst", {PERSISTENT, FLOAT, "0.015", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordRateLoopGain", {PERSISTENT, FLOAT, "0.0006", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordErrorNotchQ", {PERSISTENT, FLOAT, "1.0", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordRefFilter", {PERSISTENT, FLOAT, "0.12", "0.0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

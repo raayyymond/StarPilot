@@ -476,6 +476,7 @@ CUSTOM_PATCH_KEYS = {
   "KeepLearnedLatAccelOffset", "AccordVariableSteerRatio", "AccordRatePlantFF",
   "AccordFFRateGain", "AccordTorqueKi", "AccordTurnFFTaper",
   "AccordEpsGainScale", "AccordEpsSpringScale",
+  "AccordHoldMap", "AccordFrictionHyst", "AccordRateLoopGain", "AccordErrorNotchQ", "AccordRefFilter",
 }
 
 
@@ -499,3 +500,8 @@ def test_galaxy_layout_custom_patches_section_tracks_every_patch_switch():
   assert _declared_default("KeepLearnedLatAccelOffset") == "1"
   assert _declared_default("AccordRatePlantFF") == "1"
   assert _declared_default("AccordTurnFFTaper") == "0"
+  assert _declared_default("AccordHoldMap") == "1"
+  assert _declared_default("AccordFrictionHyst") == "0.015"
+  assert _declared_default("AccordRateLoopGain") == "0.0006"
+  assert _declared_default("AccordErrorNotchQ") == "1.0"
+  assert _declared_default("AccordRefFilter") == "0.12"

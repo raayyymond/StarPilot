@@ -197,6 +197,41 @@ HONDA_ACCORD_FF_ANGLE_LIMIT_DEG = 400.0
 # that ramp it first bites at ~7.9 m/s.
 HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP = [8.0, 10.0]  # m/s
 HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V = [1.0, 1.4]    # torque, units of the [-1, 1] output
+# V293 TORQUE-MODE PLANT, SECOND PASS (2026-09-14, routes 70 + 71, ~1,650 s hands-off).  The linear
+# k(v)/G(v) tables above are the FIRST-ORDER fit; the static hold torque the car actually needs is
+#     hold(v, angle) = k(v) * sat(v) * tanh(angle / sat(v))        [+ static friction, applied separately]
+# a SATURATING spring: measured hands-off with the wheel still (|rate| < 15 deg/s, 1 Hz LPF), median
+# torque per (|angle|, speed) cell, both routes pooled, fitted jointly (weighted rms 0.0085 torque).
+# Against the linear tables it is 3-5x LARGER below 10 m/s at 5-35 deg (route 71 tracking gain 0.83 /
+# 0.93 at <8 / 8-15 m/s = under-turning, felt as "loose on slight bends") and 0.6-0.7x SMALLER above
+# 17 m/s at 20-30 deg and above 25 m/s everywhere (tracking gain 1.12 above 22 m/s = over-turning).
+# sat(v) = 19.3 + 546 * exp(-v / 3.01) deg: near-linear to 150 deg at 4 m/s, saturating past ~45 deg
+# at 10 m/s (the tyre aligning torque peaks; 0.30 torque at 55-77 deg is measured) and past ~20 deg
+# above 15 m/s -- angles a 3 m/s^2 planner never reaches there, so the saturated tail is unexercised
+# BELIEF above 15 m/s.  k(v) knots are the fitted values smoothed monotone (the 12.5 / 15 m/s cells
+# wobble from sparse data).  The map was fitted with a static-friction intercept of 0.020 torque,
+# which is NOT in the table: the hysteresis feedforward (AccordFrictionHyst) supplies it in the
+# direction of the last desired motion.  Kit: accord-eps-torque-mod/rlog-tools/studies/grind/
+# _scratch/r70r71_hold_joint_fit.txt and v293r2_design.py.
+HONDA_ACCORD_HOLD_V_BP = [2.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 17.5, 20.0, 23.0, 28.0]   # m/s
+HONDA_ACCORD_HOLD_K_V = [0.0021, 0.0028, 0.0044, 0.0052, 0.0074, 0.0092, 0.0095, 0.0103, 0.0116, 0.0133, 0.0134]  # torque/deg at 0 deg
+HONDA_ACCORD_HOLD_SAT_DEG = (19.3, 546.0, 3.01)   # sat(v) = a + b * exp(-v / c), deg
+HONDA_ACCORD_HOLD_STATIC_FRICTION = 0.020          # torque, the intercept the map was fitted WITHOUT (see above)
+# The steering system's own mode on the V293 firmware: J * angle'' + b * angle' + hold(angle) = torque, with
+# J = 8e-5 torque/(deg/s^2) (route 71 band-passed fit 7.2e-5..9.1e-5 by band; the limit-cycle point gives
+# 9e-5..1e-4) and a light b ~ 0.0006 (damping ratio 0.2-0.35).  Its frequency sqrt(k(v)/J)/2pi runs 1.0 Hz
+# at 4.5 m/s to 2.1 Hz above 20.  On route 71 the fork's delayed P + the SteerFriction relay drove it into a
+# 2.34 Hz, +-6 deg limit cycle on hard curves above 20 m/s.  The notch (AccordErrorNotchQ) sits on it.
+HONDA_ACCORD_EPS_INERTIA = 8e-5                    # torque per deg/s^2
+# Rate loop (AccordRateLoopGain): torque per deg/s of (desired - measured wheel rate), measured rate through a
+# first-order filter of HONDA_ACCORD_RATE_LOOP_RC; the gain is tapered by min(1, HONDA_ACCORD_RATE_LOOP_TAPER_V / v)
+# above that speed because the ~60 ms loop delay turns rate feedback into negative stiffness at the 2 Hz mode.
+# Loop-delay budget measured on route 71: CAN-in -> carState 3 ms, controlsState -> 0xE4 13 ms, 0xE4 -> delivered
+# torque 30-45 ms; the rate-loop-alone gain must stay below 1 where its phase passes -180 deg (3.5-4 Hz):
+# at 0.0006 it is 0.5 there, at 0.0012 it would cross.
+HONDA_ACCORD_RATE_LOOP_RC = 0.03                   # s
+HONDA_ACCORD_RATE_LOOP_TAPER_V = 12.0              # m/s
+HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg of desired-angle travel to swing the hysteresis term end to end
 VOLT_STANDARD_CARS = (
   GM_CAR.CHEVROLET_VOLT,
   GM_CAR.CHEVROLET_VOLT_2019,
@@ -2361,10 +2396,12 @@ def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:
 
 def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: float, v_ego: float,
                                    rate_gain: float = HONDA_ACCORD_FF_RATE_GAIN,
-                                   gain_scale: float = 1.0, spring_scale: float = 1.0) -> float:
+                                   gain_scale: float = 1.0, spring_scale: float = 1.0,
+                                   hold_map: bool = False) -> float:
   """Feedforward TORQUE (units of the [-1, 1] output) for the Accord's rate-servo EPS.
 
   hold term  k(v) * angle / G(v)   -- the torque that balances the return spring at angle_des
+             (hold_map=True: the measured saturating V293 map, get_honda_accord_hold_torque)
   move term  gain * d(angle)/dt / G(v) -- the torque that drives the wheel toward angle_des
   Both are in the steering-angle sign frame (positive = left); the caller converts to the
   controller's internal frame.  The P/I terms stay in lateral-acceleration space and are
@@ -2374,8 +2411,12 @@ def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: flo
   # gain_scale / spring_scale (AccordEpsGainScale / AccordEpsSpringScale) let the tables be corrected
   # from Galaxy after an EPS firmware change, until the plant is re-identified and the tables updated.
   gain = float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V)) * max(float(gain_scale), 0.1)
-  spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V)) * float(spring_scale)
-  hold_torque = spring * angle_des_deg / gain
+  if hold_map:
+    # the measured saturating hold map (AccordHoldMap); spring_scale still scales it, gain_scale does not
+    hold_torque = get_honda_accord_hold_torque(angle_des_deg, v_ego) * float(spring_scale)
+  else:
+    spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V)) * float(spring_scale)
+    hold_torque = spring * angle_des_deg / gain
   move_limit = get_honda_accord_ff_move_torque_limit(v_ego)
   move_torque = float(np.clip(rate_gain * angle_des_rate_dps / gain, -move_limit, move_limit))
   return hold_torque + move_torque
@@ -2384,6 +2425,68 @@ def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: flo
 def get_honda_accord_ff_move_torque_limit(v_ego: float) -> float:
   """Magnitude limit on the move term of get_honda_accord_rate_plant_ff (see the constants)."""
   return float(np.interp(v_ego, HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_BP, HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V))
+
+
+def get_honda_accord_hold_sat_deg(v_ego: float) -> float:
+  a, b, c = HONDA_ACCORD_HOLD_SAT_DEG
+  return a + b * math.exp(-max(float(v_ego), 0.0) / c)
+
+
+def get_honda_accord_hold_torque(angle_deg: float, v_ego: float) -> float:
+  """Static hold torque (spring part, +left frame) from the measured V293 hold map: k(v) * sat(v) * tanh(angle / sat(v)).
+  Odd in the angle; the static friction is NOT included (see HONDA_ACCORD_HOLD_STATIC_FRICTION)."""
+  angle_deg = float(np.clip(angle_deg, -HONDA_ACCORD_FF_ANGLE_LIMIT_DEG, HONDA_ACCORD_FF_ANGLE_LIMIT_DEG))
+  k = float(np.interp(v_ego, HONDA_ACCORD_HOLD_V_BP, HONDA_ACCORD_HOLD_K_V))
+  sat = get_honda_accord_hold_sat_deg(v_ego)
+  return k * sat * math.tanh(angle_deg / sat)
+
+
+def get_honda_accord_mode_hz(v_ego: float) -> float:
+  """Frequency of the steering system's own mode on the V293 firmware, sqrt(k(v) / J) / 2pi."""
+  k = float(np.interp(v_ego, HONDA_ACCORD_HOLD_V_BP, HONDA_ACCORD_HOLD_K_V))
+  return math.sqrt(k / HONDA_ACCORD_EPS_INERTIA) / (2.0 * math.pi)
+
+
+def get_honda_accord_rate_loop_gain(v_ego: float, gain: float) -> float:
+  """AccordRateLoopGain tapered above HONDA_ACCORD_RATE_LOOP_TAPER_V (torque per deg/s)."""
+  return float(gain) * min(1.0, HONDA_ACCORD_RATE_LOOP_TAPER_V / max(float(v_ego), 0.1))
+
+
+def honda_accord_friction_hysteresis(z: float, d_angle_des_deg: float, friction: float,
+                                     band_deg: float = HONDA_ACCORD_FRICTION_HYST_BAND_DEG) -> float:
+  """One step of the static-friction hysteresis operator: z follows the desired angle's motion at
+  friction / band_deg torque per degree and is clipped to +/- friction, so it reads +friction after the
+  wheel was asked to move left, -friction after right, and swings between them over band_deg of travel."""
+  if friction <= 0.0:
+    return 0.0
+  z = float(z) + float(d_angle_des_deg) * float(friction) / max(float(band_deg), 1e-3)
+  return float(np.clip(z, -friction, friction))
+
+
+class HondaAccordErrorNotch:
+  """Second-order notch (bilinear, coefficients recomputed every frame so it tracks the mode with speed)
+  on the lateral-accel error before P and I.  Q <= 0 passes the input through and keeps the state primed."""
+
+  def __init__(self, dt: float):
+    self.dt = dt
+    self.reset()
+
+  def reset(self, x0: float = 0.0):
+    self.x1 = self.x2 = self.y1 = self.y2 = float(x0)
+
+  def update(self, x: float, f_hz: float, q: float) -> float:
+    x = float(x)
+    if q <= 0.0 or f_hz <= 0.0:
+      self.x1 = self.x2 = self.y1 = self.y2 = x
+      return x
+    k = math.tan(math.pi * min(float(f_hz), 0.45 / self.dt) * self.dt)
+    norm = 1.0 / (1.0 + k / q + k * k)
+    b0 = (1.0 + k * k) * norm
+    b1 = 2.0 * (k * k - 1.0) * norm
+    a2 = (1.0 - k / q + k * k) * norm
+    y = b0 * x + b1 * self.x1 + b0 * self.x2 - b1 * self.y1 - a2 * self.y2
+    self.x2, self.x1, self.y2, self.y1 = self.x1, x, self.y1, y
+    return y
 
 
 def get_bolt_2017_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> float:

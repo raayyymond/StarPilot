@@ -4865,6 +4865,78 @@
           "Honda"
         ],
         "settings_tier": "simple"
+      },
+      {
+        "key": "AccordHoldMap",
+        "label": "Accord: Measured Hold Map (V293)",
+        "description": "Hold torque from the 2-D map measured on the V293 torque-mode EPS (routes 70+71): a saturating spring per speed, 3-5x the old linear tables below 10 m/s and 0.6x above 20. Off: the linear k(v)/G(v) tables. Needs Rate-Plant Feedforward on.",
+        "picker_description": "Measured saturating hold map instead of the linear spring tables.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordFrictionHyst",
+        "label": "Accord: Static Friction FF (torque)",
+        "description": "Static-friction feedforward: a hysteresis operator driven by the desired angle adds +/- this torque in the direction the wheel last had to move (3 deg band). Replaces SteerFriction for the Accord (set that to 0); measured static friction 0.015-0.025. 0 = off.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 0.05,
+        "step": 0.001,
+        "precision": 3,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordRateLoopGain",
+        "label": "Accord: 100 Hz Rate Loop Gain",
+        "description": "Torque per deg/s of (desired wheel rate - measured wheel rate), the electronic damper the EPS lost in torque mode. Tapered by min(1, 12/v) above 12 m/s. 0.0006 damps the 1-2 Hz steering mode and the low-speed snap; above 0.001 the delayed loop starts to ring at 3-4 Hz. 0 = off.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 0.003,
+        "step": 0.0001,
+        "precision": 4,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordErrorNotchQ",
+        "label": "Accord: Error Notch Q (1-2 Hz mode)",
+        "description": "Q of a notch on the P/I error at the steering mode frequency sqrt(k(v)/J)/2pi (1.0 Hz at 5 m/s to 2.1 Hz above 20). Keeps the delayed feedback from exciting the resonance that limit-cycled at 2.3 Hz on route 71. 0 = off; 1.0 = wide notch (recommended); 2.0 = narrow.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 4.0,
+        "step": 0.1,
+        "precision": 1,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordRefFilter",
+        "label": "Accord: Reference Filter (s)",
+        "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 0.5,
+        "step": 0.01,
+        "precision": 2,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
       }
     ]
   },
