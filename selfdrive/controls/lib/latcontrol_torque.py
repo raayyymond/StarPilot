@@ -163,6 +163,10 @@ class LatControlTorque(LatControl):
       self.accord_error_notch = HondaAccordErrorNotch(self.dt)
       self.accord_ref_filter_1 = FirstOrderFilter(0.0, 0.12, self.dt)
       self.accord_ref_filter_2 = FirstOrderFilter(0.0, 0.12, self.dt)
+      # rev 5 (2026-09-15): disturbance observer on the measured wheel state and the controller's own past output
+      self.accord_dob = HondaAccordDisturbanceObserver(self.dt)
+      self.accord_dob_torque = 0.0
+      self.accord_dob_frozen = False
     if self.is_palisade:
       self.torque_params.latAccelFactor *= PALISADE_BASE_LAT_ACCEL_FACTOR_MULT
     if self.is_ioniq_5:
@@ -203,6 +207,8 @@ class LatControlTorque(LatControl):
     self.starpilot_lateral_state.frictionJerkDeadzone = 0.0
     self.starpilot_lateral_state.lowSpeedFactor = 0.0
     self.starpilot_lateral_state.unwindDetected = False
+    self.starpilot_lateral_state.accordObserverTorque = 0.0
+    self.starpilot_lateral_state.accordObserverFrozen = False
 
   def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction):
     if self.is_palisade:
@@ -276,6 +282,9 @@ class LatControlTorque(LatControl):
         self.accord_error_notch.reset(0.0)
         self.accord_ref_filter_1.x = future_desired_lateral_accel
         self.accord_ref_filter_2.x = future_desired_lateral_accel
+        # the observer starts from rest on engage: its past-output history is the zero the EPS actually saw
+        self.accord_dob.reset(float(CS.steeringRateDeg))
+        self.accord_dob_torque = 0.0
     else:
       if self.prev_steering_pressed and not CS.steeringPressed:
         self.pid.i *= self.steer_release_i_decay
@@ -640,6 +649,9 @@ class LatControlTorque(LatControl):
         rate_meas = self.accord_rate_meas_filter.update(float(CS.steeringRateDeg))
         rate_loop_gain = get_honda_accord_rate_loop_gain(CS.vEgo, float(getattr(starpilot_toggles, "accord_rate_loop_gain", 0.0006)))
         inner_torque = -(self.accord_friction_z + rate_loop_gain * (angle_des_rate - rate_meas))
+        # rev 5 (2026-09-15): the disturbance observer's estimate from the PREVIOUS frame (it needs this frame's output to
+        # advance, so it is stepped after the PID below).  +left frame -> torque frame.
+        inner_torque += -self.accord_dob_torque
         # The generic SteerFriction relay (get_friction on the lsf-inflated error) is a loop gain of friction / 0.30 x LAF
         # per m/s^2 of error.  With the hysteresis feedforward active it would double-count the friction, and on route 73
         # (2026-09-14) a back-filled stock SteerFriction 0.212 ran it at ~10x SteerKP (4 Hz chatter on straights, 21 % of
@@ -654,6 +666,14 @@ class LatControlTorque(LatControl):
         ff_lataccel = self.lateral_accel_from_torque(ff_torque, self.torque_params)
         output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff_lataccel, freeze_integrator=freeze_integrator)
         output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)
+        # step the observer with this frame's output; frozen (held) while the output is safety-limited or the driver holds
+        # the wheel -- the driver's torque would otherwise be estimated as a disturbance and fought
+        dob_hz = float(getattr(starpilot_toggles, "accord_dob_hz", 0.0))
+        self.accord_dob_frozen = bool(steer_limited_by_safety or CS.steeringPressed)
+        self.accord_dob_torque = self.accord_dob.update(CS.steeringAngleDeg - params.angleOffsetDeg, CS.steeringRateDeg, CS.vEgo,
+                                                        output_torque, dob_hz, get_honda_accord_hold_torque, hold_map=hold_map,
+                                                        gain_scale=gain_scale, spring_scale=spring_scale,
+                                                        freeze=self.accord_dob_frozen)
       else:
         output_lataccel = self.pid.update(pid_log.error, error_rate=-measurement_rate, speed=CS.vEgo, feedforward=ff, freeze_integrator=freeze_integrator)
         output_torque = self.torque_from_lateral_accel(output_lataccel, self.torque_params)
@@ -810,6 +830,9 @@ class LatControlTorque(LatControl):
       self.starpilot_lateral_state.frictionJerkDeadzone = float(friction_jerk_deadzone)
       self.starpilot_lateral_state.lowSpeedFactor = float(low_speed_factor)
       self.starpilot_lateral_state.unwindDetected = bool(unwind_detected)
+      # rev 5: the observer's term as added to the feedforward (torque frame = -(+left estimate)), and its hold flag
+      self.starpilot_lateral_state.accordObserverTorque = float(-getattr(self, "accord_dob_torque", 0.0))
+      self.starpilot_lateral_state.accordObserverFrozen = bool(getattr(self, "accord_dob_frozen", False))
       pid_log.saturated = bool(self._check_saturation(self.steer_max - abs(output_torque) < 1e-3, CS, steer_limited_by_safety, curvature_limited))
       self.prev_output_torque = float(output_torque)
 

@@ -4939,6 +4939,21 @@
         "settings_tier": "simple"
       },
       {
+        "key": "AccordDobHz",
+        "label": "Accord: Disturbance Observer (Hz)",
+        "description": "Corner frequency of a model-based disturbance observer on the Accord torque controller (V293 torque-map EPS). Every frame it estimates the torque the plant model does not explain -- hold map(angle) + damping x rate + inertia x acceleration minus the controller's own output 60 ms ago -- low-passes it (two poles at this frequency) and adds it to the feedforward. It removes a wrong hold level, a road crown or leftover friction at this bandwidth instead of the integrator's 0.2-0.5 Hz, without adding lag to the planner path. Simulated: 0.03-torque disturbance residual at 1 s 0.09-0.12 -> 0.01-0.03 m/s^2; planner-step overshoot 0.27 -> 0.05; stable with the damping wrong x6, the hold map wrong x1.5, delays x1.5. Faded in 3-6 m/s, clipped at 0.3 torque, held while the driver steers. 0 = off.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 3.0,
+        "step": 0.1,
+        "precision": 1,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
         "key": "AccordRefFilter",
         "label": "Accord: Reference Filter (s)",
         "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",

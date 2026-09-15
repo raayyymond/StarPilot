@@ -836,6 +836,8 @@ class StarPilotVariables:
     toggle.accord_ref_filter = self.get_value("AccordRefFilter", cast=float, condition=is_honda_accord and known("AccordRefFilter"), default=0.12, min=0.0, max=0.5)
     # rev 4 (2026-09-14, routes 72+73): the integral gain from 18 m/s up; AccordTorqueKi stays the value below 8 m/s.  0 = flat.
     toggle.accord_torque_ki_high = self.get_value("AccordTorqueKiHigh", cast=float, condition=is_honda_accord and known("AccordTorqueKiHigh"), default=2.5, min=0.0, max=6.0)
+    # rev 5 (2026-09-15): disturbance-observer corner frequency; 0 = off (rev 4 behaviour)
+    toggle.accord_dob_hz = self.get_value("AccordDobHz", cast=float, condition=is_honda_accord and known("AccordDobHz"), default=0.6, min=0.0, max=3.0)
     honda_pid_lateral = toggle.car_make == "honda" and CP.lateralTuning.which() == "pid" and not is_angle_car
     toggle.honda_lateral_pid_kp_scale = self.get_value("HondaLateralPidKpScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
     toggle.honda_lateral_pid_ki_scale = self.get_value("HondaLateralPidKiScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)

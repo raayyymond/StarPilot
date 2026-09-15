@@ -234,7 +234,13 @@ HONDA_ACCORD_EPS_INERTIA = 8e-5                    # torque per deg/s^2
 # Loop-delay budget measured on route 71: CAN-in -> carState 3 ms, controlsState -> 0xE4 13 ms, 0xE4 -> delivered
 # torque 30-45 ms; the rate-loop-alone gain must stay below 1 where its phase passes -180 deg (3.5-4 Hz):
 # at 0.0006 it is 0.5 there, at 0.0012 it would cross.
-HONDA_ACCORD_RATE_LOOP_RC = 0.03                   # s
+HONDA_ACCORD_RATE_LOOP_RC = 0.01                   # s (rev 5, 2026-09-15: was 0.03.  The rate loop damps only where its
+                                                   # phase -(w*Td + atan(w*RC)) is above -90 deg, i.e. below ~2.8 Hz with
+                                                   # the 60 ms round trip; the 0.03 s filter cost a further 25 deg at
+                                                   # 2.5 Hz.  0.01 s moves the damping/pumping boundary up ~0.5 Hz and
+                                                   # cut the simulated hard-turn 1.6-3 Hz wheel-rate energy 15-20 %.
+                                                   # The 0x18F rate is 0.125 deg/s per LSB, so the extra noise is
+                                                   # 1e-3 * 0.125 = 1e-4 torque, far below the command LSB.)
 HONDA_ACCORD_RATE_LOOP_TAPER_V = 12.0              # m/s
 HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg of desired-angle travel to swing the hysteresis term end to end
 # Integral-gain speed schedule (AccordTorqueKi below the first knot, AccordTorqueKiHigh from the second, linear between).
@@ -244,6 +250,23 @@ HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg of desired-angle travel
 # v293r4_design.py): Ki 2.5 at 5 m/s rings a curve-hold kick to 16-36 deg pk-pk (0.6: 0.7-0.8 deg); at 19-26 m/s the same
 # 2.5 cuts the 2 s residual of a 0.03-torque disturbance from 0.11-0.12 to 0.005-0.013 m/s^2 with Ms unchanged (1.75).
 HONDA_ACCORD_KI_SCHEDULE_V_BP = [8.0, 18.0]        # m/s
+# Disturbance observer (AccordDobHz, rev 5, 2026-09-15).  A P loop through the ~60 ms round trip has a static stiffness of
+# only 1 + Kp_torque/k (1.7 at the flown Kp; ~3 at the most Kp the margins allow), so a hold-map level error, a road crown
+# or the friction the hysteresis term missed leaves 1/stiffness of it in the angle; the integrator takes it out at its own
+# corner (Ki/Kp, 0.2-0.5 Hz) = the catch-up the operator feels.  The observer estimates the unmodelled torque directly,
+#   w = hold(angle) + b(v) * rate + J * acc - u(t - HONDA_ACCORD_DOB_DELAY)        (+left frame, torque units)
+# from the measured wheel state and the controller's own past output, low-passes it (two poles at AccordDobHz) and adds
+# it to the feedforward.  Its loop closes only through the MODEL MISMATCH (|Q| * |P/P_model - 1| < 1), not through the
+# plant's phase, so the corner can sit above the integrator's (kit v293r5_design*.py, five plant worlds: 0.03-torque
+# step residual at 1 s 0.07 -> 0.03 m/s^2, planner-step overshoot 0.5 -> 0.2, hard-turn hold error -60 %, stable under
+# b x0.15-8, hold x1.5, delays x1.5, J x1.5).  The model's b(v) = the fork's 1/G(v) is deliberately the HIGHER estimate:
+# below the corner the observer installs the model's damping whatever the plant has; above it the mismatch de-damps the
+# 2-2.7 Hz wheel mode, which is why the corner ships at 0.6 Hz (0.8 rang with delays x1.5).  Frozen while the
+# output is safety-limited or the driver holds the wheel; reset on engage; faded in from HONDA_ACCORD_DOB_FADE_V_BP.
+HONDA_ACCORD_DOB_DELAY = 0.06                      # s, openpilot -> EPS -> angle sensor round trip the model assumes
+HONDA_ACCORD_DOB_ACC_RC = 0.05                     # s, filter on d(rate)/dt for the inertia term
+HONDA_ACCORD_DOB_MAX_TORQUE = 0.3                  # clip on the estimate, units of the [-1, 1] output
+HONDA_ACCORD_DOB_FADE_V_BP = [3.0, 6.0]            # m/s: 0 -> full authority (the plant is unidentified below 8 m/s)
 VOLT_STANDARD_CARS = (
   GM_CAR.CHEVROLET_VOLT,
   GM_CAR.CHEVROLET_VOLT_2019,
@@ -2507,6 +2530,54 @@ class HondaAccordErrorNotch:
     y = b0 * x + b1 * self.x1 + b0 * self.x2 - b1 * self.y1 - a2 * self.y2
     self.x2, self.x1, self.y2, self.y1 = self.x1, x, self.y1, y
     return y
+
+
+class HondaAccordDisturbanceObserver:
+  """Model-based disturbance observer for the V293 torque-map EPS (see the HONDA_ACCORD_DOB_* constants).
+  update() takes the +left-frame measured angle / rate, the speed and the controller's own output torque of THIS
+  frame (torque frame; it is delayed internally by HONDA_ACCORD_DOB_DELAY), and returns the unmodelled torque estimate
+  in the +left frame, faded by speed and clipped.  f_hz <= 0 disables it (returns 0, keeps the state at rest)."""
+
+  def __init__(self, dt: float):
+    self.dt = dt
+    self.n_delay = max(int(round(HONDA_ACCORD_DOB_DELAY / dt)), 1)
+    self.reset()
+
+  def reset(self, rate_deg_s: float = 0.0):
+    self.u_hist = [0.0] * self.n_delay        # +left-frame torque, oldest first
+    self.w1 = 0.0                             # first pole state
+    self.w2 = 0.0                             # second pole state = the estimate before fade/clip
+    self.prev_rate = float(rate_deg_s)
+    self.acc = 0.0
+    self.residual = 0.0
+
+  def update(self, angle_deg: float, rate_deg_s: float, v_ego: float, output_torque: float, f_hz: float,
+             hold_torque_fn, hold_map: bool = True, gain_scale: float = 1.0, spring_scale: float = 1.0,
+             freeze: bool = False) -> float:
+    rate_deg_s = float(rate_deg_s)
+    if f_hz <= 0.0:
+      self.reset(rate_deg_s)
+      return 0.0
+    # controller torque frame -> +left plant frame (plant_ff_torque = -get_honda_accord_rate_plant_ff(...))
+    u_left_now = -float(output_torque)
+    u_left_delayed = self.u_hist[0]
+    self.u_hist.append(u_left_now); self.u_hist.pop(0)
+    # the model: hold(angle) + b(v) rate + J acc, b = 1/G(v) (the fork's own viscous term)
+    if hold_map:
+      spring = float(hold_torque_fn(angle_deg, v_ego)) * float(spring_scale)
+    else:
+      spring = get_honda_accord_rate_plant_ff(angle_deg, 0.0, v_ego, 0.0, gain_scale, spring_scale, hold_map=False)
+    b_model = 1.0 / (float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V)) * max(float(gain_scale), 0.1))
+    alpha_acc = self.dt / (HONDA_ACCORD_DOB_ACC_RC + self.dt)
+    self.acc += alpha_acc * ((rate_deg_s - self.prev_rate) / self.dt - self.acc)
+    self.prev_rate = rate_deg_s
+    self.residual = u_left_delayed - (spring + b_model * rate_deg_s + HONDA_ACCORD_EPS_INERTIA * self.acc)
+    if not freeze:
+      alpha = self.dt / (1.0 / (2.0 * math.pi * float(f_hz)) + self.dt)
+      self.w1 += alpha * (self.residual - self.w1)
+      self.w2 += alpha * (self.w1 - self.w2)
+    fade = float(np.interp(v_ego, HONDA_ACCORD_DOB_FADE_V_BP, [0.0, 1.0]))
+    return float(np.clip(self.w2 * fade, -HONDA_ACCORD_DOB_MAX_TORQUE, HONDA_ACCORD_DOB_MAX_TORQUE))
 
 
 def get_bolt_2017_center_taper_scale(desired_lateral_accel: float, v_ego: float) -> float:

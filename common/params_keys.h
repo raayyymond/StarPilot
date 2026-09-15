@@ -403,6 +403,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // rev 4 (2026-09-14, routes 72+73): speed-scheduled integral gain -- AccordTorqueKi below 8 m/s, this from 18 m/s.
     // stock_value 0 = flat AccordTorqueKi (the rev-3 behaviour).
     {"AccordTorqueKiHigh", {PERSISTENT, FLOAT, "2.5", "0.0", 2, SETTINGS_SIMPLE}},
+    // rev 5 (2026-09-15): disturbance observer corner (Hz) on the Accord torque controller; 0 = off (rev 4 behaviour).
+    {"AccordDobHz", {PERSISTENT, FLOAT, "0.6", "0.0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

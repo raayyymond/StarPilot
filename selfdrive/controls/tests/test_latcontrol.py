@@ -120,6 +120,8 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_honda_accord_torque_ki,
   honda_accord_friction_hysteresis,
   HondaAccordErrorNotch,
+  HondaAccordDisturbanceObserver,
+  get_honda_accord_hold_torque,
   get_elantra_non_scc_ff_scale,
   get_honda_accord_steer_ratio,
   get_palisade_ff_scale,
@@ -2316,6 +2318,59 @@ class TestLatControl:
     toggles.accord_torque_ki_high = 0.0
     controller.update(True, CS, VM, params, False, 0.002, False, 0.2, None, None, toggles)
     assert controller.pid._k_i[1][0] == pytest.approx(0.6)
+
+  def test_honda_accord_disturbance_observer_estimates_an_unmodelled_torque(self):
+    # a wheel held at 0 deg, 0 deg/s at 20 m/s while the controller pushes 0.05 torque: the whole 0.05 is unmodelled
+    # (the hold map says 0 at 0 deg), so the estimate must converge to +0.05 in the +left frame (output_torque -0.05)
+    dob = HondaAccordDisturbanceObserver(DT_CTRL)
+    w = 0.0
+    for _ in range(round(3.0 / DT_CTRL)):
+      w = dob.update(0.0, 0.0, 20.0, -0.05, 0.8, get_honda_accord_hold_torque)
+    assert w == pytest.approx(0.05, abs=0.002)
+    # frozen: the estimate holds
+    w2 = dob.update(0.0, 0.0, 20.0, -0.5, 0.8, get_honda_accord_hold_torque, freeze=True)
+    assert w2 == pytest.approx(w, abs=1e-9)
+    # a torque the hold map DOES explain is not a disturbance: holding 10 deg with exactly the map's torque
+    dob.reset()
+    for _ in range(round(3.0 / DT_CTRL)):
+      w = dob.update(10.0, 0.0, 20.0, -get_honda_accord_hold_torque(10.0, 20.0), 0.8, get_honda_accord_hold_torque)
+    assert abs(w) < 0.002
+    # off below the fade, off with f_hz 0, clipped at the max
+    dob.reset()
+    for _ in range(round(3.0 / DT_CTRL)):
+      w = dob.update(0.0, 0.0, 1.0, -0.05, 0.8, get_honda_accord_hold_torque)
+    assert w == 0.0
+    assert HondaAccordDisturbanceObserver(DT_CTRL).update(0.0, 0.0, 20.0, -0.05, 0.0, get_honda_accord_hold_torque) == 0.0
+    dob.reset()
+    for _ in range(round(3.0 / DT_CTRL)):
+      w = dob.update(0.0, 0.0, 20.0, -0.9, 0.8, get_honda_accord_hold_torque)
+    assert w == pytest.approx(0.3)
+
+  def test_honda_accord_disturbance_observer_reaches_the_feedforward(self):
+    # a stuck wheel (0 deg, 0 deg/s) with a persistent plan: with the observer on, the output must grow beyond the P + I
+    # + FF answer within a second, because the unmodelled torque it estimates is added to the feedforward
+    def run(dob_hz):
+      controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+      toggles.accord_dob_hz = dob_hz
+      toggles.accord_torque_ki = 0.0
+      toggles.accord_torque_ki_high = 0.0
+      toggles.accord_rate_loop_gain = 0.0
+      toggles.accord_ref_filter = 0.0
+      CS.vEgo = 20.0
+      CS.steeringAngleDeg = 0.0
+      CS.steeringRateDeg = 0.0
+      controller.update_live_torque_params(14.0, 0.0, 0.0)
+      controller.update(False, CS, VM, params, False, 0.0, False, 0.2, None, None, toggles)
+      out = 0.0
+      for _ in range(round(1.5 / DT_CTRL)):
+        out, _, _ = controller.update(True, CS, VM, params, False, 0.002, False, 0.2, None, None, toggles)
+      return out, controller.accord_dob_torque
+    out_off, dob_off = run(0.0)
+    out_on, dob_on = run(0.8)
+    assert dob_off == 0.0
+    assert abs(dob_on) > 0.01
+    assert abs(out_on) > abs(out_off) * 1.3
+    assert (out_on > 0) == (out_off > 0)
 
   def test_honda_accord_friction_relay_is_off_under_the_hysteresis_feedforward(self):
     # route 73 (2026-09-14): a back-filled stock SteerFriction 0.212 ran the error relay at ~10x SteerKP under rev 3.

@@ -64,6 +64,7 @@ SAFE_MODE_MANAGED_KEYS = (
   "AccordErrorNotchQ",
   "AccordRefFilter",
   "AccordTorqueKiHigh",
+  "AccordDobHz",
   "CameraOffset",
   "LaneCentering",
   "LaneCenteringPauseOnSignal",

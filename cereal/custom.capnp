@@ -309,6 +309,11 @@ struct StarPilotLateralState @0xc2243c65e0340384 {
   frictionJerkDeadzone @5 :Float32;
   lowSpeedFactor @6 :Float32;
   unwindDetected @7 :Bool;
+  # Honda Accord V293 torque mode, rev 5 (2026-09-15): the disturbance observer's estimate (torque units, controller
+  # frame, the term that was ADDED to the feedforward this frame) and whether the observer was held this frame
+  # (output safety-limited or driver holding the wheel).  0 / false on every other car and with AccordDobHz 0.
+  accordObserverTorque @8 :Float32;
+  accordObserverFrozen @9 :Bool;
 }
 
 struct CustomReserved12 @0x9ccdc8676701b412 {
