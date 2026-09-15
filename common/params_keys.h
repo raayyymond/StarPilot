@@ -400,6 +400,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AccordRateLoopGain", {PERSISTENT, FLOAT, "0.0006", "0.0", 2, SETTINGS_SIMPLE}},
     {"AccordErrorNotchQ", {PERSISTENT, FLOAT, "1.0", "0.0", 2, SETTINGS_SIMPLE}},
     {"AccordRefFilter", {PERSISTENT, FLOAT, "0.12", "0.0", 2, SETTINGS_SIMPLE}},
+    // rev 4 (2026-09-14, routes 72+73): speed-scheduled integral gain -- AccordTorqueKi below 8 m/s, this from 18 m/s.
+    // stock_value 0 = flat AccordTorqueKi (the rev-3 behaviour).
+    {"AccordTorqueKiHigh", {PERSISTENT, FLOAT, "2.5", "0.0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

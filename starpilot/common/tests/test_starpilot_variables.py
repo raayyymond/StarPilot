@@ -1,6 +1,59 @@
 from types import SimpleNamespace
 
+import pytest
+
 from openpilot.starpilot.common import starpilot_variables as spv
+
+
+class _FakeParams:
+  def __init__(self, values):
+    self.values = dict(values)
+
+  def get(self, key):
+    v = self.values.get(key)
+    return None if v is None else str(v).encode()
+
+  def get_float(self, key):
+    v = self.values.get(key)
+    return float("nan") if v is None else float(v)
+
+  def put_float(self, key, value):
+    self.values[key] = float(value)
+
+  def remove(self, key):
+    self.values.pop(key, None)
+
+
+def _sync(values, key, stock_key, live):
+  fake = SimpleNamespace(params=_FakeParams(values))
+  spv.StarPilotVariables._sync_stock_param(fake, key, stock_key, live)
+  return fake.params.values
+
+
+def test_sync_stock_param_never_overwrites_an_explicit_zero():
+  # route 75604b0a432fdc89_00000073 (2026-09-14): SteerFriction 0.0 from the Accord torque-mode toggle config was
+  # back-filled with the stock 0.212 at a restart because 0.0 counted as "unset"
+  out = _sync({"SteerFriction": 0.0}, "SteerFriction", "SteerFrictionStock", 0.212)
+  assert out["SteerFriction"] == 0.0
+  assert out["SteerFrictionStock"] == pytest.approx(0.212)
+  # an explicit user value with a stale stock baseline is not touched either
+  out = _sync({"SteerFriction": 0.0, "SteerFrictionStock": 0.15}, "SteerFriction", "SteerFrictionStock", 0.212)
+  assert out["SteerFriction"] == 0.0
+  out = _sync({"SteerFriction": 0.05, "SteerFrictionStock": 0.15}, "SteerFriction", "SteerFrictionStock", 0.212)
+  assert out["SteerFriction"] == pytest.approx(0.05)
+  assert out["SteerFrictionStock"] == pytest.approx(0.212)
+
+
+def test_sync_stock_param_backfills_unset_and_stock_tracking_values():
+  out = _sync({}, "SteerFriction", "SteerFrictionStock", 0.212)
+  assert out["SteerFriction"] == pytest.approx(0.212)
+  assert out["SteerFrictionStock"] == pytest.approx(0.212)
+  # a value still tracking the old stock baseline follows the new one
+  out = _sync({"SteerFriction": 0.15, "SteerFrictionStock": 0.15}, "SteerFriction", "SteerFrictionStock", 0.212)
+  assert out["SteerFriction"] == pytest.approx(0.212)
+  # an unchanged stock baseline writes nothing
+  out = _sync({"SteerFriction": 0.0, "SteerFrictionStock": 0.212}, "SteerFriction", "SteerFrictionStock", 0.212)
+  assert out["SteerFriction"] == 0.0
 
 
 def test_legacy_volt_stock_acc_models_share_sng_and_auto_hold_scope():

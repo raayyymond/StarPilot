@@ -214,7 +214,12 @@ HONDA_ACCORD_FF_MOVE_TORQUE_LIMIT_V = [1.0, 1.4]    # torque, units of the [-1, 
 # direction of the last desired motion.  Kit: accord-eps-torque-mod/rlog-tools/studies/grind/
 # _scratch/r70r71_hold_joint_fit.txt and v293r2_design.py.
 HONDA_ACCORD_HOLD_V_BP = [2.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 17.5, 20.0, 23.0, 28.0]   # m/s
-HONDA_ACCORD_HOLD_K_V = [0.0021, 0.0028, 0.0044, 0.0052, 0.0074, 0.0092, 0.0095, 0.0103, 0.0116, 0.0133, 0.0134]  # torque/deg at 0 deg
+# rev 4 (2026-09-14): the 28 m/s knot 0.0134 -> 0.0160.  The routes 70+71 fit was flat above 23 m/s because the >22 band's
+# median speed was 22.8; routes 72/73 (medians 25.7 / 26.7 m/s) needed 1.3-1.7x the map at 4-12 deg, and the tyre's
+# aligning torque grows ~v^2 for a given angle until it saturates, so a flat law above 23 is the one shape that cannot be
+# right.  0.0160 is x1.20 (a v^1.0 rise 23 -> 28), deliberately short of v^2 (x1.48): the route-to-route scatter of the
+# small-angle hold at speed is itself +/-30-40 % (crown, wind), which the integral gain -- not the map -- has to absorb.
+HONDA_ACCORD_HOLD_K_V = [0.0021, 0.0028, 0.0044, 0.0052, 0.0074, 0.0092, 0.0095, 0.0103, 0.0116, 0.0133, 0.0160]  # torque/deg at 0 deg
 HONDA_ACCORD_HOLD_SAT_DEG = (19.3, 546.0, 3.01)   # sat(v) = a + b * exp(-v / c), deg
 HONDA_ACCORD_HOLD_STATIC_FRICTION = 0.020          # torque, the intercept the map was fitted WITHOUT (see above)
 # The steering system's own mode on the V293 firmware: J * angle'' + b * angle' + hold(angle) = torque, with
@@ -232,6 +237,13 @@ HONDA_ACCORD_EPS_INERTIA = 8e-5                    # torque per deg/s^2
 HONDA_ACCORD_RATE_LOOP_RC = 0.03                   # s
 HONDA_ACCORD_RATE_LOOP_TAPER_V = 12.0              # m/s
 HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg of desired-angle travel to swing the hysteresis term end to end
+# Integral-gain speed schedule (AccordTorqueKi below the first knot, AccordTorqueKiHigh from the second, linear between).
+# The live integral gain is Ki * (1 + lsf / Kp): the hard-coded low-speed factor already multiplies it ~7x at 5 m/s, so in
+# angle terms the I loop's time constant is roughly speed-flat -- but the low-speed steering mode (1.0-1.5 Hz, zeta ~0.2)
+# tolerates far less integral phase lag than the 2 Hz mode at speed.  Simulated on the identified plant (kit
+# v293r4_design.py): Ki 2.5 at 5 m/s rings a curve-hold kick to 16-36 deg pk-pk (0.6: 0.7-0.8 deg); at 19-26 m/s the same
+# 2.5 cuts the 2 s residual of a 0.03-torque disturbance from 0.11-0.12 to 0.005-0.013 m/s^2 with Ms unchanged (1.75).
+HONDA_ACCORD_KI_SCHEDULE_V_BP = [8.0, 18.0]        # m/s
 VOLT_STANDARD_CARS = (
   GM_CAR.CHEVROLET_VOLT,
   GM_CAR.CHEVROLET_VOLT_2019,
@@ -2445,6 +2457,14 @@ def get_honda_accord_mode_hz(v_ego: float) -> float:
   """Frequency of the steering system's own mode on the V293 firmware, sqrt(k(v) / J) / 2pi."""
   k = float(np.interp(v_ego, HONDA_ACCORD_HOLD_V_BP, HONDA_ACCORD_HOLD_K_V))
   return math.sqrt(k / HONDA_ACCORD_EPS_INERTIA) / (2.0 * math.pi)
+
+
+def get_honda_accord_torque_ki(v_ego: float, ki_low: float, ki_high: float) -> float:
+  """Speed-scheduled integral gain: ki_low below HONDA_ACCORD_KI_SCHEDULE_V_BP[0], ki_high from [1], linear between.
+  ki_high <= 0 disables the schedule (flat ki_low, the rev-3 behaviour)."""
+  if ki_high <= 0.0:
+    return float(ki_low)
+  return float(np.interp(v_ego, HONDA_ACCORD_KI_SCHEDULE_V_BP, [float(ki_low), float(ki_high)]))
 
 
 def get_honda_accord_rate_loop_gain(v_ego: float, gain: float) -> float:

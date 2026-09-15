@@ -595,7 +595,10 @@ class LatControlTorque(LatControl):
       freeze_integrator = (steer_limited_by_safety or CS.steeringPressed or
                            CS.vEgo < self.low_speed_reset_threshold or unwind_detected)
       if self.is_honda_accord:
-        accord_ki = float(getattr(starpilot_toggles, "accord_torque_ki", HONDA_ACCORD_TORQUE_KI))
+        # rev 4: speed-scheduled integral gain (AccordTorqueKi below 8 m/s, AccordTorqueKiHigh from 18 m/s).  Changing the
+        # gain per frame does not step the integrator state: PIDController scales the increment, not the accumulator.
+        accord_ki = get_honda_accord_torque_ki(CS.vEgo, float(getattr(starpilot_toggles, "accord_torque_ki", HONDA_ACCORD_TORQUE_KI)),
+                                               float(getattr(starpilot_toggles, "accord_torque_ki_high", 0.0)))
         if self.pid._k_i[1][0] != accord_ki:
           self.pid._k_i = [self.pid._k_i[0], [accord_ki] * len(self.pid._k_i[1])]
       if self.is_honda_accord and getattr(starpilot_toggles, "accord_rate_plant_ff", True):
@@ -637,7 +640,11 @@ class LatControlTorque(LatControl):
         rate_meas = self.accord_rate_meas_filter.update(float(CS.steeringRateDeg))
         rate_loop_gain = get_honda_accord_rate_loop_gain(CS.vEgo, float(getattr(starpilot_toggles, "accord_rate_loop_gain", 0.0006)))
         inner_torque = -(self.accord_friction_z + rate_loop_gain * (angle_des_rate - rate_meas))
-        friction_torque = self.torque_from_lateral_accel(ff - ff_before_friction, self.torque_params)
+        # The generic SteerFriction relay (get_friction on the lsf-inflated error) is a loop gain of friction / 0.30 x LAF
+        # per m/s^2 of error.  With the hysteresis feedforward active it would double-count the friction, and on route 73
+        # (2026-09-14) a back-filled stock SteerFriction 0.212 ran it at ~10x SteerKP (4 Hz chatter on straights, 21 % of
+        # hard-turn frames at the Honda rate cap).  It is OFF whenever AccordFrictionHyst > 0.
+        friction_torque = 0.0 if friction_hyst > 0.0 else self.torque_from_lateral_accel(ff - ff_before_friction, self.torque_params)
         ff_torque = plant_ff_torque + friction_torque + inner_torque
         # The torque feedforward goes through the PID in lateral-accel space (the conversion is
         # linear for this car) so the integrator anti-windup clamp sees it.  The PID limits are

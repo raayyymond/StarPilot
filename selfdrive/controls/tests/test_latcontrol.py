@@ -117,6 +117,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_honda_accord_hold_torque,
   get_honda_accord_mode_hz,
   get_honda_accord_rate_loop_gain,
+  get_honda_accord_torque_ki,
   honda_accord_friction_hysteresis,
   HondaAccordErrorNotch,
   get_elantra_non_scc_ff_scale,
@@ -2290,6 +2291,50 @@ class TestLatControl:
     assert expected == pytest.approx(-0.0096)
     assert torque_moving - torque_still == pytest.approx(expected, abs=1e-3)
     assert torque_off == pytest.approx(torque_still, abs=1e-3)
+
+  def test_honda_accord_torque_ki_schedule(self):
+    # AccordTorqueKi below 8 m/s, AccordTorqueKiHigh from 18 m/s, linear between; 0 = flat (the rev-3 behaviour)
+    assert get_honda_accord_torque_ki(5.0, 0.6, 2.5) == pytest.approx(0.6)
+    assert get_honda_accord_torque_ki(8.0, 0.6, 2.5) == pytest.approx(0.6)
+    assert get_honda_accord_torque_ki(13.0, 0.6, 2.5) == pytest.approx(1.55)
+    assert get_honda_accord_torque_ki(18.0, 0.6, 2.5) == pytest.approx(2.5)
+    assert get_honda_accord_torque_ki(30.0, 0.6, 2.5) == pytest.approx(2.5)
+    assert get_honda_accord_torque_ki(30.0, 0.6, 0.0) == pytest.approx(0.6)
+
+  def test_honda_accord_torque_ki_schedule_reaches_the_pid(self):
+    controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+    toggles.accord_torque_ki = 0.6
+    toggles.accord_torque_ki_high = 2.5
+    controller.update_live_torque_params(14.0, 0.0, 0.0)
+    for v, expected in ((5.0, 0.6), (13.0, 1.55), (25.0, 2.5)):
+      CS.vEgo = v
+      controller.update(True, CS, VM, params, False, 0.002, False, 0.2, None, None, toggles)
+      assert controller.pid._k_i[1][0] == pytest.approx(expected)
+    toggles.accord_torque_ki_high = 0.0
+    controller.update(True, CS, VM, params, False, 0.002, False, 0.2, None, None, toggles)
+    assert controller.pid._k_i[1][0] == pytest.approx(0.6)
+
+  def test_honda_accord_friction_relay_is_off_under_the_hysteresis_feedforward(self):
+    # route 73 (2026-09-14): a back-filled stock SteerFriction 0.212 ran the error relay at ~10x SteerKP under rev 3.
+    # With AccordFrictionHyst > 0 the relay must contribute nothing; with it off the relay is the generic one.
+    def run(friction, hyst):
+      controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+      toggles.accord_friction_hyst = hyst
+      toggles.accord_rate_loop_gain = 0.0
+      toggles.accord_ref_filter = 0.0
+      CS.vEgo = 15.0
+      CS.steeringAngleDeg = 0.0
+      CS.steeringRateDeg = 0.0
+      controller.update_live_torque_params(14.0, 0.0, friction)   # friction = the SteerFriction relay's size
+      controller.update(False, CS, VM, params, False, 0.0, False, 0.2, None, None, toggles)
+      output_torque = 0.0
+      for _ in range(round(1.0 / DT_CTRL)):
+        output_torque, _, _ = controller.update(True, CS, VM, params, False, 0.004, False, 0.2, None, None, toggles)
+      return output_torque
+
+    # a persistent error (the plan asks 0.004 1/m while the wheel is held at 0) saturates a 0.212 relay
+    assert abs(run(0.212, 0.0) - run(0.0, 0.0)) > 0.1
+    assert run(0.212, 0.015) == pytest.approx(run(0.0, 0.015), abs=1e-9)
 
   def test_subaru_impreza_pid_output_scale_preserves_small_errors(self):
     assert get_subaru_impreza_pid_output_scale(0.0) == 1.0

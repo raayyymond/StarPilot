@@ -477,6 +477,7 @@ CUSTOM_PATCH_KEYS = {
   "AccordFFRateGain", "AccordTorqueKi", "AccordTurnFFTaper",
   "AccordEpsGainScale", "AccordEpsSpringScale",
   "AccordHoldMap", "AccordFrictionHyst", "AccordRateLoopGain", "AccordErrorNotchQ", "AccordRefFilter",
+  "AccordTorqueKiHigh",
 }
 
 
@@ -505,3 +506,4 @@ def test_galaxy_layout_custom_patches_section_tracks_every_patch_switch():
   assert _declared_default("AccordRateLoopGain") == "0.0006"
   assert _declared_default("AccordErrorNotchQ") == "1.0"
   assert _declared_default("AccordRefFilter") == "0.12"
+  assert _declared_default("AccordTorqueKiHigh") == "2.5"
