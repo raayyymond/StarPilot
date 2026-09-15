@@ -2164,7 +2164,10 @@ class TestLatControl:
     # (desired rate ~0, CS.steeringRateDeg 0)
     plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, 0.0, CS.vEgo, hold_map=True)
     assert plant_ff_torque == pytest.approx(-get_honda_accord_hold_torque(angle_des, CS.vEgo))
-    friction_torque = friction  # get_friction saturates at friction * LAF (lat accel) = friction (torque)
+    # rev 4 (2026-09-14): the SteerFriction relay (get_friction, would saturate at `friction` torque here) contributes
+    # NOTHING while AccordFrictionHyst > 0 -- the hysteresis feedforward is the friction term (route 73's back-filled
+    # 0.212 relay is the reason); see test_honda_accord_friction_relay_is_off_under_the_hysteresis_feedforward
+    friction_torque = 0.0
     hysteresis_torque = 0.015   # AccordFrictionHyst default, saturated after > 3 deg of desired travel
     expected_f = controller.lateral_accel_from_torque(plant_ff_torque + friction_torque + hysteresis_torque, controller.torque_params)
     assert expected_f > 0.0

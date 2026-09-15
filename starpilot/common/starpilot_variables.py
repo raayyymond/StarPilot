@@ -602,7 +602,7 @@ class StarPilotVariables:
       return
 
     raw_value = self.params.get(key)
-    key_unset = raw_value is None or len(raw_value) == 0
+    key_unset = raw_value is None or (isinstance(raw_value, (bytes, str)) and len(raw_value) == 0)
     current_value = self.params.get_float(key)
     if not math.isfinite(current_value):
       current_value = 0.0

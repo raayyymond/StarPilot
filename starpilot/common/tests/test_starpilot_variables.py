@@ -5,7 +5,9 @@ import pytest
 from openpilot.starpilot.common import starpilot_variables as spv
 
 
-class _FakeParams:
+class _SyncParams:
+  """the real Params' contract for the stock-sync: get() -> bytes or None, get_float() -> NaN when unset."""
+
   def __init__(self, values):
     self.values = dict(values)
 
@@ -25,9 +27,11 @@ class _FakeParams:
 
 
 def _sync(values, key, stock_key, live):
-  fake = SimpleNamespace(params=_FakeParams(values))
-  spv.StarPilotVariables._sync_stock_param(fake, key, stock_key, live)
-  return fake.params.values
+  params = _SyncParams(values)
+  variables = object.__new__(spv.StarPilotVariables)
+  variables.params = params
+  variables._sync_stock_param(key, stock_key, live)
+  return params.values
 
 
 def test_sync_stock_param_never_overwrites_an_explicit_zero():
