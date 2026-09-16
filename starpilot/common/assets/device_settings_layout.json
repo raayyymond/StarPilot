@@ -4965,6 +4965,17 @@
         "settings_tier": "simple"
       },
       {
+        "key": "AccordFrictionHystBand",
+        "label": "Accord: Friction Band Narrows With Speed",
+        "description": "Makes the static-friction hysteresis band speed-scheduled: 3.0 deg of desired-angle travel at 8 m/s narrowing to 0.60 deg at 26 (V293 torque-map EPS). Below half its band the term is an exact linear spring at zero phase; only above it does the term supply the friction break-out torque. A fixed 3 deg therefore puts that threshold at 0.034 m/s^2 of demand at 8 m/s but 0.251 at 26 -- so openpilot's own 0.06-0.08 m/s^2 lane-centring corrections fell entirely inside the spring regime above about 12 m/s and produced no wheel motion at all, which is what route 76 measured (0-6 % of them produced any gyro response). The plant solved for angle is backlash of half-width F/k, and a play operator emits exactly nothing below that amplitude. The table is the largest slope that does not exceed the levelled hold stiffness, so it reaches break-out without over-delivering more than the backlash ratio forces, and leaves the last of it to the disturbance observer. Measured on the stick-slip plant at 19 m/s: outer-loop phase margin +2.5 to +8.6 deg, lag 0.37 to 0.26 s, lane residual 0.196 to 0.138 m, small-signal gain 1.45 to 1.93. If the car over-turns small corrections, AccordFrictionHyst 0.015 -> 0.010 moves that gain to 1.70 at no cost in margin. Acts on the DESIRED angle only, so it has no loop gain and cannot self-excite. OFF = the flat 3 deg band.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
         "key": "AccordRefFilter",
         "label": "Accord: Reference Filter (s)",
         "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",

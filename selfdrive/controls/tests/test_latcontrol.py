@@ -116,8 +116,10 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_honda_accord_rate_plant_ff,
   get_honda_accord_hold_torque,
   get_honda_accord_hold_level,
+  get_honda_accord_friction_hyst_band,
   get_honda_accord_mode_hz,
   HONDA_ACCORD_JERK_LP_HZ,
+  HONDA_ACCORD_FRICTION_HYST_BAND_DEG,
   get_honda_accord_rate_loop_gain,
   get_honda_accord_torque_ki,
   honda_accord_friction_hysteresis,
@@ -2267,6 +2269,40 @@ class TestLatControl:
       1.30 * get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True, hold_level=False))
     assert get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True) == pytest.approx(
       get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True, hold_level=False))
+
+  def test_honda_accord_friction_hyst_band_narrows_with_speed(self):
+    # rev 6: the band sets the DEMAND at which the hysteresis term stops being a linear spring and starts supplying
+    # friction break-out.  A fixed 3 deg puts that threshold at a different demand at every speed, which is why the
+    # loop's own 0.06-0.08 m/s^2 corrections produced no motion above ~12 m/s.
+    assert get_honda_accord_friction_hyst_band(8.0) == pytest.approx(3.0)
+    assert get_honda_accord_friction_hyst_band(12.0) == pytest.approx(2.10)
+    assert get_honda_accord_friction_hyst_band(19.0) == pytest.approx(0.96)
+    assert get_honda_accord_friction_hyst_band(26.0) == pytest.approx(0.60)
+    assert get_honda_accord_friction_hyst_band(40.0) == pytest.approx(0.60)      # flat past the last knot
+    assert get_honda_accord_friction_hyst_band(2.0) == pytest.approx(3.0)        # and before the first
+    # monotone narrowing, and never wider than the rev 3-5 flat band
+    bands = [get_honda_accord_friction_hyst_band(2.0 + 38.0 * i / 399.0) for i in range(400)]
+    assert all(b <= a + 1e-12 for a, b in zip(bands, bands[1:]))
+    assert max(bands) <= HONDA_ACCORD_FRICTION_HYST_BAND_DEG + 1e-12
+    # scheduled=False is the rev 3-5 behaviour at every speed -- the toggle's OFF value
+    for v in (2.0, 8.0, 19.0, 26.0, 40.0):
+      assert get_honda_accord_friction_hyst_band(v, scheduled=False) == HONDA_ACCORD_FRICTION_HYST_BAND_DEG
+    # THE SIZING BOUND: friction / band must not exceed the levelled hold stiffness, or the term over-delivers by
+    # more than the backlash ratio already forces (see the constants' note).  Checked at the knots, friction 0.015.
+    for v in (8.0, 12.0, 19.0, 26.0):
+      slope = 0.015 / get_honda_accord_friction_hyst_band(v)
+      k_lev = get_honda_accord_hold_torque(0.5, v) / 0.5
+      assert slope <= k_lev * 1.35, (v, slope, k_lev)
+    # and the operator itself still reaches +-friction after one band of travel, in either direction
+    for v in (8.0, 26.0):
+      band = get_honda_accord_friction_hyst_band(v)
+      z = 0.0
+      for _ in range(200):
+        z = honda_accord_friction_hysteresis(z, band / 100.0, 0.015, band)
+      assert z == pytest.approx(0.015, abs=1e-9)
+      for _ in range(400):
+        z = honda_accord_friction_hysteresis(z, -band / 100.0, 0.015, band)
+      assert z == pytest.approx(-0.015, abs=1e-9)
 
   def test_honda_accord_jerk_lead_cutoff_flattens_the_delay_compensator(self):
     # rev 6.  setpoint = u(t-D) + F_j(s) * (u(t) - u(t-D))  =>  H(s) = e^{-sD} + F_j(s) * (1 - e^{-sD}), which is

@@ -409,6 +409,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // 12.5 m/s, 1.30 from 17.5.  Reaches the rate-plant feedforward AND the observer's internal model together.
     // 0 = the rev 3-5 map, i.e. an exact revert of the only rev-6 edit that raises delivered torque.
     {"AccordHoldLevel", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    // rev 6 (2026-09-16): speed-scheduled width of the Accord static-friction hysteresis band
+    // (HONDA_ACCORD_FRICTION_HYST_BAND_V), 3.0 deg at 8 m/s narrowing to 0.60 at 26.  The band sets the demand at
+    // which the term stops being a linear spring and starts supplying friction break-out; a fixed 3 deg puts that
+    // threshold at 0.034 m/s^2 at 8 m/s but 0.251 at 26, so the loop's own 0.06-0.08 m/s^2 corrections fell inside
+    // the spring regime at speed and produced no motion.  0 = the rev 3-5 flat 3 deg.
+    {"AccordFrictionHystBand", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},

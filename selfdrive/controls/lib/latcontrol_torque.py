@@ -655,7 +655,9 @@ class LatControlTorque(LatControl):
         # an angle depends on which way the wheel last moved; z follows the DESIRED angle so it is pure
         # feedforward (no loop gain, unlike the SteerFriction relay that limit-cycled the 2 Hz mode on route 71).
         friction_hyst = float(getattr(starpilot_toggles, "accord_friction_hyst", 0.015))
-        self.accord_friction_z = honda_accord_friction_hysteresis(self.accord_friction_z, d_angle_des, friction_hyst)
+        hyst_band = get_honda_accord_friction_hyst_band(CS.vEgo, bool(getattr(starpilot_toggles, "accord_friction_hyst_band", True)))
+        self.accord_friction_z = honda_accord_friction_hysteresis(self.accord_friction_z, d_angle_des, friction_hyst,
+                                                                  hyst_band)
         # 100 Hz rate loop (AccordRateLoopGain): the electronic damper the EPS lost in torque mode, closed on the
         # measured wheel rate (carState.steeringRateDeg, fresh every frame) against the feedforward's desired rate.
         rate_meas = self.accord_rate_meas_filter.update(float(CS.steeringRateDeg))

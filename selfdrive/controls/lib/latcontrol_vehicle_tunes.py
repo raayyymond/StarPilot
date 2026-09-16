@@ -274,7 +274,34 @@ HONDA_ACCORD_RATE_LOOP_RC = 0.01                   # s (rev 5, 2026-09-15: was 0
                                                    # The 0x18F rate is 0.125 deg/s per LSB, so the extra noise is
                                                    # 1e-3 * 0.125 = 1e-4 torque, far below the command LSB.)
 HONDA_ACCORD_RATE_LOOP_TAPER_V = 12.0              # m/s
-HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg of desired-angle travel to swing the hysteresis term end to end
+# Desired-angle travel that swings the hysteresis term end to end.  rev 6 (2026-09-16): speed-scheduled.
+# WHAT THE TERM IS.  Below band/2 of demand it is an EXACT LINEAR SPRING of friction/band torque per degree at
+# EXACTLY ZERO phase -- not friction compensation at all; only above band/2 does it become friction*sign(d angle_des)
+# with the phase lead a Coulomb compensator needs (+11 deg at a 0.57 deg demand, +39 at 1.2, +73 at 10).  So the band
+# sets THE DEMAND AT WHICH THE TERM STOPS BEING A SPRING AND STARTS BEING FRICTION COMPENSATION, and a fixed 3 deg is
+# a different demand at every speed: 0.034 m/s^2 at 8 m/s but 0.158 at 19 and 0.251 at 26.
+# WHY IT MATTERS.  Solving u = k*theta + b*theta' + F*sign(theta') for theta gives PLAY of half-width d = F/k: the
+# plant is BACKLASH, and a play operator emits EXACTLY NOTHING below an input amplitude of d.  At F 0.012 that is
+# 1.39 / 0.70 / 0.56 deg at 11.4 / 17.6 / 25.6 m/s against correction amplitudes of 0.69 / 0.32 / 0.18 deg, so
+# openpilot's own 0.06-0.08 m/s^2 lane-centring corrections produce no motion at all above ~12 m/s -- which is what
+# route 76 measured (0-6 % of them produced any gyro response).
+# HOW IT IS SIZED, and why not smaller.  A demand-keyed term that actually reaches break-out MUST over-deliver: it
+# needs a slope >= F/dtheta, and once the wheel is free the plant follows u/k, so it delivers (F/dtheta)/k = d/dtheta
+# times the demand.  "Delivers the smallest correction" and "does not over-deliver it" are mutually exclusive below
+# the half-width.  The table is therefore the LARGEST slope that does not over-deliver -- friction/band ~ the levelled
+# hold stiffness: 0.0050 / 0.0071 / 0.0156 / 0.0250 torque/deg against k*level 0.0052 / 0.0088 / 0.0144 / 0.0194.
+# That puts the spring/friction threshold at a flat ~0.05 m/s^2 of demand above 12 m/s, and leaves the last of the
+# break-out to the disturbance observer -- the only term that can supply it without over-delivering.
+# MEASURED on the fully stick-slip plant (kit scratchpad minlaw_sim8.txt, route-76 world, delays x1.5, 19 m/s):
+# outer-loop phase margin +2.5 -> +8.6 deg, lag at 0.2 Hz 0.37 -> 0.26 s, lane residual 0.196 -> 0.138 m, and the
+# 0.05 m/s^2 small-signal gain 1.45 -> 1.93.  Halving the table again reaches +12.8 deg but takes that gain to 2.68
+# -- recorded, not shipped.  If the drive reads over-turning, AccordFrictionHyst 0.015 -> 0.010 moves it to 1.70 at
+# no cost in margin, and it is a Galaxy toggle.
+# It acts on the DESIRED angle only, so unlike the SteerFriction relay (falsified twice: route 71's 2.34 Hz limit
+# cycle, route 73's 4-4.7 Hz chatter) it has no loop gain and cannot self-excite.
+HONDA_ACCORD_FRICTION_HYST_BAND_BP = [8.0, 12.0, 19.0, 26.0]     # m/s
+HONDA_ACCORD_FRICTION_HYST_BAND_V = [3.0, 2.10, 0.96, 0.60]      # deg of desired-angle travel
+HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg, the fixed fallback = the rev 3-5 behaviour
 # Integral-gain speed schedule (AccordTorqueKi below the first knot, AccordTorqueKiHigh from the second, linear between).
 # The live integral gain is Ki * (1 + lsf / Kp): the hard-coded low-speed factor already multiplies it ~7x at 5 m/s, so in
 # angle terms the I loop's time constant is roughly speed-flat -- but the low-speed steering mode (1.0-1.5 Hz, zeta ~0.2)
@@ -2535,6 +2562,14 @@ def get_honda_accord_torque_ki(v_ego: float, ki_low: float, ki_high: float) -> f
 def get_honda_accord_rate_loop_gain(v_ego: float, gain: float) -> float:
   """AccordRateLoopGain tapered above HONDA_ACCORD_RATE_LOOP_TAPER_V (torque per deg/s)."""
   return float(gain) * min(1.0, HONDA_ACCORD_RATE_LOOP_TAPER_V / max(float(v_ego), 0.1))
+
+
+def get_honda_accord_friction_hyst_band(v_ego: float, scheduled: bool = True) -> float:
+  """Desired-angle travel (deg) that swings the static-friction hysteresis term end to end, at this speed.
+  See the HONDA_ACCORD_FRICTION_HYST_BAND_* constants.  scheduled=False is the rev 3-5 flat band."""
+  if not scheduled:
+    return HONDA_ACCORD_FRICTION_HYST_BAND_DEG
+  return float(np.interp(v_ego, HONDA_ACCORD_FRICTION_HYST_BAND_BP, HONDA_ACCORD_FRICTION_HYST_BAND_V))
 
 
 def honda_accord_friction_hysteresis(z: float, d_angle_des_deg: float, friction: float,
