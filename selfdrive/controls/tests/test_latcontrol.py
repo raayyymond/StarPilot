@@ -2158,7 +2158,13 @@ class TestLatControl:
     assert lac_log.active
     # feedforward carries the sign of the setpoint and is a torque-derived quantity, not setpoint/LAF
     assert lac_log.f * lac_log.desiredLateralAccel > 0.0
-    assert abs(lac_log.f) < abs(lac_log.desiredLateralAccel)
+    # rev 6.4: this used to assert |f| < |setpoint|.  With the hold level at x1.45 the plant-derived feedforward
+    # legitimately EXCEEDS the naive setpoint/LAF equivalent at this operating point (0.921 against 0.900) --
+    # which is the point of the level: the rack is measurably stiffer than the LAF conversion assumes.  The
+    # assertion's real job is to prove f is plant-derived rather than a copy of the setpoint, so bound it
+    # instead of ordering it, and keep the inequality that would catch a passthrough.
+    assert abs(lac_log.f) != pytest.approx(abs(lac_log.desiredLateralAccel) / lat_accel_factor, rel=1e-3)
+    assert 0.8 < abs(lac_log.f) / abs(lac_log.desiredLateralAccel) < 1.15
     # after 2 s the setpoint has settled (desired jerk ~0) so the move term is ~0 and the plant
     # feedforward is just the hold torque for the desired angle; the friction term is saturated
     # (error well past the threshold) and equals friction * LAF.  Recompute both independently.
@@ -2241,12 +2247,19 @@ class TestLatControl:
     assert move == pytest.approx(0.5 * 100.0 / 271.0, rel=1e-6)
 
   def test_honda_accord_hold_level_is_speed_scheduled_and_leaves_the_mode_law_alone(self):
-    # rev 6: a LEVEL on the hold map only.  1.00 at and below 12.5 m/s (the map is right there), ramping to 1.30 at 17.5.
+    # rev 6.4: a LEVEL on the hold map only.  1.15 at and below 12.5 m/s, ramping to 1.45 at 17.5.  Rev 6 shipped
+    # 1.00/1.30, deliberately short of the measured x1.4-1.65 so the observer could absorb route-to-route scatter.
+    # The band-passed tracking metric falsified that: the under-correction leaves a deficit the observer carries,
+    # and carrying it is what makes it cancel the commanded fine correction.  Delivered fraction of a 0.06 m/s^2
+    # lane-centring correction, 0.25-0.60 Hz, against rev 6 as flown: 0.86 -> 0.95 at 19 m/s, 0.88 -> 0.97 at 26.
     for v in (0.0, 2.0, 5.0, 8.0, 10.0, 12.5):
-      assert get_honda_accord_hold_level(v) == pytest.approx(1.0)
+      assert get_honda_accord_hold_level(v) == pytest.approx(1.15)
     for v in (17.5, 20.0, 23.0, 28.0, 40.0):
-      assert get_honda_accord_hold_level(v) == pytest.approx(1.30)
-    assert get_honda_accord_hold_level(15.0) == pytest.approx(1.15)                  # linear between the knots
+      assert get_honda_accord_hold_level(v) == pytest.approx(1.45)
+    assert get_honda_accord_hold_level(15.0) == pytest.approx(1.30)                  # linear between the knots
+    # the level must stay inside the measured over-stiffness, x1.4-1.65 at speed; above that it over-holds and
+    # nothing takes that back.  The sweep also rejected 1.30/1.50 -- it rings the hold-and-kick test at 26 m/s.
+    assert 1.40 <= get_honda_accord_hold_level(20.0) <= 1.50
     assert get_honda_accord_hold_level(20.0, level=False) == 1.0                     # the toggle's OFF value
     # it multiplies k only -- never sat, so the SHAPE of the saturating spring is untouched
     for v in (15.0, 20.0, 28.0):
@@ -2270,9 +2283,10 @@ class TestLatControl:
     assert get_honda_accord_mode_hz(22.8) == pytest.approx(2.04, abs=0.06)
     # and it reaches the rate-plant feedforward, which is what the observer's model must also see
     assert get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True) == pytest.approx(
-      1.30 * get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True, hold_level=False))
+      1.45 * get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True, hold_level=False))
+    # rev 6.4: the level is 1.15 below 12.5 m/s too, so this is no longer the identity it was under rev 6's 1.00
     assert get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True) == pytest.approx(
-      get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True, hold_level=False))
+      1.15 * get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True, hold_level=False))
 
   def test_honda_accord_dither_is_a_14hz_sinusoid_that_is_exactly_off_at_zero_amplitude(self):
     # rev 6.3.  0 must be the rev 6.2 path byte for byte, at every frame, with and without the gate.

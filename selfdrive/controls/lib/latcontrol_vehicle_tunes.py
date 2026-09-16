@@ -250,8 +250,25 @@ HONDA_ACCORD_HOLD_K_V = [0.0021, 0.0028, 0.0044, 0.0052, 0.0074, 0.0092, 0.0095,
 # APPLIED IN get_honda_accord_hold_torque ONLY -- deliberately NOT by editing HONDA_ACCORD_HOLD_K_V, because
 # get_honda_accord_mode_hz reads that same table and levelling k in place would move the P/I error notch by
 # sqrt(level) (2.04 -> 2.33 Hz at 22.8 m/s); the record has a x1.35 notch move going unstable at 26 m/s.
+# rev 6.4 (2026-09-16): 1.00 -> 1.15 and 1.30 -> 1.45, measured rather than reasoned.
+# Rev 6 chose x1.30 deliberately short of the measured x1.4-1.65 on the argument quoted above -- "the observer,
+# not the map, must absorb scatter".  ⭐ THAT ARGUMENT IS FALSIFIED BY THE BAND-PASSED TRACKING METRIC.  Under-
+# correcting the map does not let the observer absorb scatter; it leaves a standing deficit the observer must
+# carry, and carrying it is what makes the observer cancel the commanded fine correction as if it were a
+# disturbance.  Measured on the stick-slip bench with a plant spring x1.50: delivered fraction of a 0.06 m/s^2
+# rms lane-centring correction, band-passed to 0.25-0.60 Hz, against rev 6 AS FLOWN --
+#     light damping  19 m/s  0.86 -> 0.95      identified  19 m/s  0.36 -> 0.45
+#     light damping  26 m/s  0.88 -> 0.97      identified  26 m/s  0.43 -> 0.53
+# i.e. +0.06 to +0.10 everywhere, and a near-perfect match in the light-damping world.
+# THE LEVEL AND THE OBSERVER'S INTERNAL MODEL MOVE TOGETHER, which is what makes it safe: correcting only the
+# observer rings the 2 m/s^2 hold-and-kick test 0.33 -> 3.89 deg at 8 m/s, because the feedforward's deficit
+# then lands on P and I instead.  With both corrected there is no deficit for anyone to carry, and the same
+# test is unchanged.  Swept 1.15/1.45 and 1.30/1.50: the first passes every safety test (T1 disturbance, T3
+# ring, T8 chatter, break-out t50) against rev 6 as flown; the second fails on a 0.17 deg ring at 26 m/s.
+# ⚠ x1.45 is inside the measured x1.4-1.6 but with less room for the +-30-40 % route-to-route scatter (crown,
+# wind, camber) than x1.30 had.  AccordHoldLevel off restores the rev 3-5 unlevelled map, as before.
 HONDA_ACCORD_HOLD_LEVEL_BP = [12.5, 17.5]          # m/s
-HONDA_ACCORD_HOLD_LEVEL_V = [1.00, 1.30]           # multiplier on the hold map (NOT on the mode frequency)
+HONDA_ACCORD_HOLD_LEVEL_V = [1.15, 1.45]           # multiplier on the hold map (NOT on the mode frequency)
 HONDA_ACCORD_HOLD_SAT_DEG = (19.3, 546.0, 3.01)   # sat(v) = a + b * exp(-v / c), deg
 HONDA_ACCORD_HOLD_STATIC_FRICTION = 0.020          # torque, the intercept the map was fitted WITHOUT (see above)
 # The steering system's own mode on the V293 firmware: J * angle'' + b * angle' + hold(angle) = torque, with
