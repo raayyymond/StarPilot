@@ -182,6 +182,20 @@ HONDA_ACCORD_FF_RATE_GAIN = 0.5    # fraction of the d(angle_des)/dt term (toggl
                                    # G = 550): at 1.0 the feedforward alone exceeded full scale for 0.34 s below 8 m/s
                                    # on route 70's own demand (max 1.13); at 0.5 the max is 0.81.  Keep 0.5.
 HONDA_ACCORD_FF_RATE_RC = 0.10     # s, first-order filter on d(angle_des)/dt
+# rev 6 (2026-09-16): an ACCORD-SCOPED cutoff for latcontrol_torque's jerk_filter, replacing the generic
+# LP_FILTER_CUTOFF_HZ = 1.2 for this car only.  The delay-compensation stage
+#     setpoint = u(t-D) + F_j(s) * (u(t) - u(t-D))    =>    H(s) = e^{-sD} + F_j(s) * (1 - e^{-sD})
+# is an EXACT delay canceller: H == 1 at EVERY frequency when F_j == 1.  So all of that stage's residual lag and
+# its whole 0.4-1 Hz gain bump come from F_j alone -- and F_j is a 1.2 Hz smoother sized for a raw derivative,
+# applied here to a quantity that is already a 38-frame difference and therefore already smooth.
+# |F_j| and phase at 0.2/0.6/1.0 Hz: 0.999/0.989/0.970 and -2.9/-8.5/-14.0 deg at 4.0 Hz, against
+# 0.986/0.894/0.768 and -9.5/-26.6/-39.8 deg at 1.2 Hz.
+# Measured consequence on the whole setpoint chain at 19 m/s (group lag at 0.25 Hz | |H| at 0.5/0.6/0.7 Hz):
+#     rev 5, AccordRefFilter 0.12, 1.2 Hz : 0.271 s | 1.112 / 1.088 / 1.039
+#     AccordRefFilter 0.06, 4.0 Hz (rev 6): 0.128 s | 1.063 / 1.069 / 1.065   <- FLATTER than rev 5, half the lag
+# i.e. this is not a new term and not a trade: it corrects a constant that was never measured on this path.
+# Scoped to the Accord because LP_FILTER_CUTOFF_HZ is generic and no other car here has been measured on it.
+HONDA_ACCORD_JERK_LP_HZ = 4.0      # Hz, cutoff of the lateral-jerk low-pass in the delay-compensation stage
 HONDA_ACCORD_FF_ANGLE_LIMIT_DEG = 400.0
 # Clamp on the MOVE term (rate_gain * d(angle_des)/dt / G) of the rate-plant feedforward.  The
 # planner's jerk limit (clip_curvature, 5 m/s^3) becomes a steering-rate limit that scales as
@@ -220,6 +234,24 @@ HONDA_ACCORD_HOLD_V_BP = [2.0, 4.0, 6.0, 8.0, 10.0, 12.5, 15.0, 17.5, 20.0, 23.0
 # right.  0.0160 is x1.20 (a v^1.0 rise 23 -> 28), deliberately short of v^2 (x1.48): the route-to-route scatter of the
 # small-angle hold at speed is itself +/-30-40 % (crown, wind), which the integral gain -- not the map -- has to absorb.
 HONDA_ACCORD_HOLD_K_V = [0.0021, 0.0028, 0.0044, 0.0052, 0.0074, 0.0092, 0.0095, 0.0103, 0.0116, 0.0133, 0.0160]  # torque/deg at 0 deg
+# rev 6 (2026-09-16): a speed-scheduled LEVEL on the hold map.  Route 76's hands-off hold regression reads the map
+# LOW at 15-25 m/s and CORRECT at 5-12 m/s (hand-free delivered/hold 0.99-1.00 at 5-8), and every route since 72 has
+# read it low at speed.  It is a BIAS, not scatter, and a feedforward bias is not free: the disturbance observer's own
+# loop gain IS its model mismatch, L_dob ~ Q(s) * (P/P_model - 1), so a low map makes the observer carry 45-64 % of the
+# feedforward through its two 0.6 Hz poles -- 27 deg of lag and a x1.20 gain at the 0.24 Hz lane-centring mode, the
+# largest single stage in the measured chain.  Correcting the model collapses that loop and returns the phase it cost
+# (simulated L_dob 0.302 -> 0.074 at 19 m/s, torque-loop phase at 0.25 Hz -45.2 -> -35.4 deg).
+# x1.30 is deliberately SHORT of the measured x1.2-1.65 and of the x1.45 the identification verdict allows at 15-22:
+# the route-to-route scatter is +-30-40 % (crown, wind, camber) and the observer -- not the map -- must absorb scatter.
+# Under-correcting is the safe side; the observer makes up the rest, slowly.  Over-correcting over-holds, and nothing
+# takes that back.
+# 12.5 m/s and below stay at 1.00: the map is right there, and a GLOBAL AccordEpsSpringScale 1.3 was already falsified
+# at 12 m/s (+0.91 step overshoot).  That is also why this is a schedule and not that existing scalar.
+# APPLIED IN get_honda_accord_hold_torque ONLY -- deliberately NOT by editing HONDA_ACCORD_HOLD_K_V, because
+# get_honda_accord_mode_hz reads that same table and levelling k in place would move the P/I error notch by
+# sqrt(level) (2.04 -> 2.33 Hz at 22.8 m/s); the record has a x1.35 notch move going unstable at 26 m/s.
+HONDA_ACCORD_HOLD_LEVEL_BP = [12.5, 17.5]          # m/s
+HONDA_ACCORD_HOLD_LEVEL_V = [1.00, 1.30]           # multiplier on the hold map (NOT on the mode frequency)
 HONDA_ACCORD_HOLD_SAT_DEG = (19.3, 546.0, 3.01)   # sat(v) = a + b * exp(-v / c), deg
 HONDA_ACCORD_HOLD_STATIC_FRICTION = 0.020          # torque, the intercept the map was fitted WITHOUT (see above)
 # The steering system's own mode on the V293 firmware: J * angle'' + b * angle' + hold(angle) = torque, with
@@ -2432,7 +2464,7 @@ def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:
 def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: float, v_ego: float,
                                    rate_gain: float = HONDA_ACCORD_FF_RATE_GAIN,
                                    gain_scale: float = 1.0, spring_scale: float = 1.0,
-                                   hold_map: bool = False) -> float:
+                                   hold_map: bool = False, hold_level: bool = True) -> float:
   """Feedforward TORQUE (units of the [-1, 1] output) for the Accord's rate-servo EPS.
 
   hold term  k(v) * angle / G(v)   -- the torque that balances the return spring at angle_des
@@ -2448,7 +2480,7 @@ def get_honda_accord_rate_plant_ff(angle_des_deg: float, angle_des_rate_dps: flo
   gain = float(np.interp(v_ego, HONDA_ACCORD_EPS_G_BP, HONDA_ACCORD_EPS_G_V)) * max(float(gain_scale), 0.1)
   if hold_map:
     # the measured saturating hold map (AccordHoldMap); spring_scale still scales it, gain_scale does not
-    hold_torque = get_honda_accord_hold_torque(angle_des_deg, v_ego) * float(spring_scale)
+    hold_torque = get_honda_accord_hold_torque(angle_des_deg, v_ego, level=hold_level) * float(spring_scale)
   else:
     spring = float(np.interp(v_ego, HONDA_ACCORD_EPS_K_BP, HONDA_ACCORD_EPS_K_V)) * float(spring_scale)
     hold_torque = spring * angle_des_deg / gain
@@ -2467,11 +2499,21 @@ def get_honda_accord_hold_sat_deg(v_ego: float) -> float:
   return a + b * math.exp(-max(float(v_ego), 0.0) / c)
 
 
-def get_honda_accord_hold_torque(angle_deg: float, v_ego: float) -> float:
+def get_honda_accord_hold_level(v_ego: float, level: bool = True) -> float:
+  """Speed-scheduled level correction on the hold map (see the HONDA_ACCORD_HOLD_LEVEL_* constants).
+  Read ONLY by get_honda_accord_hold_torque -- never by get_honda_accord_mode_hz, which shares the k table.
+  level=False is the rev 3-5 map (AccordHoldLevel off)."""
+  if not level:
+    return 1.0
+  return float(np.interp(v_ego, HONDA_ACCORD_HOLD_LEVEL_BP, HONDA_ACCORD_HOLD_LEVEL_V))
+
+
+def get_honda_accord_hold_torque(angle_deg: float, v_ego: float, level: bool = True) -> float:
   """Static hold torque (spring part, +left frame) from the measured V293 hold map: k(v) * sat(v) * tanh(angle / sat(v)).
-  Odd in the angle; the static friction is NOT included (see HONDA_ACCORD_HOLD_STATIC_FRICTION)."""
+  Odd in the angle; the static friction is NOT included (see HONDA_ACCORD_HOLD_STATIC_FRICTION).
+  level=True (AccordHoldLevel) multiplies k(v) by HONDA_ACCORD_HOLD_LEVEL_V(v); level=False is the rev 3-5 map."""
   angle_deg = float(np.clip(angle_deg, -HONDA_ACCORD_FF_ANGLE_LIMIT_DEG, HONDA_ACCORD_FF_ANGLE_LIMIT_DEG))
-  k = float(np.interp(v_ego, HONDA_ACCORD_HOLD_V_BP, HONDA_ACCORD_HOLD_K_V))
+  k = float(np.interp(v_ego, HONDA_ACCORD_HOLD_V_BP, HONDA_ACCORD_HOLD_K_V)) * get_honda_accord_hold_level(v_ego, level)
   sat = get_honda_accord_hold_sat_deg(v_ego)
   return k * sat * math.tanh(angle_deg / sat)
 

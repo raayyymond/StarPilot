@@ -302,6 +302,12 @@ class LatControlTorque(LatControl):
       expected_lateral_accel = self.curvature_request_buffer[-delay_frames] * CS.vEgo ** 2
       self.curvature_request_buffer.append(desired_curvature)
       lateral_jerk_limit = RAM_1500_MAX_LAT_JERK_UP if self.is_ram_1500 else MAX_LAT_JERK_UP
+      if self.is_honda_accord:
+        # rev 6 (2026-09-16): the delay-compensation stage is an EXACT canceller -- setpoint = u(t-D) + F_j*(u(t)-u(t-D))
+        # is identically 1 at every frequency when F_j == 1 -- so all of its residual lag and its whole 0.4-1 Hz gain
+        # bump come from this one generic 1.2 Hz smoother, which is sized for a raw derivative and is applied here to a
+        # 38-frame difference that is already smooth.  See HONDA_ACCORD_JERK_LP_HZ for the measured chain response.
+        self.jerk_filter.update_alpha(1.0 / (2.0 * np.pi * max(HONDA_ACCORD_JERK_LP_HZ, 0.1)))
       raw_lateral_jerk = (future_desired_lateral_accel - expected_lateral_accel) / max(lat_delay, self.dt)
       raw_lateral_jerk = np.clip(raw_lateral_jerk, -lateral_jerk_limit, lateral_jerk_limit)
       desired_lateral_jerk = np.clip(self.jerk_filter.update(raw_lateral_jerk), -lateral_jerk_limit, lateral_jerk_limit)
@@ -637,8 +643,14 @@ class LatControlTorque(LatControl):
         gain_scale = float(getattr(starpilot_toggles, "accord_eps_gain_scale", 1.0))
         spring_scale = float(getattr(starpilot_toggles, "accord_eps_spring_scale", 1.0))
         hold_map = bool(getattr(starpilot_toggles, "accord_hold_map", True))
+        # rev 6: the hold-map level must reach the FEEDFORWARD *and* the observer's internal model together.  If only
+        # the feedforward moved, the observer would read the raise as a disturbance and cancel it within its 0.6 Hz
+        # corner, which is exactly the loop the level exists to collapse.
+        hold_level = bool(getattr(starpilot_toggles, "accord_hold_level", True))
+        hold_fn = (get_honda_accord_hold_torque if hold_level else
+                   (lambda a, v: get_honda_accord_hold_torque(a, v, level=False)))
         plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, angle_des_rate, CS.vEgo, rate_gain, gain_scale, spring_scale,
-                                                          hold_map=hold_map)
+                                                          hold_map=hold_map, hold_level=hold_level)
         # V293 torque mode (2026-09-14).  Static-friction hysteresis (AccordFrictionHyst): the torque that holds
         # an angle depends on which way the wheel last moved; z follows the DESIRED angle so it is pure
         # feedforward (no loop gain, unlike the SteerFriction relay that limit-cycled the 2 Hz mode on route 71).
@@ -671,7 +683,7 @@ class LatControlTorque(LatControl):
         dob_hz = float(getattr(starpilot_toggles, "accord_dob_hz", 0.0))
         self.accord_dob_frozen = bool(steer_limited_by_safety or CS.steeringPressed)
         self.accord_dob_torque = self.accord_dob.update(CS.steeringAngleDeg - params.angleOffsetDeg, CS.steeringRateDeg, CS.vEgo,
-                                                        output_torque, dob_hz, get_honda_accord_hold_torque, hold_map=hold_map,
+                                                        output_torque, dob_hz, hold_fn, hold_map=hold_map,
                                                         gain_scale=gain_scale, spring_scale=spring_scale,
                                                         freeze=self.accord_dob_frozen)
       else:

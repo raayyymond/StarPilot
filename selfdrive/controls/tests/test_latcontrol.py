@@ -115,7 +115,9 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_honda_accord_ff_move_torque_limit,
   get_honda_accord_rate_plant_ff,
   get_honda_accord_hold_torque,
+  get_honda_accord_hold_level,
   get_honda_accord_mode_hz,
+  HONDA_ACCORD_JERK_LP_HZ,
   get_honda_accord_rate_loop_gain,
   get_honda_accord_torque_ki,
   honda_accord_friction_hysteresis,
@@ -2216,10 +2218,14 @@ class TestLatControl:
     assert get_honda_accord_hold_torque(1e6, 4.0) == pytest.approx(get_honda_accord_hold_torque(400.0, 4.0))
     # against the linear tables: 3-5x at 6 m/s / 24 deg (routes 70+71), 0.5-0.75x at 28 m/s / 12 deg
     assert 3.0 < get_honda_accord_hold_torque(24.0, 6.0) / get_honda_accord_rate_plant_ff(24.0, 0.0, 6.0) < 5.0
-    assert 0.5 < get_honda_accord_hold_torque(12.0, 28.0) / get_honda_accord_rate_plant_ff(12.0, 0.0, 28.0) < 0.75
-    # the two measured anchors (map = measured cell minus the 0.020 static-friction intercept)
-    assert get_honda_accord_hold_torque(28.0, 8.0) == pytest.approx(0.138, abs=0.02)
-    assert get_honda_accord_hold_torque(23.0, 20.2) == pytest.approx(0.199, abs=0.02)
+    assert 0.5 < get_honda_accord_hold_torque(12.0, 28.0, level=False) / get_honda_accord_rate_plant_ff(12.0, 0.0, 28.0) < 0.75
+    # the two measured anchors (map = measured cell minus the 0.020 static-friction intercept).  rev 6 re-based
+    # DELIBERATELY: these anchor the rev 3-5 map shape, which is what level=False is, and the 20.2 m/s anchor is
+    # inside the band the rev-6 level corrects, so it must be read unlevelled or it is asserting the old bias.
+    assert get_honda_accord_hold_torque(28.0, 8.0) == pytest.approx(0.138, abs=0.02)          # below 12.5: level is 1.00
+    assert get_honda_accord_hold_torque(28.0, 8.0, level=False) == pytest.approx(0.138, abs=0.02)
+    assert get_honda_accord_hold_torque(23.0, 20.2, level=False) == pytest.approx(0.199, abs=0.02)
+    assert get_honda_accord_hold_torque(23.0, 20.2) == pytest.approx(1.30 * 0.199, abs=0.03)  # rev 6: the levelled map
     # the rate-plant feedforward takes the map only when asked, and scales it with spring_scale
     assert get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5, hold_map=True) == pytest.approx(get_honda_accord_hold_torque(20.0, 12.5))
     assert get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5, spring_scale=0.5, hold_map=True) == pytest.approx(0.5 * get_honda_accord_hold_torque(20.0, 12.5))
@@ -2227,6 +2233,84 @@ class TestLatControl:
     # the move term is the same in both arms
     move = get_honda_accord_rate_plant_ff(20.0, 100.0, 12.5, hold_map=True) - get_honda_accord_rate_plant_ff(20.0, 0.0, 12.5, hold_map=True)
     assert move == pytest.approx(0.5 * 100.0 / 271.0, rel=1e-6)
+
+  def test_honda_accord_hold_level_is_speed_scheduled_and_leaves_the_mode_law_alone(self):
+    # rev 6: a LEVEL on the hold map only.  1.00 at and below 12.5 m/s (the map is right there), ramping to 1.30 at 17.5.
+    for v in (0.0, 2.0, 5.0, 8.0, 10.0, 12.5):
+      assert get_honda_accord_hold_level(v) == pytest.approx(1.0)
+    for v in (17.5, 20.0, 23.0, 28.0, 40.0):
+      assert get_honda_accord_hold_level(v) == pytest.approx(1.30)
+    assert get_honda_accord_hold_level(15.0) == pytest.approx(1.15)                  # linear between the knots
+    assert get_honda_accord_hold_level(20.0, level=False) == 1.0                     # the toggle's OFF value
+    # it multiplies k only -- never sat, so the SHAPE of the saturating spring is untouched
+    for v in (15.0, 20.0, 28.0):
+      assert (get_honda_accord_hold_torque(77.0, v) / get_honda_accord_hold_torque(55.0, v) ==
+              pytest.approx(get_honda_accord_hold_torque(77.0, v, level=False) /
+                            get_honda_accord_hold_torque(55.0, v, level=False)))
+      assert get_honda_accord_hold_torque(30.0, v) == pytest.approx(
+        get_honda_accord_hold_level(v) * get_honda_accord_hold_torque(30.0, v, level=False))
+      assert get_honda_accord_hold_torque(-30.0, v) == pytest.approx(-get_honda_accord_hold_torque(30.0, v))
+    # the level itself must not fall with speed, and neither may k(v) * level(v) -- an on-centre hold that DROPPED as
+    # the car accelerated would feel like the wheel letting go.  (The delivered hold at a large angle is a different
+    # question: sat(v) shrinks with speed, so k * sat * tanh is legitimately non-monotone there, in rev 5 too.)
+    levels = [get_honda_accord_hold_level(2.0 + 38.0 * i / 399.0) for i in range(400)]
+    assert all(b >= a - 1e-12 for a, b in zip(levels, levels[1:]))
+    ks = [get_honda_accord_hold_torque(0.5, 2.0 + 38.0 * i / 399.0) for i in range(400)]
+    assert all(b >= a - 1e-8 for a, b in zip(ks, ks[1:]))   # abs tol: sat(v) asymptotes, so the tail is float noise
+    # THE GUARD: get_honda_accord_mode_hz reads the SAME k table, so levelling k in place would move the P/I error
+    # notch by sqrt(level).  The level must not reach it.
+    assert get_honda_accord_mode_hz(4.5) == pytest.approx(1.01, abs=0.06)
+    assert get_honda_accord_mode_hz(12.0) == pytest.approx(1.67, abs=0.06)
+    assert get_honda_accord_mode_hz(22.8) == pytest.approx(2.04, abs=0.06)
+    # and it reaches the rate-plant feedforward, which is what the observer's model must also see
+    assert get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True) == pytest.approx(
+      1.30 * get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True, hold_level=False))
+    assert get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True) == pytest.approx(
+      get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True, hold_level=False))
+
+  def test_honda_accord_jerk_lead_cutoff_flattens_the_delay_compensator(self):
+    # rev 6.  setpoint = u(t-D) + F_j(s) * (u(t) - u(t-D))  =>  H(s) = e^{-sD} + F_j(s) * (1 - e^{-sD}), which is
+    # IDENTICALLY 1 at F_j == 1.  So the stage's residual lag and its whole 0.4-1 Hz gain bump are F_j's alone.
+    assert HONDA_ACCORD_JERK_LP_HZ == 4.0
+    dt, D = 0.01, 0.386
+
+    def chain(f_hz, hz):
+      alpha = dt / (1.0 / (2.0 * math.pi * f_hz) + dt)
+      buf, y, out = [0.0] * int(round(D / dt)), 0.0, []
+      for k in range(6000):
+        u = math.sin(2 * math.pi * hz * k * dt)
+        delayed = buf[0]; buf.append(u); buf.pop(0)
+        y += alpha * ((u - delayed) / D - y)
+        out.append(delayed + y * D)
+      c = sn = 0.0
+      for k in range(3000, 6000):
+        w = 2 * math.pi * hz * k * dt
+        c += out[k] * math.cos(w); sn += out[k] * math.sin(w)
+      c *= 2.0 / 3000.0; sn *= 2.0 / 3000.0
+      return math.hypot(c, sn), math.degrees(math.atan2(c, sn))
+
+    # THE IDENTITY, tested exactly: on a constant-rate ramp the lead cancels the buffer delay, so the setpoint
+    # equals TODAY's command, not the one from lat_delay ago -- at ANY cutoff.  This is H == 1 in the time domain.
+    def ramp_err(f_hz):
+      alpha = dt / (1.0 / (2.0 * math.pi * f_hz) + dt)
+      buf, y, worst = [0.0] * int(round(D / dt)), 0.0, 0.0
+      for k in range(4000):
+        u = 0.5 * k * dt                      # 0.5 m/s^3, a constant lateral jerk
+        delayed = buf[0]; buf.append(u); buf.pop(0)
+        y += alpha * ((u - delayed) / D - y)
+        if k > 2000:
+          worst = max(worst, abs((delayed + y * D) - u))
+      return worst
+    for f in (1.2, 4.0):
+      assert ramp_err(f) < 1e-6
+    # The generic 1.2 Hz cutoff PEAKS in the 0.5-0.7 Hz band, where the operator's wobble lives; 4.0 Hz peaks far less.
+    # (These are the lead stage ALONE; AccordRefFilter sits after it and pulls both down -- 1.069 at 0.6 Hz for the
+    # shipped ref 0.06 + 4.0 Hz pair, against 1.088 for rev 5's ref 0.12 + 1.2 Hz, i.e. flatter AND less lagged.)
+    assert chain(1.2, 0.65)[0] > 1.30                              # measured 1.344
+    assert chain(4.0, 0.65)[0] < 1.20                              # measured 1.144
+    assert chain(4.0, 0.65)[0] < 0.90 * chain(1.2, 0.65)[0]
+    # and it carries far less phase where the lane-centring loop crosses
+    assert abs(chain(4.0, 0.25)[1]) < 0.4 * abs(chain(1.2, 0.25)[1])   # measured -0.8 deg against -3.2
 
   def test_honda_accord_mode_frequency_and_rate_loop_taper(self):
     # sqrt(k(v) / J) / 2pi: 1.0 Hz at 4.5 m/s rising to ~2.05 Hz above 20 (route 71: 2.34 Hz limit cycle at 21.8 m/s)

@@ -4954,6 +4954,17 @@
         "settings_tier": "simple"
       },
       {
+        "key": "AccordHoldLevel",
+        "label": "Accord: Hold Map Level (speed-scheduled)",
+        "description": "Corrects the LEVEL of the Accord hold map above 12.5 m/s: x1.00 at and below 12.5 m/s, ramping to x1.30 from 17.5 m/s (V293 torque-map EPS). Route 76's hands-off hold regression reads the shipped map low by x1.2-1.5 at 15-25 m/s and correct at 5-12 m/s, and every route since 72 has read it low at speed. A feedforward bias is not free: the disturbance observer's own loop gain IS its model mismatch, so a low map makes the observer carry 45-64 % of the feedforward through its two 0.6 Hz poles -- 27 deg of lag and x1.20 of gain at the 0.24 Hz lane-centring mode, the largest single stage in the measured chain. Correcting the model collapses that loop (simulated observer loop gain 0.302 -> 0.074 at 19 m/s) and returns the phase it was costing, while raising delivered hold torque in the same edit. x1.30 is deliberately short of the measured x1.2-1.65 because route-to-route scatter is +-30-40 % and the observer, not the map, must absorb scatter. Applied to the hold torque only, never to the mode frequency that positions the error notch. OFF = the rev 3-5 map.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
         "key": "AccordRefFilter",
         "label": "Accord: Reference Filter (s)",
         "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",
