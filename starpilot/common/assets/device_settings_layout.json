@@ -193,6 +193,15 @@
         "settings_tier": "simple"
       },
       {
+        "key": "LaneChangeTurnGate",
+        "label": "Don't Smooth a Turn as a Lane Change",
+        "description": "Keeps lane-change smoothing but stops it being applied to a corner. When a lane-change state is active and the model asks for 1.5 m/s^2 or more of lateral acceleration, the smoothing clamp is latched off for the rest of that state and the stock jerk limit applies. A lane change at any smoothing pace peaks well below that; a corner does not. On route 76 a nudgeless lane change auto-started by the turn blinker six seconds before a right turn left the clamp active through the corner entry, holding the steering command 1.2-1.3 m/s^2 behind what the model asked for about a second and a half -- the only diagnosable understeer on the drive. Latched rather than instantaneous, so a demand hovering at the threshold cannot switch the clamp on and off mid-manoeuvre. OFF restores the previous behaviour exactly.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "parent_key": "LaneChanges",
+        "settings_tier": "simple"
+      },
+      {
         "key": "MinimumLaneChangeSpeed",
         "label": "Minimum Lane Change Speed",
         "description": "Lowest speed at which openpilot will change lanes.",

@@ -1226,6 +1226,7 @@ class StarPilotVariables:
     j_req = (math.pi ** 3) * lane_w / (t_target ** 3)
     toggle.lane_change_pace = pace
     toggle.lane_change_jerk_factor = min(1.0, j_req * 1.3 / 5.0)
+    toggle.lane_change_turn_gate = self.get_value("LaneChangeTurnGate", cast=bool, condition=toggle.lane_changes, default=True)
     toggle.lane_change_time_max = 10.0 + (10 - pace) * 2.0 / 9.0
 
     lateral_tuning = self.get_value("LateralTune")

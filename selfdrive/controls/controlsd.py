@@ -52,6 +52,24 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 # After a smoothed lane change ends, ramp the curvature limits back to stock over this
 # time so the final recenter correction is shaped instead of stepping through unclamped.
 LANE_CHANGE_SMOOTH_RELEASE_T = 2.0
+# rev 6.2: a model lateral-accel demand at or past this, inside a lane-change state, is a TURN, not a lane change.
+# 1.5 m/s^2 sits above every lane change measured on route 76 (~0.5-0.7 m/s^2) and below the 2.1 m/s^2 the model
+# asked for at the corner the clamp held back.  Keyed on lateral acceleration, not curvature, so it cannot fire at a
+# crawl.  Set the toggle off to restore the rev 3-6.1 behaviour exactly.
+LANE_CHANGE_TURN_LAT_ACCEL = 1.5
+
+
+def lane_change_turn_latch(latched: bool, in_lane_change: bool, desired_curvature: float, v_ego: float) -> bool:
+  """Latch that says 'this lane-change state is really a corner'.
+
+  Clears whenever the lane-change state clears, and sets -- for the rest of that state -- the first frame the
+  model asks for LANE_CHANGE_TURN_LAT_ACCEL or more of lateral acceleration.  Latched rather than
+  instantaneous so a demand hovering at the threshold cannot chatter the smoothing clamp on and off
+  mid-manoeuvre.
+  """
+  if not in_lane_change:
+    return False
+  return bool(latched) or abs(float(desired_curvature)) * float(v_ego) ** 2 >= LANE_CHANGE_TURN_LAT_ACCEL
 
 # Cap on the extra jerk factor granted while the model is unwinding lane-change curvature
 # (the arrest and any correction back toward center). Entry gentleness is comfort, but arrest
@@ -401,6 +419,7 @@ class Controls:
     self.lc_smooth_release = 0.0
     self.lane_centering = LaneCenteringController()
     self.lc_entry_sign = 0.0
+    self.lc_turn_latched = False
     self.lc_arrest_jerk_factor = 1.0
     self.turn_hold_curvature = 0.0
     self.turn_hold_standstill_t = 0.0
@@ -765,6 +784,25 @@ class Controls:
       # through a mostly-relaxed clamp. Only the jerk (curvature rate) is tightened: capping
       # lat accel strangles the end-of-maneuver arrest and lets the car glide past the new
       # lane center before it can build enough counter-curvature.
+      # rev 6.2 (2026-09-16): a corner is not a lane change.  Route 76: a NUDGELESS lane change was auto-started by
+      # the turn blinker at 18.3 m/s six seconds before a right turn, and the smoothing clamp -- doing exactly what it
+      # is designed to do -- then held the controls setpoint 1.2-1.3 m/s^2 behind the model for ~1.5 s through the
+      # corner entry, the only diagnosable understeer event on the drive.  The fault is not the clamp; it is that the
+      # clamp was applied to a turn.  The fork's own lane-change profile at pace <= 9 peaks below 0.5 m/s^2, so a model
+      # demand past LANE_CHANGE_TURN_LAT_ACCEL inside a lane-change state is a turn: latch the clamp off for the rest
+      # of that state and let the stock jerk limit through.  Latched, not instantaneous, so a demand oscillating about
+      # the threshold cannot chatter the clamp on and off mid-manoeuvre.  This keeps lane-change smoothing entirely --
+      # LaneChangeSmoothing stays at its configured pace -- and only declines to apply it to a corner.
+      self.lc_turn_latched = lane_change_turn_latch(self.lc_turn_latched, in_lane_change,
+                                                    new_desired_curvature, CS.vEgo)
+      if self.lc_turn_latched and self.starpilot_toggles.lane_change_turn_gate:
+        in_lane_change = False
+        # release now, not over LANE_CHANGE_SMOOTH_RELEASE_T: a corner needs the stock jerk limit at the
+        # moment it is recognised, and relaxing a LIMIT is not a step in the output -- the setpoint simply
+        # stops being held back and slews toward the model at the stock rate.
+        self.lc_smooth_release = 0.0
+        self.lc_entry_sign = 0.0
+        self.lc_arrest_jerk_factor = 1.0
       if in_lane_change:
         self.lc_smooth_release = LANE_CHANGE_SMOOTH_RELEASE_T
         if self.lc_entry_sign == 0.0 and abs(new_desired_curvature - self.desired_curvature) > 2e-4:

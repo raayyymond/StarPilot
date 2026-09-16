@@ -415,6 +415,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // threshold at 0.034 m/s^2 at 8 m/s but 0.251 at 26, so the loop's own 0.06-0.08 m/s^2 corrections fell inside
     // the spring regime at speed and produced no motion.  0 = the rev 3-5 flat 3 deg.
     {"AccordFrictionHystBand", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    // rev 6.2 (2026-09-16): do not apply the lane-change jerk clamp to a TURN.  A model lateral-accel demand past
+    // LANE_CHANGE_TURN_LAT_ACCEL inside a lane-change state latches the clamp off for the rest of that state.
+    // Keeps lane-change smoothing entirely; 0 = the rev 3-6.1 behaviour.
+    {"LaneChangeTurnGate", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     {"ForceFingerprint", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"ForceOffroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
     {"ForceOnroad", {CLEAR_ON_MANAGER_START, BOOL, "0", "0"}},
