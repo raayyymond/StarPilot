@@ -840,6 +840,10 @@ class StarPilotVariables:
     toggle.accord_dob_hz = self.get_value("AccordDobHz", cast=float, condition=is_honda_accord and known("AccordDobHz"), default=0.6, min=0.0, max=3.0)
     toggle.accord_hold_level = self.get_value("AccordHoldLevel", cast=bool, condition=is_honda_accord and known("AccordHoldLevel"), default=True)
     toggle.accord_friction_hyst_band = self.get_value("AccordFrictionHystBand", cast=bool, condition=is_honda_accord and known("AccordFrictionHystBand"), default=True)
+    # rev 6.3 (2026-09-16): friction-linearising command dither.  Ceiling 0.02 = 82 counts of 0xE4; above that the
+    # 14 Hz slew starts to compete with the Honda +-0.03/frame limiter.  0 = off (rev 6.2 behaviour, byte for byte).
+    toggle.accord_dither = self.get_value("AccordDither", cast=float, condition=is_honda_accord and known("AccordDither"), default=0.0, min=0.0, max=0.02)
+    toggle.accord_dither_gate = self.get_value("AccordDitherGate", cast=bool, condition=is_honda_accord and known("AccordDitherGate"), default=True)
     honda_pid_lateral = toggle.car_make == "honda" and CP.lateralTuning.which() == "pid" and not is_angle_car
     toggle.honda_lateral_pid_kp_scale = self.get_value("HondaLateralPidKpScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)
     toggle.honda_lateral_pid_ki_scale = self.get_value("HondaLateralPidKiScale", cast=float, condition=honda_pid_lateral, default=1.0, min=0.1, max=4.0)

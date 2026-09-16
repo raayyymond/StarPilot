@@ -117,6 +117,10 @@ from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   get_honda_accord_hold_torque,
   get_honda_accord_hold_level,
   get_honda_accord_friction_hyst_band,
+  get_honda_accord_dither,
+  get_honda_accord_dither_gate,
+  HONDA_ACCORD_DITHER_HZ,
+  HONDA_ACCORD_DITHER_CMD_REF,
   get_honda_accord_mode_hz,
   HONDA_ACCORD_JERK_LP_HZ,
   HONDA_ACCORD_FRICTION_HYST_BAND_DEG,
@@ -2269,6 +2273,67 @@ class TestLatControl:
       1.30 * get_honda_accord_rate_plant_ff(30.0, 0.0, 20.0, hold_map=True, hold_level=False))
     assert get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True) == pytest.approx(
       get_honda_accord_rate_plant_ff(30.0, 0.0, 10.0, hold_map=True, hold_level=False))
+
+  def test_honda_accord_dither_is_a_14hz_sinusoid_that_is_exactly_off_at_zero_amplitude(self):
+    # rev 6.3.  0 must be the rev 6.2 path byte for byte, at every frame, with and without the gate.
+    for frame in range(0, 400):
+      assert get_honda_accord_dither(0.0, frame, DT_CTRL, 0.0, True) == 0.0
+      assert get_honda_accord_dither(0.0, frame, DT_CTRL, 0.0, False) == 0.0
+    # 14 Hz on a 100 Hz grid is 7 cycles every 50 frames, so the sample pattern repeats exactly every 50 frames
+    # and NEVER lands on the sinusoid's peak: the closest sample phase is 0.26 of a cycle, sin = 0.99803.  The
+    # delivered amplitude is therefore 0.9980 of the toggle's value at best, which is the number to reason with.
+    amp = 0.012
+    peak = amp * math.sin(2.0 * math.pi * 0.26)
+    x = [get_honda_accord_dither(amp, k, DT_CTRL, 0.0, False) for k in range(50)]
+    assert max(x) == pytest.approx(peak, rel=1e-4)
+    assert min(x) == pytest.approx(-peak, rel=1e-4)
+    assert peak / amp == pytest.approx(0.99803, abs=1e-5)
+    # seven zero-up-crossings in those fifty frames, i.e. exactly 14 Hz
+    ups = sum(1 for a, b in zip(x, x[1:]) if a <= 0.0 < b)
+    assert ups == 7
+    # the pattern repeats: frame k and frame k + 50 are the same sample
+    for k in (0, 1, 13, 37, 49):
+      assert get_honda_accord_dither(amp, k, DT_CTRL, 0.0, False) == \
+             pytest.approx(get_honda_accord_dither(amp, k + 50, DT_CTRL, 0.0, False), abs=1e-15)
+    # and the slew never competes with the Honda +-0.03/frame limiter, at the largest amplitude the toggle allows
+    y = [get_honda_accord_dither(0.02, k, DT_CTRL, 0.0, False) for k in range(50)]
+    assert max(abs(b - a) for a, b in zip(y, y[1:])) < 0.03
+
+  def test_honda_accord_dither_gate_is_full_on_a_correction_and_shut_in_a_corner(self):
+    # The gate exists because the UNGATED dither rings the 2 m/s^2 hold-and-kick test (0.41 / 0.29 / 0.15 deg at
+    # 8 / 19 / 26 m/s on the bench) while the gated one leaves it exactly at the no-dither value.  A dither is
+    # only worth its ripple below break-out; once the rack slides, friction is already broken.
+    assert get_honda_accord_dither_gate(0.0) == pytest.approx(1.0)
+    # the small corrections the dither exists for: 0.05-0.10 m/s^2 is 0.0036-0.0071 of unit torque at LAF 14
+    for cmd in (0.0036, 0.0071):
+      assert get_honda_accord_dither_gate(cmd) > 0.95
+    # a corner is shut, from either sign
+    assert get_honda_accord_dither_gate(HONDA_ACCORD_DITHER_CMD_REF) == pytest.approx(0.0)
+    assert get_honda_accord_dither_gate(-0.30) == pytest.approx(0.0)
+    assert get_honda_accord_dither_gate(1.0) == pytest.approx(0.0)
+    # linear, symmetric, monotone -- a taper, not a switch, so the envelope cannot chatter at the threshold
+    assert get_honda_accord_dither_gate(HONDA_ACCORD_DITHER_CMD_REF / 2.0) == pytest.approx(0.5)
+    gs = [get_honda_accord_dither_gate(0.30 * i / 299.0) for i in range(300)]
+    assert all(b <= a + 1e-12 for a, b in zip(gs, gs[1:]))
+    for cmd in (0.01, 0.05, 0.12, 0.40):
+      assert get_honda_accord_dither_gate(cmd) == pytest.approx(get_honda_accord_dither_gate(-cmd))
+    # gate=False is the OFF value of the toggle: a constant-amplitude dither at every command
+    for cmd in (0.0, 0.05, 0.15, 1.0):
+      assert get_honda_accord_dither_gate(cmd, gate=False) == 1.0
+    # and the gate reaches the dither: the same frame at a corner command is zero, at a correction is not
+    k = int(round(0.25 / (HONDA_ACCORD_DITHER_HZ * DT_CTRL)))      # a quarter period -> the peak
+    assert get_honda_accord_dither(0.012, k, DT_CTRL, 0.30, True) == 0.0
+    assert get_honda_accord_dither(0.012, k, DT_CTRL, 0.005, True) > 0.011
+
+  def test_honda_accord_dither_rides_below_the_angle_quantiser_at_the_rim(self):
+    # RISK STATEMENT, checked rather than asserted.  At 14 Hz the wheel's own impedance |J w^2 + j b w + k| is
+    # dominated by inertia: with J = 8e-5 torque/(deg/s^2) and w = 2 pi 14, J w^2 = 0.619 torque/deg, so the
+    # displacement a 0.012 dither drives is under a hundredth of the 0.1 deg steering-angle quantiser.  This is
+    # why the term is invisible on the wire and why the operator, not a log, has to judge its feel.
+    j = 8.0e-5
+    w = 2.0 * math.pi * HONDA_ACCORD_DITHER_HZ
+    for amp in (0.008, 0.012, 0.02):
+      assert amp / (j * w * w) < 0.1 / 3.0
 
   def test_honda_accord_friction_hyst_band_narrows_with_speed(self):
     # rev 6: the band sets the DEMAND at which the hysteresis term stops being a linear spring and starts supplying

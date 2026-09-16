@@ -4985,6 +4985,31 @@
         "settings_tier": "simple"
       },
       {
+        "key": "AccordDither",
+        "label": "Accord: Friction Dither Amplitude",
+        "description": "Amplitude, in unit torque, of a 14 Hz dither added to the steering command (V293 torque-map EPS). 0 = off. The plant solved for angle is backlash of half-width F/k -- 1.1 deg of play at 26 m/s, 1.3 at 19 -- and a play operator emits exactly nothing below that amplitude, which is why openpilot's own 0.06-0.08 m/s^2 corrections produced no wheel motion on route 76. A dither above the loop bandwidth and below the wheel's own mode replaces the Coulomb relay by its smoothed describing function for the slow signal: the textbook lineariser, adding no loop gain and no phase lag because it is open loop. 14 Hz is the gap between the V281 7 Hz assist ripple, the 1.0-2.3 Hz steering mode and the 17.9 Hz ring from route 70. Unlike a narrower friction band it does not raise the small-signal slope, so it does not over-deliver: simulated at 19 m/s on a 0.05 m/s^2 0.2 Hz demand, the band schedule gives gain 1.71 and distortion 0.180 where a flat band plus 0.012 of dither gives 1.47 and 0.111 -- better on both. Distortion falls monotonically with amplitude and has no knee, so there is no free small dose; 0.012 is 49 counts of the torque word and about 0.001 deg at the rim, a fiftieth of the steering-angle quantiser. Added to the value that leaves the controller, so the PID, the hysteresis, the rate loop and the observer are all blind to it. Start at 0.012 and walk it to where the column feels right.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.0,
+        "max": 0.02,
+        "step": 0.002,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordDitherGate",
+        "label": "Accord: Dither Only Where It Is Needed",
+        "description": "Tapers the dither to zero as the steering command grows, so it acts only while the rack is stuck. A dither earns its ripple only below break-out; once the rack is sliding, friction is already broken and the dither is ripple for nothing. The envelope is 1 - |command| / 0.15, linear so it cannot chatter at a threshold, reaching zero at 2.1 m/s^2 -- a corner, not a correction. This is not cosmetic: ungated, the dither puts a 0.41 / 0.29 / 0.15 deg ring on the 2 m/s^2 hold-and-kick test at 8 / 19 / 26 m/s, and gated the same test is unchanged from no dither at all. It also returns the in-corner 12-16 Hz rim ripple to the no-dither floor (0.32 to 0.004 deg/s at 8 m/s) while leaving the envelope at 0.89-0.99 on the small corrections the dither exists for. A gate on the friction hysteresis state was tried instead and failed: with the band narrowed it reads about 0.4-0.5 in both regimes and discriminates nothing. OFF = a constant-amplitude dither.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
         "key": "AccordRefFilter",
         "label": "Accord: Reference Filter (s)",
         "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",

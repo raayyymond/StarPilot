@@ -302,6 +302,71 @@ HONDA_ACCORD_RATE_LOOP_TAPER_V = 12.0              # m/s
 HONDA_ACCORD_FRICTION_HYST_BAND_BP = [8.0, 12.0, 19.0, 26.0]     # m/s
 HONDA_ACCORD_FRICTION_HYST_BAND_V = [3.0, 2.10, 0.96, 0.60]      # deg of desired-angle travel
 HONDA_ACCORD_FRICTION_HYST_BAND_DEG = 3.0          # deg, the fixed fallback = the rev 3-5 behaviour
+
+# ---------------------------------------------------------------------------------------------------------------
+# Friction-linearising command dither (AccordDither / AccordDitherGate, rev 6.3, 2026-09-16).
+#
+# WHY A DITHER AT ALL.  The V293 plant is a spring plus Coulomb friction, so in the (torque -> angle) map it is
+# exactly BACKLASH of half-width F/k: 2F/k is 1.1 deg at 26 m/s, 1.3 at 19, 2.7 at 11, 4.7 at 5 (F 0.012, k
+# measured on route 76).  A command increment smaller than that band moves the wheel by NOTHING -- which is why
+# the smallest executable demand at 19-26 m/s (0.05-0.06 m/s^2) sits right on top of the size of the fork's own
+# lane-centering corrections (0.06-0.08).  That is the resolution floor, and no amount of loop gain reaches it:
+# the gain that breaks friction at 1 deg/s is 0.012 and the gain-margin ceiling through the 60 ms round trip is
+# 0.0016-0.0059.  A dither well above the closed-loop bandwidth and well below the wheel's own mode replaces the
+# Coulomb relay by its smoothed describing function for the slow signal.  It is the textbook lineariser, it adds
+# NO loop gain and NO phase lag (it is open loop), and -- unlike a narrower hysteresis band -- it does not raise
+# the small-signal slope, so it does not over-deliver.  Simulated at 19 m/s, 0.05 m/s^2 @ 0.2 Hz: the rev 6.1
+# band schedule gives |H| 1.71 / THD 0.180, a flat band plus 0.012 of dither gives |H| 1.52 / THD 0.088 -- better
+# on BOTH axes.  That is the whole case for preferring it to the band schedule rather than stacking them.
+#
+# FREQUENCY.  14 Hz has to clear three things measured on this car: the V281 7 Hz assist ripple and the 5-9 Hz
+# wheel band (the record rejected a 7-10 Hz dither for sitting on them), the 1.0-2.3 Hz steering mode, and the
+# 17.9 Hz ring seen on route 70.  14 Hz is the gap.
+#
+# AMPLITUDE is a toggle, not a constant, because it is the one number no log can settle: 0.012 torque is 49
+# counts of 0xE4 and moves the rim about 0.001-0.002 deg -- a fiftieth of the 0.1 deg angle quantiser -- but how
+# that FEELS through the column is not predictable from a simulation.  Swept 0.001-0.012 at 8/19/26 m/s: THD
+# falls monotonically with amplitude and has no knee below 0.012, so there is no "free" small dose; the operator
+# walks it down from the road.  Ceiling 0.02 = 82 counts, above which the 14 Hz slew starts to compete with the
+# Honda +-0.03/frame limiter.
+#
+# THE GATE, and why it is gated on the COMMAND.  A dither earns its ripple only while the rack is STUCK; once
+# the rack is sliding, friction is already broken and the dither is ripple with no benefit.  Two candidate
+# envelopes were simulated.  The obvious one -- reuse the friction hysteresis state, envelope = 1 - |z|/friction
+# -- FAILS: with the rev 6.1 band narrowed to 0.60-0.96 deg, z clips on the smallest demands too, so it reads
+# ~0.4-0.5 in BOTH regimes and discriminates nothing.  The command-magnitude envelope works cleanly.  At 19 m/s
+# with 0.008 of dither, 12-16 Hz rim rate rms (deg/s), small demand vs 2 m/s^2 corner:
+#       ungated          <g> 1.00 -> 0.080  |  <g> 1.00 -> 0.108
+#       1 - |z|/friction <g> 0.51 -> 0.076  |  <g> 0.42 -> 0.093      (closes on both: no good)
+#       1 - |u|/REF      <g> 0.95 -> 0.081  |  <g> 0.00 -> 0.003      (= the no-dither floor)
+# i.e. full dither where it is needed, off in a corner, for no measurable small-signal cost.
+# REF 0.15 is where the taper reaches zero: out = lat_accel / LAF, so 0.15 is 2.1 m/s^2 -- a corner, not a
+# correction.  Linear taper rather than a switch so the envelope cannot chatter at the threshold.
+HONDA_ACCORD_DITHER_HZ = 14.0
+HONDA_ACCORD_DITHER_CMD_REF = 0.15                 # unit torque at which the gate is fully closed
+
+
+def get_honda_accord_dither_gate(output_torque: float, gate: bool = True) -> float:
+  """Envelope on the dither amplitude: 1 where the command is small (the rack is stuck and the correction we
+  cannot deliver lives here), tapering linearly to 0 by HONDA_ACCORD_DITHER_CMD_REF (a corner, where the rack
+  is already sliding and the dither would be ripple for nothing)."""
+  if not gate:
+    return 1.0
+  return float(np.clip(1.0 - abs(float(output_torque)) / HONDA_ACCORD_DITHER_CMD_REF, 0.0, 1.0))
+
+
+def get_honda_accord_dither(amplitude: float, frame: int, dt: float, output_torque: float = 0.0,
+                            gate: bool = True) -> float:
+  """One sample of the friction-linearising command dither, in unit torque.  Pure feedforward: the caller adds
+  it to the torque that LEAVES the controller, so the PID, the hysteresis, the rate loop and the disturbance
+  observer never see it and it cannot enter any feedback state."""
+  if amplitude <= 0.0:
+    return 0.0
+  g = get_honda_accord_dither_gate(output_torque, gate)
+  if g <= 0.0:
+    return 0.0
+  return g * float(amplitude) * math.sin(2.0 * math.pi * HONDA_ACCORD_DITHER_HZ * frame * dt)
+
 # Integral-gain speed schedule (AccordTorqueKi below the first knot, AccordTorqueKiHigh from the second, linear between).
 # The live integral gain is Ki * (1 + lsf / Kp): the hard-coded low-speed factor already multiplies it ~7x at 5 m/s, so in
 # angle terms the I loop's time constant is roughly speed-flat -- but the low-speed steering mode (1.0-1.5 Hz, zeta ~0.2)

@@ -167,6 +167,8 @@ class LatControlTorque(LatControl):
       self.accord_dob = HondaAccordDisturbanceObserver(self.dt)
       self.accord_dob_torque = 0.0
       self.accord_dob_frozen = False
+      # rev 6.3: free-running frame counter for the friction-linearising dither
+      self.accord_dither_frame = 0
     if self.is_palisade:
       self.torque_params.latAccelFactor *= PALISADE_BASE_LAT_ACCEL_FACTOR_MULT
     if self.is_ioniq_5:
@@ -857,6 +859,23 @@ class LatControlTorque(LatControl):
                 f"neg={self.torque_ff_scale_neg:.3f} deadzone_boost_active={deadzone_boost_active}")
 
     self.prev_steering_pressed = CS.steeringPressed
+
+    # rev 6.3 (2026-09-16): friction-linearising command dither (AccordDither, 0 = off = the rev 6.2 path).
+    # Added LAST, to the value that LEAVES the controller, so the PID, the hysteresis, the rate loop and the
+    # disturbance observer are all blind to it and it cannot enter any feedback state.  Gated on the command
+    # magnitude, which is the operator's own proposal and the one the bench picked: full where the correction
+    # is small and the rack is stuck, off in a corner where the rack is already sliding.  Suppressed while the
+    # Honda rate limiter is active, so it can never push the command past +-0.03/frame and set
+    # steer_limited_by_safety (which would freeze the integrator and the observer).
+    if self.is_honda_accord:
+      self.accord_dither_frame += 1
+      if active and not steer_limited_by_safety:
+        dither = get_honda_accord_dither(float(getattr(starpilot_toggles, "accord_dither", 0.0)),
+                                         self.accord_dither_frame, self.dt, output_torque,
+                                         bool(getattr(starpilot_toggles, "accord_dither_gate", True)))
+      else:
+        dither = 0.0
+      return -output_torque + dither, 0.0, pid_log
 
     # TODO left is positive in this convention
     return -output_torque, 0.0, pid_log

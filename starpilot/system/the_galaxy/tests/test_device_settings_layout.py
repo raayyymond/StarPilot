@@ -478,6 +478,7 @@ CUSTOM_PATCH_KEYS = {
   "AccordEpsGainScale", "AccordEpsSpringScale",
   "AccordHoldMap", "AccordFrictionHyst", "AccordRateLoopGain", "AccordErrorNotchQ", "AccordRefFilter",
   "AccordTorqueKiHigh", "AccordDobHz", "AccordHoldLevel", "AccordFrictionHystBand",
+  "AccordDither", "AccordDitherGate",
 }
 
 
@@ -510,3 +511,7 @@ def test_galaxy_layout_custom_patches_section_tracks_every_patch_switch():
   assert _declared_default("AccordDobHz") == "0.6"
   assert _declared_default("AccordHoldLevel") == "1"
   assert _declared_default("AccordFrictionHystBand") == "1"
+  # rev 6.3: the dither ships OFF.  Its amplitude is the one number no log can settle, so it is a toggle the
+  # operator walks up from the road, and 0.0 means the rev 6.2 path is byte-for-byte unchanged.
+  assert _declared_default("AccordDither") == "0.0"
+  assert _declared_default("AccordDitherGate") == "1"

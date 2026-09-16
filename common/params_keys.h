@@ -415,6 +415,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // threshold at 0.034 m/s^2 at 8 m/s but 0.251 at 26, so the loop's own 0.06-0.08 m/s^2 corrections fell inside
     // the spring regime at speed and produced no motion.  0 = the rev 3-5 flat 3 deg.
     {"AccordFrictionHystBand", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    // rev 6.3 (2026-09-16): amplitude (unit torque) of the 14 Hz friction-linearising command dither added to the
+    // Accord actuator torque.  0 = off (rev 6.2 behaviour).  0.012 = 49 counts of 0xE4 and ~0.001 deg at the rim.
+    {"AccordDither", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
+    // rev 6.3 (2026-09-16): taper the dither to zero as the command grows, so it acts only where the rack is stuck.
+    // Ungated it puts a 0.15-0.41 deg ring on the T3 hold-and-kick test; gated, T3 is unchanged at every speed.
+    {"AccordDitherGate", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     // rev 6.2 (2026-09-16): do not apply the lane-change jerk clamp to a TURN.  A model lateral-accel demand past
     // LANE_CHANGE_TURN_LAT_ACCEL inside a lane-change state latches the clamp off for the rest of that state.
     // Keeps lane-change smoothing entirely; 0 = the rev 3-6.1 behaviour.
