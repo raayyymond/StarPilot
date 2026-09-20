@@ -5010,6 +5010,21 @@
         "settings_tier": "simple"
       },
       {
+        "key": "AccordJerkLpHz",
+        "label": "Accord: Jerk Low-Pass Cutoff (Hz)",
+        "description": "Cutoff of the lateral-jerk low-pass inside the delay-compensation stage of the Accord torque controller. The stage setpoint = u(t-D) + F_j x (u(t) - u(t-D)) is an exact delay canceller when F_j = 1, so every bit of its residual lag and its 0.4-1 Hz gain bump comes from this one smoother. 1.2 Hz is the generic openpilot value (the V294 default: the full revert of the torque-mode revisions). 4.0 Hz is the value rev 6 measured on this car's setpoint chain (group lag at 0.25 Hz 0.271 -> 0.128 s at 19 m/s, flatter 0.5-0.7 Hz response) and hard-coded; it is offered here as a switch instead. Raise it only after the EPS change has been scored on its own.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 0.5,
+        "max": 8.0,
+        "step": 0.1,
+        "precision": 1,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
         "key": "AccordRefFilter",
         "label": "Accord: Reference Filter (s)",
         "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",

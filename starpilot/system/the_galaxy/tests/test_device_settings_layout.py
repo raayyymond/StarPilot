@@ -478,7 +478,7 @@ CUSTOM_PATCH_KEYS = {
   "AccordEpsGainScale", "AccordEpsSpringScale",
   "AccordHoldMap", "AccordFrictionHyst", "AccordRateLoopGain", "AccordErrorNotchQ", "AccordRefFilter",
   "AccordTorqueKiHigh", "AccordDobHz", "AccordHoldLevel", "AccordFrictionHystBand",
-  "AccordDither", "AccordDitherGate",
+  "AccordDither", "AccordDitherGate", "AccordJerkLpHz",
 }
 
 
@@ -498,19 +498,22 @@ def test_galaxy_layout_custom_patches_section_tracks_every_patch_switch():
   all_params = [param["key"] for section in layout for param in section.get("params", [])]
   for key in CUSTOM_PATCH_KEYS:
     assert all_params.count(key) == 1
-  # defaults are the patched behaviour; stock values (safe mode) are the pre-patch behaviour
+  # defaults: the pre-torque-mode patches stay on; every V293 torque-mode term defaults OFF since V294 (2026-09-20),
+  # when the EPS took the wheel's dynamic control back at 1 kHz (acceleration trim on the torque map).  The code and
+  # the switches remain, so any term can be turned back on from the road.
   assert _declared_default("KeepLearnedLatAccelOffset") == "1"
-  assert _declared_default("AccordRatePlantFF") == "1"
+  assert _declared_default("AccordRatePlantFF") == "0"
   assert _declared_default("AccordTurnFFTaper") == "0"
-  assert _declared_default("AccordHoldMap") == "1"
-  assert _declared_default("AccordFrictionHyst") == "0.015"
-  assert _declared_default("AccordRateLoopGain") == "0.0006"
-  assert _declared_default("AccordErrorNotchQ") == "1.0"
-  assert _declared_default("AccordRefFilter") == "0.12"
-  assert _declared_default("AccordTorqueKiHigh") == "2.5"
-  assert _declared_default("AccordDobHz") == "0.6"
-  assert _declared_default("AccordHoldLevel") == "1"
-  assert _declared_default("AccordFrictionHystBand") == "1"
+  assert _declared_default("AccordHoldMap") == "0"
+  assert _declared_default("AccordFrictionHyst") == "0.0"
+  assert _declared_default("AccordRateLoopGain") == "0.0"
+  assert _declared_default("AccordErrorNotchQ") == "0.0"
+  assert _declared_default("AccordRefFilter") == "0.0"
+  assert _declared_default("AccordTorqueKiHigh") == "0.0"
+  assert _declared_default("AccordDobHz") == "0.0"
+  assert _declared_default("AccordHoldLevel") == "0"
+  assert _declared_default("AccordFrictionHystBand") == "0"
+  assert _declared_default("AccordJerkLpHz") == "1.2"
   # rev 6.3: the dither ships OFF.  Its amplitude is the one number no log can settle, so it is a toggle the
   # operator walks up from the road, and 0.0 means the rev 6.2 path is byte-for-byte unchanged.
   assert _declared_default("AccordDither") == "0.0"

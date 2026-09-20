@@ -821,7 +821,8 @@ class StarPilotVariables:
     toggle.keep_learned_lat_accel_offset = self.get_value("KeepLearnedLatAccelOffset", condition=is_torque_car and not is_angle_car and known("KeepLearnedLatAccelOffset"), default=True)
     is_honda_accord = str(getattr(CP, "carFingerprint", "")) == "HONDA_ACCORD"
     toggle.accord_variable_steer_ratio = self.get_value("AccordVariableSteerRatio", condition=is_honda_accord and known("AccordVariableSteerRatio"), default=True)
-    toggle.accord_rate_plant_ff = self.get_value("AccordRatePlantFF", condition=is_honda_accord and known("AccordRatePlantFF"), default=True)
+    # V294 (2026-09-20): the EPS is a torque map + 1 kHz acceleration trim, not a rate servo; the plant FF ships OFF.
+    toggle.accord_rate_plant_ff = self.get_value("AccordRatePlantFF", condition=is_honda_accord and known("AccordRatePlantFF"), default=False)
     toggle.accord_ff_rate_gain = self.get_value("AccordFFRateGain", cast=float, condition=is_honda_accord and known("AccordFFRateGain"), default=0.5, min=0.0, max=1.5)
     toggle.accord_torque_ki = self.get_value("AccordTorqueKi", cast=float, condition=is_honda_accord and known("AccordTorqueKi"), default=0.30, min=0.05, max=1.0)
     toggle.accord_turn_ff_taper = self.get_value("AccordTurnFFTaper", condition=is_honda_accord and known("AccordTurnFFTaper"), default=False)
@@ -829,17 +830,22 @@ class StarPilotVariables:
     toggle.accord_eps_spring_scale = self.get_value("AccordEpsSpringScale", cast=float, condition=is_honda_accord and known("AccordEpsSpringScale"), default=1.0, min=0.0, max=2.0)
     # V293 torque-mode terms (2026-09-14): all read only inside the rate-plant-FF branch except the notch and the
     # reference filter, which act on the setpoint / error path for the Accord alone.
-    toggle.accord_hold_map = self.get_value("AccordHoldMap", condition=is_honda_accord and known("AccordHoldMap"), default=True)
-    toggle.accord_friction_hyst = self.get_value("AccordFrictionHyst", cast=float, condition=is_honda_accord and known("AccordFrictionHyst"), default=0.015, min=0.0, max=0.05)
-    toggle.accord_rate_loop_gain = self.get_value("AccordRateLoopGain", cast=float, condition=is_honda_accord and known("AccordRateLoopGain"), default=0.0006, min=0.0, max=0.003)
-    toggle.accord_error_notch_q = self.get_value("AccordErrorNotchQ", cast=float, condition=is_honda_accord and known("AccordErrorNotchQ"), default=1.0, min=0.0, max=4.0)
-    toggle.accord_ref_filter = self.get_value("AccordRefFilter", cast=float, condition=is_honda_accord and known("AccordRefFilter"), default=0.12, min=0.0, max=0.5)
+    # V294 (2026-09-20): every torque-mode term defaults OFF (= its stock value).  The EPS now carries its own 1 kHz
+    # acceleration trim on the torque map; the fork runs the generic torque controller.  Each term stays switchable.
+    toggle.accord_hold_map = self.get_value("AccordHoldMap", condition=is_honda_accord and known("AccordHoldMap"), default=False)
+    toggle.accord_friction_hyst = self.get_value("AccordFrictionHyst", cast=float, condition=is_honda_accord and known("AccordFrictionHyst"), default=0.0, min=0.0, max=0.05)
+    toggle.accord_rate_loop_gain = self.get_value("AccordRateLoopGain", cast=float, condition=is_honda_accord and known("AccordRateLoopGain"), default=0.0, min=0.0, max=0.003)
+    toggle.accord_error_notch_q = self.get_value("AccordErrorNotchQ", cast=float, condition=is_honda_accord and known("AccordErrorNotchQ"), default=0.0, min=0.0, max=4.0)
+    toggle.accord_ref_filter = self.get_value("AccordRefFilter", cast=float, condition=is_honda_accord and known("AccordRefFilter"), default=0.0, min=0.0, max=0.5)
     # rev 4 (2026-09-14, routes 72+73): the integral gain from 18 m/s up; AccordTorqueKi stays the value below 8 m/s.  0 = flat.
-    toggle.accord_torque_ki_high = self.get_value("AccordTorqueKiHigh", cast=float, condition=is_honda_accord and known("AccordTorqueKiHigh"), default=2.5, min=0.0, max=6.0)
-    # rev 5 (2026-09-15): disturbance-observer corner frequency; 0 = off (rev 4 behaviour)
-    toggle.accord_dob_hz = self.get_value("AccordDobHz", cast=float, condition=is_honda_accord and known("AccordDobHz"), default=0.6, min=0.0, max=3.0)
-    toggle.accord_hold_level = self.get_value("AccordHoldLevel", cast=bool, condition=is_honda_accord and known("AccordHoldLevel"), default=True)
-    toggle.accord_friction_hyst_band = self.get_value("AccordFrictionHystBand", cast=bool, condition=is_honda_accord and known("AccordFrictionHystBand"), default=True)
+    toggle.accord_torque_ki_high = self.get_value("AccordTorqueKiHigh", cast=float, condition=is_honda_accord and known("AccordTorqueKiHigh"), default=0.0, min=0.0, max=6.0)
+    # rev 5 (2026-09-15): disturbance-observer corner frequency; 0 = off
+    toggle.accord_dob_hz = self.get_value("AccordDobHz", cast=float, condition=is_honda_accord and known("AccordDobHz"), default=0.0, min=0.0, max=3.0)
+    toggle.accord_hold_level = self.get_value("AccordHoldLevel", cast=bool, condition=is_honda_accord and known("AccordHoldLevel"), default=False)
+    toggle.accord_friction_hyst_band = self.get_value("AccordFrictionHystBand", cast=bool, condition=is_honda_accord and known("AccordFrictionHystBand"), default=False)
+    # V294 (2026-09-20): the jerk low-pass cutoff of the delay-compensation stage, Accord only.  1.2 = the generic path
+    # (the revert); 4.0 = rev 6's measured value (half the setpoint-chain lag).  Bounded so the filter stays a smoother.
+    toggle.accord_jerk_lp_hz = self.get_value("AccordJerkLpHz", cast=float, condition=is_honda_accord and known("AccordJerkLpHz"), default=1.2, min=0.5, max=8.0)
     # rev 6.3 (2026-09-16): friction-linearising command dither.  Ceiling 0.02 = 82 counts of 0xE4; above that the
     # 14 Hz slew starts to compete with the Honda +-0.03/frame limiter.  0 = off (rev 6.2 behaviour, byte for byte).
     toggle.accord_dither = self.get_value("AccordDither", cast=float, condition=is_honda_accord and known("AccordDither"), default=0.0, min=0.0, max=0.02)

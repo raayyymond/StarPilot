@@ -309,7 +309,10 @@ class LatControlTorque(LatControl):
         # is identically 1 at every frequency when F_j == 1 -- so all of its residual lag and its whole 0.4-1 Hz gain
         # bump come from this one generic 1.2 Hz smoother, which is sized for a raw derivative and is applied here to a
         # 38-frame difference that is already smooth.  See HONDA_ACCORD_JERK_LP_HZ for the measured chain response.
-        self.jerk_filter.update_alpha(1.0 / (2.0 * np.pi * max(HONDA_ACCORD_JERK_LP_HZ, 0.1)))
+        # V294 (2026-09-20): the cutoff is the AccordJerkLpHz toggle; its default 1.2 is the generic path (reverted),
+        # 4.0 restores rev 6's measured value.  It was the one torque-mode-era edit with no switch.
+        jerk_lp_hz = float(getattr(starpilot_toggles, "accord_jerk_lp_hz", LP_FILTER_CUTOFF_HZ))
+        self.jerk_filter.update_alpha(1.0 / (2.0 * np.pi * max(jerk_lp_hz, 0.1)))
       raw_lateral_jerk = (future_desired_lateral_accel - expected_lateral_accel) / max(lat_delay, self.dt)
       raw_lateral_jerk = np.clip(raw_lateral_jerk, -lateral_jerk_limit, lateral_jerk_limit)
       desired_lateral_jerk = np.clip(self.jerk_filter.update(raw_lateral_jerk), -lateral_jerk_limit, lateral_jerk_limit)
@@ -319,7 +322,7 @@ class LatControlTorque(LatControl):
         # reference shaping (AccordRefFilter): two cascaded first-order filters on the setpoint, so a fast
         # planner step does not ring the 1-2 Hz steering mode through the feedforward and P.  Both the
         # feedforward and the P/I error see the shaped setpoint; the logged desiredLateralAccel is the shaped one.
-        accord_ref_rc = float(getattr(starpilot_toggles, "accord_ref_filter", 0.12))
+        accord_ref_rc = float(getattr(starpilot_toggles, "accord_ref_filter", 0.0))
         if accord_ref_rc > 0.0:
           self.accord_ref_filter_1.update_alpha(accord_ref_rc)
           self.accord_ref_filter_2.update_alpha(accord_ref_rc)
@@ -345,7 +348,7 @@ class LatControlTorque(LatControl):
         # ~60 ms-delayed feedback cannot pump the resonance (route 71: a 2.34 Hz limit cycle on hard curves at speed).
         # The logged error is the notched one, so torqueState.p / error still reads SteerKP exactly.
         error_with_lsf = self.accord_error_notch.update(error_with_lsf, get_honda_accord_mode_hz(CS.vEgo),
-                                                        float(getattr(starpilot_toggles, "accord_error_notch_q", 1.0)))
+                                                        float(getattr(starpilot_toggles, "accord_error_notch_q", 0.0)))
       if self.is_ioniq_6_2025:
         error_with_lsf *= get_ioniq_6_2025_low_speed_center_error_scale(
           setpoint, desired_lateral_jerk, CS.vEgo,
@@ -618,7 +621,7 @@ class LatControlTorque(LatControl):
                                                float(getattr(starpilot_toggles, "accord_torque_ki_high", 0.0)))
         if self.pid._k_i[1][0] != accord_ki:
           self.pid._k_i = [self.pid._k_i[0], [accord_ki] * len(self.pid._k_i[1])]
-      if self.is_honda_accord and getattr(starpilot_toggles, "accord_rate_plant_ff", True):
+      if self.is_honda_accord and getattr(starpilot_toggles, "accord_rate_plant_ff", False):
         # The Accord's modified EPS is a rate servo (torque -> steering rate), so the lat-accel
         # feedforward above is replaced by a torque feedforward from the identified plant.  Only
         # the friction/deadzone-boost part of `ff` is kept (converted to torque as before); P and
@@ -644,11 +647,11 @@ class LatControlTorque(LatControl):
         rate_gain = float(getattr(starpilot_toggles, "accord_ff_rate_gain", HONDA_ACCORD_FF_RATE_GAIN))
         gain_scale = float(getattr(starpilot_toggles, "accord_eps_gain_scale", 1.0))
         spring_scale = float(getattr(starpilot_toggles, "accord_eps_spring_scale", 1.0))
-        hold_map = bool(getattr(starpilot_toggles, "accord_hold_map", True))
+        hold_map = bool(getattr(starpilot_toggles, "accord_hold_map", False))
         # rev 6: the hold-map level must reach the FEEDFORWARD *and* the observer's internal model together.  If only
         # the feedforward moved, the observer would read the raise as a disturbance and cancel it within its 0.6 Hz
         # corner, which is exactly the loop the level exists to collapse.
-        hold_level = bool(getattr(starpilot_toggles, "accord_hold_level", True))
+        hold_level = bool(getattr(starpilot_toggles, "accord_hold_level", False))
         hold_fn = (get_honda_accord_hold_torque if hold_level else
                    (lambda a, v: get_honda_accord_hold_torque(a, v, level=False)))
         plant_ff_torque = -get_honda_accord_rate_plant_ff(angle_des, angle_des_rate, CS.vEgo, rate_gain, gain_scale, spring_scale,
@@ -656,14 +659,14 @@ class LatControlTorque(LatControl):
         # V293 torque mode (2026-09-14).  Static-friction hysteresis (AccordFrictionHyst): the torque that holds
         # an angle depends on which way the wheel last moved; z follows the DESIRED angle so it is pure
         # feedforward (no loop gain, unlike the SteerFriction relay that limit-cycled the 2 Hz mode on route 71).
-        friction_hyst = float(getattr(starpilot_toggles, "accord_friction_hyst", 0.015))
-        hyst_band = get_honda_accord_friction_hyst_band(CS.vEgo, bool(getattr(starpilot_toggles, "accord_friction_hyst_band", True)))
+        friction_hyst = float(getattr(starpilot_toggles, "accord_friction_hyst", 0.0))
+        hyst_band = get_honda_accord_friction_hyst_band(CS.vEgo, bool(getattr(starpilot_toggles, "accord_friction_hyst_band", False)))
         self.accord_friction_z = honda_accord_friction_hysteresis(self.accord_friction_z, d_angle_des, friction_hyst,
                                                                   hyst_band)
         # 100 Hz rate loop (AccordRateLoopGain): the electronic damper the EPS lost in torque mode, closed on the
         # measured wheel rate (carState.steeringRateDeg, fresh every frame) against the feedforward's desired rate.
         rate_meas = self.accord_rate_meas_filter.update(float(CS.steeringRateDeg))
-        rate_loop_gain = get_honda_accord_rate_loop_gain(CS.vEgo, float(getattr(starpilot_toggles, "accord_rate_loop_gain", 0.0006)))
+        rate_loop_gain = get_honda_accord_rate_loop_gain(CS.vEgo, float(getattr(starpilot_toggles, "accord_rate_loop_gain", 0.0)))
         inner_torque = -(self.accord_friction_z + rate_loop_gain * (angle_des_rate - rate_meas))
         # rev 5 (2026-09-15): the disturbance observer's estimate from the PREVIOUS frame (it needs this frame's output to
         # advance, so it is stepped after the PID below).  +left frame -> torque frame.

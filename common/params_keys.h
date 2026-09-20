@@ -386,7 +386,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // no longer exists (the switch is now 0% or 30%), so its stock is off.
     {"KeepLearnedLatAccelOffset", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
     {"AccordVariableSteerRatio", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
-    {"AccordRatePlantFF", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    // V294 (2026-09-20): the EPS is a torque map with a 1 kHz acceleration trim, not a rate servo -- the rate-plant
+    // feedforward's model no longer describes it, so it ships OFF (the generic torque-controller feedforward path).
+    {"AccordRatePlantFF", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     {"AccordFFRateGain", {PERSISTENT, FLOAT, "0.5", "0.5", 2, SETTINGS_SIMPLE}},
     {"AccordTorqueKi", {PERSISTENT, FLOAT, "0.30", "0.15", 2, SETTINGS_SIMPLE}},
     {"AccordTurnFFTaper", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
@@ -394,33 +396,39 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AccordEpsSpringScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
     // V293 torque-mode EPS (2026-09-14, routes 70+71): measured hold map, static-friction hysteresis feedforward,
     // 100 Hz rate loop, speed-scheduled error notch at the 1-2 Hz steering mode, reference shaping.
-    // stock_value (Safe Mode) = every term off; the defaults are the rev-3 flight settings.
-    {"AccordHoldMap", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
-    {"AccordFrictionHyst", {PERSISTENT, FLOAT, "0.015", "0.0", 2, SETTINGS_SIMPLE}},
-    {"AccordRateLoopGain", {PERSISTENT, FLOAT, "0.0006", "0.0", 2, SETTINGS_SIMPLE}},
-    {"AccordErrorNotchQ", {PERSISTENT, FLOAT, "1.0", "0.0", 2, SETTINGS_SIMPLE}},
-    {"AccordRefFilter", {PERSISTENT, FLOAT, "0.12", "0.0", 2, SETTINGS_SIMPLE}},
+    // stock_value (Safe Mode) = every term off.  V294 (2026-09-20): the DEFAULTS are the stock values too -- every
+    // torque-mode term is REVERTED (off) now that the EPS carries its own 1 kHz acceleration trim; the code and the
+    // toggles stay so any term can be turned back on from the road.  (Rev 3-6.4 defaults were the flight settings.)
+    {"AccordHoldMap", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
+    {"AccordFrictionHyst", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordRateLoopGain", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordErrorNotchQ", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordRefFilter", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
     // rev 4 (2026-09-14, routes 72+73): speed-scheduled integral gain -- AccordTorqueKi below 8 m/s, this from 18 m/s.
-    // stock_value 0 = flat AccordTorqueKi (the rev-3 behaviour).
-    {"AccordTorqueKiHigh", {PERSISTENT, FLOAT, "2.5", "0.0", 2, SETTINGS_SIMPLE}},
+    // 0 = flat AccordTorqueKi (the rev-3 behaviour; the V294 default).
+    {"AccordTorqueKiHigh", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
     // rev 5 (2026-09-15): disturbance observer corner (Hz) on the Accord torque controller; 0 = off (rev 4 behaviour).
-    {"AccordDobHz", {PERSISTENT, FLOAT, "0.6", "0.0", 2, SETTINGS_SIMPLE}},
+    {"AccordDobHz", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
     // rev 6 (2026-09-16): speed-scheduled level on the Accord hold map (HONDA_ACCORD_HOLD_LEVEL_V), 1.00 at and below
     // 12.5 m/s, 1.30 from 17.5.  Reaches the rate-plant feedforward AND the observer's internal model together.
     // 0 = the rev 3-5 map, i.e. an exact revert of the only rev-6 edit that raises delivered torque.
-    {"AccordHoldLevel", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    {"AccordHoldLevel", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     // rev 6 (2026-09-16): speed-scheduled width of the Accord static-friction hysteresis band
     // (HONDA_ACCORD_FRICTION_HYST_BAND_V), 3.0 deg at 8 m/s narrowing to 0.60 at 26.  The band sets the demand at
     // which the term stops being a linear spring and starts supplying friction break-out; a fixed 3 deg puts that
     // threshold at 0.034 m/s^2 at 8 m/s but 0.251 at 26, so the loop's own 0.06-0.08 m/s^2 corrections fell inside
     // the spring regime at speed and produced no motion.  0 = the rev 3-5 flat 3 deg.
-    {"AccordFrictionHystBand", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    {"AccordFrictionHystBand", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     // rev 6.3 (2026-09-16): amplitude (unit torque) of the 14 Hz friction-linearising command dither added to the
     // Accord actuator torque.  0 = off (rev 6.2 behaviour).  0.012 = 49 counts of 0xE4 and ~0.001 deg at the rim.
     {"AccordDither", {PERSISTENT, FLOAT, "0.0", "0.0", 2, SETTINGS_SIMPLE}},
     // rev 6.3 (2026-09-16): taper the dither to zero as the command grows, so it acts only where the rack is stuck.
     // Ungated it puts a 0.15-0.41 deg ring on the T3 hold-and-kick test; gated, T3 is unchanged at every speed.
     {"AccordDitherGate", {PERSISTENT, BOOL, "1", "0", 2, SETTINGS_SIMPLE}},
+    // V294 (2026-09-20): cutoff (Hz) of the lateral-jerk low-pass in the Accord delay-compensation stage.  Rev 6 hard-coded
+    // 4.0 (measured: half the setpoint-chain lag of the generic 1.2, see HONDA_ACCORD_JERK_LP_HZ); it was the one
+    // torque-mode-era edit with no switch.  Default and stock 1.2 = the generic path, i.e. a full revert.
+    {"AccordJerkLpHz", {PERSISTENT, FLOAT, "1.2", "1.2", 2, SETTINGS_SIMPLE}},
     // rev 6.2 (2026-09-16): do not apply the lane-change jerk clamp to a TURN.  A model lateral-accel demand past
     // LANE_CHANGE_TURN_LAT_ACCEL inside a lane-change state latches the clamp off for the rest of that state.
     // Keeps lane-change smoothing entirely; 0 = the rev 3-6.1 behaviour.
