@@ -2139,8 +2139,24 @@ class TestLatControl:
     assert get_honda_accord_rate_plant_ff(0.0, 1e6, 5.0, gain_scale=0.5) == pytest.approx(1.0)
 
   @staticmethod
+  def _rev64_accord_toggles(toggles):
+    # V294 (2026-09-20, 54ff1ea39): every V293 torque-mode term now defaults to STOCK, so a test of the rev-6.4 law
+    # must ask for it -- these are exactly the controller's pre-V294 getattr fallbacks (rev 6.4, 84766cdc5)
+    toggles.accord_rate_plant_ff = True
+    toggles.accord_hold_map = True
+    toggles.accord_hold_level = True
+    toggles.accord_friction_hyst = 0.015
+    toggles.accord_friction_hyst_band = True
+    toggles.accord_rate_loop_gain = 0.0006
+    toggles.accord_ref_filter = 0.12
+    toggles.accord_error_notch_q = 1.0
+    toggles.accord_jerk_lp_hz = 4.0
+    return toggles
+
+  @staticmethod
   def _run_honda_accord_rate_plant(lat_accel_offset, seconds=2.0):
     controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+    TestLatControl._rev64_accord_toggles(toggles)
     CS.vEgo = 15.0
     CS.steeringAngleDeg = 0.0
     # on-road values: LAF 6.0 keeps the output well inside +/-1 (stock 1.69 saturates this scenario)
@@ -2473,6 +2489,7 @@ class TestLatControl:
     # two identical runs except the measured wheel rate: the rate loop must add -Kv * (rate) torque (internal frame)
     def run(rate_dps, gain):
       controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+      TestLatControl._rev64_accord_toggles(toggles)
       toggles.accord_rate_loop_gain = gain
       CS.vEgo = 15.0
       CS.steeringAngleDeg = 0.0
@@ -2550,6 +2567,7 @@ class TestLatControl:
     # + FF answer within a second, because the unmodelled torque it estimates is added to the feedforward
     def run(dob_hz):
       controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+      TestLatControl._rev64_accord_toggles(toggles)
       toggles.accord_dob_hz = dob_hz
       toggles.accord_torque_ki = 0.0
       toggles.accord_torque_ki_high = 0.0
@@ -2576,6 +2594,7 @@ class TestLatControl:
     # With AccordFrictionHyst > 0 the relay must contribute nothing; with it off the relay is the generic one.
     def run(friction, hyst):
       controller, VM, CS, params, toggles = TestLatControl._build_torque_controller(HONDA.HONDA_ACCORD, force_torque=True)
+      TestLatControl._rev64_accord_toggles(toggles)
       toggles.accord_friction_hyst = hyst
       toggles.accord_rate_loop_gain = 0.0
       toggles.accord_ref_filter = 0.0
