@@ -119,16 +119,33 @@ def create_acc_commands(packer, CAN, enabled, active, accel, gas, stopping_count
   return commands
 
 
-def create_steering_control(packer, CAN, apply_torque, lkas_active, tja_control):
+def create_steering_control(packer, CAN, apply_torque, lkas_active, tja_control, angle_arm=None):
+  # angle_arm (Accord angle-loop EPS only): STEER_TORQUE is an angle setpoint and is packed as given with the request
+  # off too, and byte 2 bits 3:2 carry the arm the EPS lane requires.  None = the torque frame, unchanged.
   values = {
-    "STEER_TORQUE": apply_torque if lkas_active else 0,
+    "STEER_TORQUE": apply_torque if (lkas_active or angle_arm is not None) else 0,
     "STEER_TORQUE_REQUEST": lkas_active,
   }
 
   if tja_control:
     values["STEER_DOWN_TO_ZERO"] = lkas_active
 
-  return packer.make_can_msg("STEERING_CONTROL", CAN.lkas, values)
+  msg = packer.make_can_msg("STEERING_CONTROL", CAN.lkas, values)
+  if angle_arm is not None:
+    msg = set_steering_control_arm(packer, msg, angle_arm)
+  return msg
+
+
+def set_steering_control_arm(packer, msg, arm):
+  """Write 0xE4 byte 2 bits 3:2 (no DBC signal covers them) and re-sign the frame's checksum."""
+  from opendbc.can.packer import set_value  # deferred: opendbc.can.dbc imports this module
+
+  addr, dat, bus = msg
+  dat = bytearray(dat)
+  dat[2] = (dat[2] & ~0x0C & 0xFF) | ((int(arm) & 0x3) << 2)
+  checksum = packer.dbc.addr_to_msg[addr].sigs["CHECKSUM"]
+  set_value(dat, checksum, checksum.calc_checksum(addr, checksum, dat))
+  return addr, bytes(dat), bus
 
 
 def create_bosch_supplemental_1(packer, CAN):

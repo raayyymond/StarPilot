@@ -5,6 +5,7 @@ from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, struc
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.docs_definitions import CarFootnote, CarHarness, CarDocs, CarParts, Column
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries, p16
+from opendbc.car.lateral import AngleSteeringLimits, MAX_LATERAL_ACCEL, MAX_LATERAL_JERK
 
 Ecu = structs.CarParams.Ecu
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
@@ -39,6 +40,39 @@ class CarControllerParams:
   STEER_DELTA_UP = 3  # min/max in 0.33s for all Honda
   STEER_DELTA_DOWN = 3
   STEER_GLOBAL_MIN_SPEED = 3 * CV.MPH_TO_MS
+
+  # ---- Angle mode: the Accord on the V298 angle-loop EPS firmware only (interface.py decides; see
+  # HONDA_ACCORD_EPS_ANGLE_LOOP_FW).  0xE4 STEER_TORQUE then carries an ANGLE SETPOINT, raw = round(-10 * deg) in the
+  # frame of carState.steeringAngleDeg, and the EPS closes a position loop on it at 1 kHz.  The panda bounds NOTHING
+  # on 0xE4 for Honda except "bytes 0-1 zero while not allowed" (safety/modes/honda.h, honda_tx_hook, "STEER: safety
+  # check"), so every limit below is the fork's.
+  ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
+    400,  # deg; the EPS clamps its setpoint at raw +-4096 (409.6 deg)
+    ([], []),
+    ([], []),
+    MAX_LATERAL_ACCEL=MAX_LATERAL_ACCEL,  # 3.589 m/s^2, the opendbc module constant
+    MAX_LATERAL_JERK=MAX_LATERAL_JERK,    # 3.589 m/s^3
+    MAX_ANGLE_RATE=1.2,  # deg/frame = 120 deg/s; below the servo's rail-limited rate (467-483 deg/s at <= 10 m/s)
+  )
+  # Error clip |setpoint - measured angle| <= ANGLE_ERROR_MAX(v).  It bounds the P torque the fork can demand
+  # (V298: P = DC stiffness x error) without starving a correctly working setpoint: each value is the error the
+  # inner loop carries while the setpoint slews at the fork's own maximum rate,
+  #   rate(v) x (0.06 s round trip + tau_inner(v)),  tau_inner = b / (k + s)
+  # with s = V298's DC stiffness 52/64/33/25/47/96 lane counts per deg (Kp_eff 515/641/332/245/467/957) at the knots
+  # below, b and k the V294 plant nominal, rate = min(120 deg/s, the 3.589 m/s^3 jerk limit).  Demanded-P cap
+  # s x clip = 886/987/644/417/386/444 lane counts = 36/40/26/17/16/18 % of the 2461 rail.  Hold error beyond the
+  # clip is the EPS integrator's job.  Values are sized on a model, not measured on the car.
+  ANGLE_ERROR_MAX_BP = [3.1, 8.0, 10.0, 11.75, 17.5, 26.9]  # m/s, the V298 gain-table knots
+  ANGLE_ERROR_MAX_V = [17.0, 15.5, 19.5, 17.0, 8.5, 4.5]   # deg
+  ANGLE_RAW_MAX = 4000  # raw clip before packing; the packer clips nothing and wraps past +-32767
+  # Driver override (option O1): while pressed the setpoint follows the hand, theta_meas + rate * lead.  The
+  # hysteresis brackets the EPS integrator freeze (~524 wire counts of hand torque, ~293 against an opposing hand).
+  ANGLE_OVERRIDE_ON = 600   # 0x18F STEER_TORQUE_SENSOR wire counts
+  ANGLE_OVERRIDE_OFF = 500
+  ANGLE_OVERRIDE_LEAD_S = 0.06  # s, the round trip from the EPS angle to an applied setpoint
+  # 0xE4 byte 2 bits 3:2 (no DBC signal) = the EPS's gp-0x6803.  V298 runs its lane only when it reads 2, on every
+  # frame including request-off ones; the stock camera sends 0 or 1 there, never 2.
+  ANGLE_ARM = 2
 
   def __init__(self, CP):
     self.STEER_MAX = CP.lateralParams.torqueBP[-1]
@@ -84,6 +118,16 @@ class HondaFlags(IntFlag):
   HYBRID = 2048
   BOSCH_TJA_CONTROL = 4096
   EPS_MODIFIED = 8192
+  # Detected: the EPS reports the Accord angle-loop firmware (HONDA_ACCORD_EPS_ANGLE_LOOP_FW)
+  EPS_ANGLE_LOOP_FW = 16384
+
+
+# F181 of the Accord EPS angle-loop firmware (V298).  The comma keeps EPS_MODIFIED set; the string is unique to the
+# angle build, so a torque fork never meets it unknowingly and an angle fork never commands a torque image.
+HONDA_ACCORD_EPS_ANGLE_LOOP_FW = b"39990-TVA,A16A"
+# Angle mode's vehicle delay (lagd adds the 0.2 s software part): the inner angle loop's lag, ~0.16-0.17 s at
+# 15-27 m/s on the V298 gains.  A model value; drive 1 learns it (UseAutoSteerDelay on).
+HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY = 0.15
 
 
 # Car button codes

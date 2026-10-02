@@ -6,13 +6,24 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA_BOSCH, HONDA_BOSCH_A, HONDA_BOSCH_A_RADAR_VERIFIED, HONDA_BOSCH_CANFD, \
-                                                 HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags
+                                                 HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags, \
+                                                 HONDA_ACCORD_EPS_ANGLE_LOOP_FW, HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
 from opendbc.car.interfaces import CarInterfaceBase
 
 TransmissionType = structs.CarParams.TransmissionType
+
+
+def accord_eps_angle_loop_enabled(docs: bool) -> bool:
+  # The operator's switch for the angle interface.  Unknown key (params library not rebuilt) = off.
+  if docs:
+    return False
+  try:
+    return Params().get_bool("AccordEpsAngleLoop")
+  except UnknownKeyName:
+    return False
 
 
 class CarInterface(CarInterfaceBase):
@@ -107,9 +118,12 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kiV = [1.2, 0.8, 0.5]
 
     eps_modified = False
+    eps_angle_loop_fw = False
     for fw in car_fw:
       if fw.ecu == "eps" and b"," in fw.fwVersion:
         eps_modified = True
+      if fw.ecu == "eps" and fw.fwVersion.rstrip(b"\x00") == HONDA_ACCORD_EPS_ANGLE_LOOP_FW:
+        eps_angle_loop_fw = True
 
     if eps_modified:
       ret.flags |= HondaFlags.EPS_MODIFIED.value
@@ -150,6 +164,14 @@ class CarInterface(CarInterfaceBase):
         ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.3], [0.09]]
       else:
         ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.6], [0.18]]
+      # Angle interface iff the EPS is the angle-loop firmware AND the operator's switch is on.  lateralTuning stays
+      # PID (unused by LatControlAngle; it keeps the torque-controller conversion off).  On the angle firmware with
+      # the switch off, carstate raises a permanent steer fault: that EPS ignores torque frames.
+      if eps_angle_loop_fw:
+        ret.flags |= HondaFlags.EPS_ANGLE_LOOP_FW.value
+        if accord_eps_angle_loop_enabled(docs):
+          ret.steerControlType = structs.CarParams.SteerControlType.angle
+          ret.steerActuatorDelay = HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY
       if ret.transmissionType == TransmissionType.manual:
         CarControllerParams.BOSCH_GAS_LOOKUP_BP = [-0.2, 2.0]
 

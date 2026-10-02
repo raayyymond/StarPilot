@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import pytest
 from parameterized import parameterized
 from types import SimpleNamespace
@@ -67,6 +68,8 @@ from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import (
   get_genesis_g70_stabilized_output,
   normalize_flm_overrides,
   set_flm_runtime_overrides,
+  get_honda_accord_angle_at_own_ratio,
+  HONDA_ACCORD_ANGLE_SR_TOL_DEG,
 )
 from openpilot.selfdrive.controls.lib.latcontrol_torque import (
   JERK_GAIN,
@@ -2101,6 +2104,91 @@ class TestLatControl:
       assert get_honda_accord_steer_ratio(angle) == pytest.approx(served * 16.33 / 16.00, abs=0.01)
     # the 227 -> 236 join is a deliberate non-monotone step where measurement meets extrapolation
     assert get_honda_accord_steer_ratio(236.0) > get_honda_accord_steer_ratio(227.0)
+
+  # ---- V298 angle interface (the EPS angle-loop firmware): the setpoint side ----
+
+  @staticmethod
+  def _accord_fixed_point_case(theta_star, gap, level=None):
+    # theta_star is the consistent angle for some curvature: theta = c * map(theta).  controlsd built the VM at the
+    # MEASURED angle theta_star + gap, so the VM's own answer is c * map(theta_star + gap).
+    c = theta_star / get_honda_accord_steer_ratio(theta_star, level)
+    sr_vm = get_honda_accord_steer_ratio(theta_star + gap, level)
+    return c * sr_vm, sr_vm
+
+  def test_honda_accord_angle_fixed_point_converges_on_the_map(self):
+    # I6: the setpoint is the map's fixed point within the tolerance, from any measured start within 20 deg, over the
+    # whole map (both signs, every knot, the frozen tail and the 227->236 step) and at the level-toggle extremes
+    for level in (None, 10.13, 16.33, 21.1):
+      for theta_star in np.arange(-400.0, 400.01, 0.5):
+        for gap in (-20.0, -7.5, -1.0, 1.0, 7.5, 20.0):
+          angle_vm, sr_vm = self._accord_fixed_point_case(theta_star, gap, level)
+          theta = get_honda_accord_angle_at_own_ratio(angle_vm, sr_vm, level)
+          assert theta == pytest.approx(theta_star, abs=HONDA_ACCORD_ANGLE_SR_TOL_DEG), (level, theta_star, gap)
+    # every pass contracts: |error| falls monotonically, worst ratio below 0.45 (the 236-303 deg knot)
+    worst_ratio = 0.0
+    for theta_star in np.arange(5.0, 400.01, 1.0):
+      angle_vm, sr_vm = self._accord_fixed_point_case(theta_star, 15.0)
+      errors = [abs(get_honda_accord_angle_at_own_ratio(angle_vm, sr_vm, max_passes=n) - theta_star) for n in range(4)]
+      for before, after in zip(errors, errors[1:], strict=False):
+        if before > 1e-9:
+          worst_ratio = max(worst_ratio, after / before)
+    assert worst_ratio < 0.45
+
+  def test_honda_accord_angle_fixed_point_two_passes_hold_only_below_the_frozen_tail(self):
+    # The spec's "two passes" is enough below 180 deg (<= 0.08 deg at a 19 deg measured-vs-desired gap) but leaves
+    # ~1 deg on the 236-303 deg knot, which is why the iteration runs to a tolerance instead.
+    worst_low = max(abs(get_honda_accord_angle_at_own_ratio(*self._accord_fixed_point_case(t, g), max_passes=2) - t)
+                    for t in np.arange(-180.0, 180.01, 0.5) for g in (-19.0, 19.0))
+    assert worst_low < 0.08
+    angle_vm, sr_vm = self._accord_fixed_point_case(-300.0, 15.0)
+    assert abs(get_honda_accord_angle_at_own_ratio(angle_vm, sr_vm, max_passes=2) + 300.0) > 0.5
+    assert get_honda_accord_angle_at_own_ratio(angle_vm, sr_vm) == pytest.approx(-300.0, abs=HONDA_ACCORD_ANGLE_SR_TOL_DEG)
+
+  @staticmethod
+  def _build_accord_angle_controller(steering_angle_deg, angle_offset_deg=1.5, v_ego=12.0):
+    CarInterface = interfaces[HONDA.HONDA_ACCORD]
+    CP = CarInterface.get_non_essential_params(HONDA.HONDA_ACCORD)
+    CP.steerControlType = car.CarParams.SteerControlType.angle
+    CI = CarInterface(CP, custom.StarPilotCarParams.new_message())
+    controller = LatControlAngle(CP.as_reader(), CI, DT_CTRL)
+    VM = VehicleModel(CP)
+    CS = car.CarState.new_message()
+    CS.vEgo = v_ego
+    CS.steeringAngleDeg = steering_angle_deg
+    params = log.LiveParametersData.new_message()
+    params.steerRatio = CP.steerRatio
+    params.stiffnessFactor = 1.0
+    params.roll = 0.0
+    params.angleOffsetDeg = angle_offset_deg
+    # controlsd's Accord branch: sR from the map at the measured angle, offset excluded
+    VM.update_params(1.0, get_honda_accord_steer_ratio(steering_angle_deg - angle_offset_deg))
+    return controller, VM, CS, params, SimpleNamespace(accord_variable_steer_ratio=True)
+
+  def test_honda_accord_angle_controller_evaluates_the_map_at_the_desired_angle(self):
+    # I6 through LatControlAngle: the setpoint (offset removed) maps back to the commanded curvature through the
+    # map at ITSELF, not at the measured angle
+    for measured, curvature in ((30.0, -0.012), (60.0, -0.03), (200.0, -0.1), (-5.0, 0.02)):
+      controller, VM, CS, params, toggles = self._build_accord_angle_controller(measured, v_ego=5.0)
+      _, angle_des, lac_log = controller.update(True, CS, VM, params, False, curvature, False, 0.2, None, None, toggles)
+      assert lac_log.steeringAngleDesiredDeg == pytest.approx(angle_des)
+      theta = angle_des - params.angleOffsetDeg
+      VM.update_params(1.0, get_honda_accord_steer_ratio(theta))
+      assert -VM.calc_curvature(math.radians(theta), CS.vEgo, 0.0) == pytest.approx(curvature, rel=2e-3), measured
+    # the toggle off is the generic inversion at controlsd's sR, unchanged
+    controller, VM, CS, params, toggles = self._build_accord_angle_controller(60.0, v_ego=5.0)
+    toggles.accord_variable_steer_ratio = False
+    _, angle_des, _ = controller.update(True, CS, VM, params, False, -0.03, False, 0.2, None, None, toggles)
+    assert angle_des == pytest.approx(math.degrees(VM.get_steer_from_curvature(0.03, CS.vEgo, 0.0)) + params.angleOffsetDeg)
+
+  def test_honda_accord_angle_controller_has_no_integrator(self):
+    # I5: a constant error (desired != measured, held) gives a constant setpoint, frame after frame; inactive frames
+    # return the measured angle
+    controller, VM, CS, params, toggles = self._build_accord_angle_controller(10.0, v_ego=20.0)
+    outputs = [controller.update(True, CS, VM, params, False, -0.004, False, 0.2, None, None, toggles)[1] for _ in range(500)]
+    assert abs(outputs[0] - CS.steeringAngleDeg) > 1.0
+    assert max(outputs) - min(outputs) == 0.0
+    _, angle_des, lac_log = controller.update(False, CS, VM, params, False, -0.004, False, 0.2, None, None, toggles)
+    assert angle_des == pytest.approx(CS.steeringAngleDeg) and not lac_log.active
 
   def test_honda_accord_rate_plant_ff_hold_and_move_terms(self):
     # hold torque balances the return spring at the 12.5 m/s knots (V293 tables): k=2.30, G=271 -> 20 deg needs 0.170

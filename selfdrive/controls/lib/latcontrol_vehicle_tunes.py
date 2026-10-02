@@ -2563,6 +2563,31 @@ def get_honda_accord_steer_ratio(steer_angle_deg: float, level: float | None = N
   return ratio
 
 
+HONDA_ACCORD_ANGLE_SR_TOL_DEG = 0.01   # a tenth of the EPS setpoint quantum
+HONDA_ACCORD_ANGLE_SR_MAX_PASSES = 10
+
+
+def get_honda_accord_angle_at_own_ratio(angle_vm_deg: float, sr_vm: float, level: float | None = None,
+                                        max_passes: int = HONDA_ACCORD_ANGLE_SR_MAX_PASSES) -> float:
+  """Angle-mode setpoint with the rack map evaluated at the DESIRED angle, not the measured one.
+
+  controlsd sets VehicleModel.sR = map(measured angle), and get_steer_from_curvature is linear in sR, so the angle
+  the curvature needs at ratio sr is angle_vm_deg * sr / sr_vm.  The consistent angle is the fixed point
+  theta = angle_vm_deg * map(theta) / sr_vm (offset excluded, as in controlsd).  Near the fixed point each pass
+  shrinks the error by |theta * map'(theta) / map(theta)| <= 0.44 (worst on the 236-303 deg knot): within 0.01 deg in
+  at most ten passes whenever the measured angle is within 20 deg of the target (further away, the fork's rate and
+  error clips decide the setpoint anyway).  Two passes are within 0.08 deg below 180 deg only.  Feed-forward only.
+  """
+  theta = float(angle_vm_deg)
+  for _ in range(max_passes):
+    nxt = float(angle_vm_deg) * get_honda_accord_steer_ratio(theta, level) / sr_vm
+    done = abs(nxt - theta) < HONDA_ACCORD_ANGLE_SR_TOL_DEG
+    theta = nxt
+    if done:
+      break
+  return theta
+
+
 def get_honda_accord_ff_scale(desired_lateral_accel: float) -> float:
   """Taper only sharp-turn feedforward where the Accord carries excess curvature."""
   turn_weight = _sigmoid((abs(desired_lateral_accel) - HONDA_ACCORD_TURN_FF_ONSET) /

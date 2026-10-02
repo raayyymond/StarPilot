@@ -1,8 +1,10 @@
 import math
 
 from cereal import log
+from opendbc.car.honda.values import CAR as HONDA_CAR
 from opendbc.car.subaru.values import CAR as SUBARU_CAR
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
+from openpilot.selfdrive.controls.lib.latcontrol_vehicle_tunes import get_honda_accord_angle_at_own_ratio
 
 # TODO This is speed dependent
 STEER_ANGLE_SATURATION_THRESHOLD = 2.5  # Degrees
@@ -57,6 +59,7 @@ class LatControlAngle(LatControl):
     self.use_steer_limited_by_safety = CP.brand in ("tesla", "hyundai")
     self.is_ascent = CP.carFingerprint == SUBARU_CAR.SUBARU_ASCENT_2023
     self.ascent_angle_target = None
+    self.is_honda_accord = CP.carFingerprint == HONDA_CAR.HONDA_ACCORD
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay, calibrated_pose, model_data, starpilot_toggles):
     angle_log = log.ControlsState.LateralAngleState.new_message()
@@ -68,6 +71,10 @@ class LatControlAngle(LatControl):
     else:
       angle_log.active = True
       angle_steers_des = math.degrees(VM.get_steer_from_curvature(-desired_curvature, CS.vEgo, params.roll))
+      if self.is_honda_accord and getattr(starpilot_toggles, "accord_variable_steer_ratio", True):
+        # controlsd took sR from the rack map at the MEASURED angle; re-evaluate it at the desired angle
+        level = float(starpilot_toggles.steerRatio) if getattr(starpilot_toggles, "use_custom_steerRatio", False) else None
+        angle_steers_des = get_honda_accord_angle_at_own_ratio(angle_steers_des, VM.sR, level)
       angle_steers_des += params.angleOffsetDeg
 
       if self.is_ascent:

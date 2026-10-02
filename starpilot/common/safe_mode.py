@@ -70,6 +70,7 @@ SAFE_MODE_MANAGED_KEYS = (
   "AccordDither",
   "AccordDitherGate",
   "AccordJerkLpHz",
+  "AccordEpsAngleLoop",
   "LaneChangeTurnGate",
   "CameraOffset",
   "LaneCentering",

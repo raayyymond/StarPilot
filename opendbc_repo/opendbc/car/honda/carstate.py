@@ -12,6 +12,7 @@ from opendbc.car.honda.values import CAR, DBC, STEER_THRESHOLD, HONDA_BOSCH, HON
 from opendbc.car.interfaces import CarStateBase
 
 TransmissionType = structs.CarParams.TransmissionType
+SteerControlType = structs.CarParams.SteerControlType
 ButtonType = structs.CarState.ButtonEvent.Type
 
 BUTTONS_DICT = {CruiseButtons.RES_ACCEL: ButtonType.accelCruise, CruiseButtons.DECEL_SET: ButtonType.decelCruise,
@@ -156,6 +157,17 @@ class CarState(CarStateBase):
     if self.CP.carFingerprint == CAR.ACURA_MDX_4G and steer_status == "TJA_LOW_SPEED_LOCKOUT":
       ret.steerFaultPermanent = False
       ret.steerFaultTemporary = False
+
+    if self.CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW:
+      if self.CP.steerControlType == SteerControlType.angle:
+        # The EPS angle is a valid absolute angle only in its mode 3 (0x14A byte 4 bits 0-2 == 7); outside it the
+        # angle loop would servo from a false angle, so do not steer.
+        sensors = cp.vl["STEERING_SENSORS"]
+        if not all(sensors[f"STEER_SENSOR_STATUS_{i}"] == 1 for i in (1, 2, 3)):
+          ret.steerFaultTemporary = True
+      else:
+        # angle-loop firmware with the angle interface off: the EPS lane ignores torque frames
+        ret.steerFaultPermanent = True
 
     # All Honda EPS cut off slightly above standstill, some much higher
     # Don't alert in the near-standstill range, but alert for per-vehicle configured minimums above that

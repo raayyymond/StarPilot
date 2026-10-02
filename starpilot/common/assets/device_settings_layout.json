@@ -5025,6 +5025,18 @@
         "settings_tier": "simple"
       },
       {
+        "key": "AccordEpsAngleLoop",
+        "label": "Accord: EPS Angle Loop",
+        "description": "For the angle-loop EPS firmware (39990-TVA,A16A, V298) only. On: openpilot steers by ANGLE -- it sends the desired steering-wheel angle on 0xE4 and the EPS holds it with its own 1 kHz loop (angle controller, no torque tune). The fork limits the setpoint itself (rate 120 deg/s or the 3.6 m/s^3 jerk limit, an error clip to the measured angle by speed, 400 deg), follows the driver's hand above 600 counts of wheel torque, sends the measured angle while lateral is off, and faults lateral when the EPS angle is not valid. Ignored on any other EPS firmware. Read at startup: restart after changing it. Off on the angle firmware = lateral unavailable (that EPS ignores torque commands).",
+        "picker_description": "Angle setpoint for the V298 angle-loop EPS.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
         "key": "AccordRefFilter",
         "label": "Accord: Reference Filter (s)",
         "description": "Time constant of two cascaded first-order filters on the Accord setpoint (feedforward and P/I both see it). Shapes fast planner steps so they do not ring the 1-2 Hz steering mode: 0.12 cut the simulated step overshoot from ~85 % to ~35 % at 0.25 s extra lag. 0 = off.",
