@@ -120,6 +120,8 @@ class HondaFlags(IntFlag):
   EPS_MODIFIED = 8192
   # Detected: the EPS reports the Accord angle-loop firmware (HONDA_ACCORD_EPS_ANGLE_LOOP_FW)
   EPS_ANGLE_LOOP_FW = 16384
+  # The angle-interface switch is on but no EPS fwVersion reads HONDA_ACCORD_EPS_ANGLE_LOOP_FW (carstate: permanent fault)
+  EPS_ANGLE_LOOP_FW_MISSING = 32768
 
 
 # F181 of the Accord EPS angle-loop firmware (V298).  The comma keeps EPS_MODIFIED set; the string is unique to the

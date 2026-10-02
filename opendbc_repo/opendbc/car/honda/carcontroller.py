@@ -273,26 +273,33 @@ class CarController(CarControllerBase):
     self.angle_mode = CP.steerControlType == SteerControlType.angle
     if self.angle_mode:
       self.VM = VehicleModel(CP)
-    self.apply_angle_last = 0.0
+    self.apply_angle_last = None  # the limiter's last output; None until the first frame seeds it from the wheel
     self.angle_override = False
 
   def _angle_hold_allowed(self, CC, CS) -> bool:
-    # Mirror of the panda's 0xE4 predicate, controls_allowed || aol_allowed, aol_allowed = ACC main on && the
-    # always-on-lateral flag (safety.h).  A nonzero field it does not allow is BLOCKED, so send 0 when unsure.
+    # Mirror of the panda's 0xE4 predicate, controls_allowed || aol_allowed: aol_allowed = ACC main on && the
+    # always-on-lateral flag (safety.h), and the Honda mode drops controls_allowed whenever ACC main is off (honda.h),
+    # so both arms need main on.  A nonzero field it does not allow is BLOCKED, so send 0 when unsure.
     aol = bool(self.CP.alternativeExperience & ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
-    return bool(CC.enabled) or (aol and bool(CS.out.cruiseState.available))
+    return bool(CS.out.cruiseState.available) and (bool(CC.enabled) or aol)
 
   def _update_angle(self, CC, CS) -> tuple[float, int]:
     """Angle setpoint and the 0xE4 STEER_TORQUE field.  Returns (apply_angle deg, raw)."""
     p = self.params
     steering_angle = float(CS.out.steeringAngleDeg)
     driver_torque = abs(float(CS.out.steeringTorque))
+    was_override = self.angle_override
     if CC.latActive:
       self.angle_override = driver_torque > (p.ANGLE_OVERRIDE_OFF if self.angle_override else p.ANGLE_OVERRIDE_ON)
     else:
       self.angle_override = False
 
-    apply_angle = apply_steer_angle_limits_vm(float(CC.actuators.steeringAngleDeg), self.apply_angle_last, CS.out.vEgoRaw,
+    # The limiter starts from the measured angle on the first frame ever (no step toward a 0 deg seed) and on the
+    # pressed->released edge (the O1 lead is dropped: the setpoint slews out from where the wheel is, not from ahead)
+    angle_last = self.apply_angle_last
+    if angle_last is None or (was_override and not self.angle_override):
+      angle_last = steering_angle
+    apply_angle = apply_steer_angle_limits_vm(float(CC.actuators.steeringAngleDeg), angle_last, CS.out.vEgoRaw,
                                               steering_angle, CC.latActive, p, self.VM)
     if CC.latActive:
       if self.angle_override:

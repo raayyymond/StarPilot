@@ -168,6 +168,9 @@ class CarState(CarStateBase):
       else:
         # angle-loop firmware with the angle interface off: the EPS lane ignores torque frames
         ret.steerFaultPermanent = True
+    elif self.CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW_MISSING:
+      # the angle interface switch is on but the EPS did not report the angle-loop firmware: do not steer in torque mode
+      ret.steerFaultPermanent = True
 
     # All Honda EPS cut off slightly above standstill, some much higher
     # Don't alert in the near-standstill range, but alert for per-vehicle configured minimums above that

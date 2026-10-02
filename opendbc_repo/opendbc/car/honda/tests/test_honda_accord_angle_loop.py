@@ -40,14 +40,15 @@ def toggles():
   return SimpleNamespace(always_on_lateral_lkas=False, force_torque_controller=False, nnff=False, nnff_lite=False)
 
 
-def accord_cp(monkeypatch, fw, switch, aol=True):
+def accord_cp(monkeypatch, fw, switch, aol=True, car_fw=None):
   class SwitchParams(FakeParams):
     def get_bool(self, key, block=False, default=False):
       return switch if key == "AccordEpsAngleLoop" else default
 
   monkeypatch.setattr(honda_interface, "Params", lambda: SwitchParams())
-  car_fw = [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=fw, address=0x18DA30F1, subAddress=0),
-            CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=b"\x11L-130520-03461268             ", address=0x18DA30F1)]
+  if car_fw is None:
+    car_fw = [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=fw, address=0x18DA30F1, subAddress=0),
+              CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=b"\x11L-130520-03461268             ", address=0x18DA30F1)]
   CP = CarInterface.get_params(CAR.HONDA_ACCORD, gen_empty_fingerprint(), car_fw, True, False, False, toggles())
   if aol:
     CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL
@@ -101,6 +102,7 @@ class TestAccordAngleInterlock:
     CP = accord_cp(monkeypatch, FW_ANGLE, True)
     assert CP.steerControlType == SteerControlType.angle
     assert CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW and CP.flags & HondaFlags.EPS_MODIFIED
+    assert not CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW_MISSING
     assert CP.steerActuatorDelay == pytest.approx(0.15)
     assert CP.lateralTuning.which() == "pid"  # unused by LatControlAngle; keeps the torque conversion off
 
@@ -109,7 +111,24 @@ class TestAccordAngleInterlock:
       CP = accord_cp(monkeypatch, fw, switch)
       assert CP.steerControlType == SteerControlType.torque, (fw, switch)
       assert bool(CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW) == flagged, fw
+      # the switch on without the angle firmware is flagged for carstate's permanent fault
+      assert bool(CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW_MISSING) == (switch and not flagged), (fw, switch)
       assert CP.steerActuatorDelay == pytest.approx(0.1)
+
+  @pytest.mark.parametrize("car_fw", [
+    [],  # no EPS entry at all (the fw query timed out, or the EPS did not answer)
+    [CarParams.CarFw(ecu=CarParams.Ecu.fwdCamera, fwVersion=FW_ANGLE, address=0x18DAB5F1)],  # the string on a non-EPS ECU
+    [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=FW_TORQUE, address=0x18DA30F1)],
+    [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=b"39990-TVA-A160\x00\x00", address=0x18DA30F1)],
+    [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=b"39990-TVA,A16AX", address=0x18DA30F1)],
+  ])
+  def test_switch_on_without_the_angle_firmware_is_flagged(self, monkeypatch, car_fw):
+    CP = accord_cp(monkeypatch, None, True, car_fw=car_fw)
+    assert CP.steerControlType == SteerControlType.torque
+    assert CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW_MISSING and not CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW
+    # switch off: nothing flagged, the torque path as before
+    CP = accord_cp(monkeypatch, None, False, car_fw=car_fw)
+    assert not CP.flags & (HondaFlags.EPS_ANGLE_LOOP_FW_MISSING | HondaFlags.EPS_ANGLE_LOOP_FW)
 
   def test_force_torque_controller_cannot_convert_the_angle_mode(self, monkeypatch):
     monkeypatch.setattr(honda_interface, "Params", lambda: SimpleNamespace(get_bool=lambda key, default=False, **kw: key == "AccordEpsAngleLoop" or default))
@@ -209,6 +228,22 @@ class TestAccordAngleField:
     assert (f.torque, f.request, f.arm) == (0, 0, 2)
     _, f, _ = step(ctrl_no_aol, lat_active=False, measured=-12.3, enabled=False, main_on=True)
     assert (f.torque, f.request, f.arm) == (0, 0, 2)
+    # engaged but ACC main off: the panda drops controls_allowed with main off, so this too is not allowed
+    for c in (ctrl, ctrl_no_aol):
+      _, f, dat = step(c, lat_active=False, measured=-12.3, enabled=True, main_on=False)
+      assert dat[0:3].hex() == "000008" and (f.torque, f.request, f.arm) == (0, 0, 2)
+
+  def test_first_active_frame_starts_from_the_wheel(self, monkeypatch):
+    # a controller whose very first frame is active must not step the setpoint by the rate limit toward 0 deg
+    for v, measured in ((20.0, 30.0), (5.0, -60.0), (30.0, 3.0)):
+      ctrl = angle_controller(monkeypatch)
+      assert ctrl.apply_angle_last is None
+      apply_angle, f, _ = step(ctrl, lat_active=True, desired=measured, measured=measured, v=v)
+      assert apply_angle == pytest.approx(measured) and f.torque == math.floor(-10 * measured + 0.5)
+      # and from there the limiter runs from its own last output
+      max_delta = min(get_max_angle_delta_vm(v, ctrl.VM, P), P.ANGLE_LIMITS.MAX_ANGLE_RATE)
+      apply_angle, _, _ = step(ctrl, lat_active=True, desired=measured + 50.0, measured=measured, v=v)
+      assert apply_angle == pytest.approx(measured + min(max_delta, error_max(v)))
 
   @pytest.mark.parametrize("deg", [5000.0, -5000.0, 1e9])
   def test_no_wrap(self, monkeypatch, deg):
@@ -295,17 +330,29 @@ class TestAccordAngleOverride:
       apply_angle, f, _ = step(ctrl, lat_active=True, desired=5.0, measured=measured, rate=-60.0, v=v, driver_torque=900)
       assert apply_angle == pytest.approx(measured - 60.0 * P.ANGLE_OVERRIDE_LEAD_S)
       assert f.request == 1 and f.arm == 2
-    held = apply_angle
-    # release: the setpoint returns to the model's angle under the normal rate limit, from where the hand left it
-    # (the wheel follows the setpoint here, a first-order plant)
+    # release: the limiter restarts from the measured angle (the lead is dropped) and the setpoint returns to the
+    # model's angle under the normal rate limit (the wheel follows the setpoint here, a first-order plant)
     max_delta = min(get_max_angle_delta_vm(v, ctrl.VM, P), P.ANGLE_LIMITS.MAX_ANGLE_RATE)
-    last = held
+    last = measured
     for _ in range(200):
       measured += 0.3 * (last - measured)
       apply_angle, _, _ = step(ctrl, lat_active=True, desired=5.0, measured=measured, v=v, driver_torque=100)
       assert 0.0 <= apply_angle - last <= max_delta + 1e-9
       last = apply_angle
     assert apply_angle == pytest.approx(5.0) and not ctrl.angle_override
+
+  def test_release_restarts_the_limiter_from_the_wheel(self, monkeypatch):
+    v = 12.0
+    for desired, rate in ((-20.0, 60.0), (20.0, 60.0), (20.0, -60.0)):
+      ctrl = angle_controller(monkeypatch)
+      max_delta = min(get_max_angle_delta_vm(v, ctrl.VM, P), P.ANGLE_LIMITS.MAX_ANGLE_RATE)
+      step(ctrl, lat_active=True, desired=0.0, measured=0.0, v=v)
+      apply_angle, _, _ = step(ctrl, lat_active=True, desired=desired, measured=0.0, rate=rate, v=v, driver_torque=900)
+      assert ctrl.angle_override and apply_angle == pytest.approx(rate * P.ANGLE_OVERRIDE_LEAD_S)  # the O1 lead
+      apply_angle, _, _ = step(ctrl, lat_active=True, desired=desired, measured=0.0, rate=rate, v=v, driver_torque=0)
+      assert not ctrl.angle_override
+      # one rate step from the wheel toward the model's angle, not from the led setpoint
+      assert apply_angle == pytest.approx(math.copysign(max_delta, desired))
 
   def test_override_lead_is_clipped_to_the_error_max(self, monkeypatch):
     ctrl = angle_controller(monkeypatch)
@@ -354,11 +401,19 @@ class TestAccordAngleSteerFault:
   def test_sensor_status_fault_in_angle_mode_only(self, monkeypatch, sensors):
     healthy = sensors == (1, 1, 1)
     assert carstate_faults(accord_cp(monkeypatch, FW_ANGLE, True), sensors) == (not healthy, False)
-    assert carstate_faults(accord_cp(monkeypatch, FW_TORQUE, True), sensors) == (False, False)
+    # the switch on with the torque image: permanent fault (the switch and the image disagree), whatever the sensors
+    assert carstate_faults(accord_cp(monkeypatch, FW_TORQUE, True), sensors) == (False, True)
     assert carstate_faults(accord_cp(monkeypatch, FW_TORQUE, False), sensors) == (False, False)
 
   def test_angle_firmware_without_the_angle_interface_is_a_permanent_fault(self, monkeypatch):
     assert carstate_faults(accord_cp(monkeypatch, FW_ANGLE, False), (1, 1, 1)) == (False, True)
+
+  def test_switch_on_with_no_eps_in_carfw_is_a_permanent_fault(self, monkeypatch):
+    # the switch can never silently leave lateral in torque mode on an EPS whose firmware was not read
+    CP = accord_cp(monkeypatch, None, True, car_fw=[])
+    assert CP.steerControlType == SteerControlType.torque
+    assert carstate_faults(CP, (1, 1, 1)) == (False, True)
+    assert carstate_faults(accord_cp(monkeypatch, None, False, car_fw=[]), (1, 1, 1)) == (False, False)
 
 
 # ------------------------------------------------------------------------------- I8: what the panda checks on 0xE4

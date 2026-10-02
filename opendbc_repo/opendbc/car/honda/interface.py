@@ -165,13 +165,18 @@ class CarInterface(CarInterfaceBase):
       else:
         ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.6], [0.18]]
       # Angle interface iff the EPS is the angle-loop firmware AND the operator's switch is on.  lateralTuning stays
-      # PID (unused by LatControlAngle; it keeps the torque-controller conversion off).  On the angle firmware with
-      # the switch off, carstate raises a permanent steer fault: that EPS ignores torque frames.
+      # PID (unused by LatControlAngle; it keeps the torque-controller conversion off).  The switch and the image must
+      # agree, else carstate raises a permanent steer fault: on the angle firmware with the switch off (that EPS lane
+      # ignores torque frames), and with the switch on but no EPS fwVersion reading the angle firmware (absent from
+      # carFw, or another image) -- lateral must never be left in torque mode by an unread or missing EPS.
+      angle_switch = accord_eps_angle_loop_enabled(docs)
       if eps_angle_loop_fw:
         ret.flags |= HondaFlags.EPS_ANGLE_LOOP_FW.value
-        if accord_eps_angle_loop_enabled(docs):
+        if angle_switch:
           ret.steerControlType = structs.CarParams.SteerControlType.angle
           ret.steerActuatorDelay = HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY
+      elif angle_switch:
+        ret.flags |= HondaFlags.EPS_ANGLE_LOOP_FW_MISSING.value
       if ret.transmissionType == TransmissionType.manual:
         CarControllerParams.BOSCH_GAS_LOOKUP_BP = [-0.2, 2.0]
 
