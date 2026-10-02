@@ -5,7 +5,7 @@ from cereal import custom
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.honda.hondacan import CanBus
+from opendbc.car.honda.hondacan import CanBus, honda_checksum
 from opendbc.car.honda.values import CAR, DBC, STEER_THRESHOLD, HONDA_BOSCH, HONDA_BOSCH_ALT_RADAR, HONDA_BOSCH_CANFD, \
                                                  HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HONDA_BOSCH_TJA_CONTROL, \
                                                  HondaFlags, CruiseButtons, CruiseSettings, GearShifter, CarControllerParams, HondaStarPilotFlags
@@ -18,6 +18,16 @@ ButtonType = structs.CarState.ButtonEvent.Type
 BUTTONS_DICT = {CruiseButtons.RES_ACCEL: ButtonType.accelCruise, CruiseButtons.DECEL_SET: ButtonType.decelCruise,
                 CruiseButtons.MAIN: ButtonType.mainCruise, CruiseButtons.CANCEL: ButtonType.cancel}
 SETTINGS_BUTTONS_DICT = {CruiseSettings.DISTANCE: ButtonType.gapAdjustCruise, CruiseSettings.LKAS: ButtonType.lkas}
+
+
+def accord_eps_torque_s10(dat: bytes) -> int | None:
+  """0x1AB STEER_MOTOR_TORQUE on the angle-loop EPS: the signed lane torque s10 (LSB = 8 lane counts, + = right), or
+  None for a frame that is not 3 bytes or fails the Honda checksum (CHECKSUM 19|4 = byte 2's low nibble).
+  MOTOR_TORQUE 1|10 is sign-magnitude: bit 9 the sign, bits 0-8 the magnitude."""
+  if dat is None or len(dat) != 3 or honda_checksum(0x1AB, None, bytearray(dat)) != (dat[2] & 0xF):
+    return None
+  raw10 = ((dat[0] & 0x3) << 8) | dat[1]
+  return (-1 if raw10 & 0x200 else 1) * (raw10 & 0x1FF)
 
 
 # Dashboard Speed Limit / Traffic Sign Recognition (TSR) for Speed Limit Controller (SLC)
@@ -59,6 +69,12 @@ class CarState(CarStateBase):
                                                              HONDA_BOSCH_TJA_CONTROL | HONDA_BOSCH_CANFD)
     self.cruise_setting = 0
     self.v_cruise_pcm_prev = 0
+
+    # angle-loop EPS: the last good 0x1AB frame (EPS lane torque, s10) and its parser timestamp
+    self.accord_eps_s10 = 0
+    self.accord_eps_good_nanos = 0
+    self.accord_eps_seen_nanos = 0
+    self.accord_eps_torque_stale = True
 
     # When available we use cp.vl["CAR_SPEED"]["ROUGH_CAR_SPEED_2"] to populate vEgoCluster
     # However, on cars without a digital speedometer this is not always present (HRV, FIT, CRV 2016, ILX and RDX)
@@ -168,6 +184,8 @@ class CarState(CarStateBase):
       else:
         # angle-loop firmware with the angle interface off: the EPS lane ignores torque frames
         ret.steerFaultPermanent = True
+      # the EPS lane torque from 0x1AB (+ = left), 0 when stale; only the torque bar reads it
+      ret.steeringTorqueEps = self.update_accord_eps_torque(cp)
     elif self.CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW_MISSING:
       # the angle interface switch is on but the EPS did not report the angle-loop firmware: do not steer in torque mode
       ret.steerFaultPermanent = True
@@ -367,16 +385,40 @@ class CarState(CarStateBase):
 
     return ret, fp_ret
 
+  def update_accord_eps_torque(self, cp) -> float:
+    """carState.steeringTorqueEps from 0x1AB on the angle-loop EPS: -EPS_TORQUE_LSB * s10 (+ = left, lane counts) from
+    the last frame that passed the Honda checksum; 0.0, and accord_eps_torque_stale, once that frame is older than
+    EPS_TORQUE_STALE_NS on the parser's own clock (its latest CAN batch), so a dead 0x1AB zeroes it whatever else
+    on the bus is alive."""
+    p = CarControllerParams
+    seen = getattr(cp, "ts_nanos", {}).get(0x1AB, {}).get("MOTOR_TORQUE", 0)
+    if seen != self.accord_eps_seen_nanos:
+      self.accord_eps_seen_nanos = seen
+      s10 = accord_eps_torque_s10(cp.vl_raw.get(0x1AB, b""))
+      if s10 is not None:
+        self.accord_eps_s10, self.accord_eps_good_nanos = s10, seen
+    now = max(getattr(cp, "last_nonempty_nanos", 0), getattr(cp, "_last_update_nanos", 0))
+    self.accord_eps_torque_stale = self.accord_eps_good_nanos <= 0 or (now - self.accord_eps_good_nanos) > p.EPS_TORQUE_STALE_NS
+    return 0.0 if self.accord_eps_torque_stale else float(-p.EPS_TORQUE_LSB * self.accord_eps_s10)
+
   def get_can_parsers(self, CP):
     pt_messages = [("GAS_SENSOR", 0)] if CP.enableGasInterceptorDEPRECATED else []
     if CP.carFingerprint == CAR.HONDA_ACCORD_11G:
       # Both deliberately go silent during the handover, so skip alive/timeout checks.
       pt_messages += [("ACC_CONTROL", float("nan")), ("STEERING_CONTROL", float("nan"))]
+    if CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW:
+      # 0x1AB, the angle-loop EPS's lane torque (the torque bar): optional (nan), so it is never part of canValid
+      pt_messages += [("STEER_MOTOR_TORQUE", float("nan"))]
 
     pt_parser = CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CanBus(CP).pt)
     if CP.enableGasInterceptorDEPRECATED:
       pt_parser.message_states[0x201].ignore_checksum = True
       pt_parser.message_states[0x201].ignore_counter = True
+    if CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW:
+      # The parser never rejects a 0x1AB frame (as 0x201): vl_raw always refreshes and its counter never touches
+      # canValid.  update() checks the Honda checksum on the raw frame itself (accord_eps_torque_s10).
+      pt_parser.message_states[0x1AB].ignore_checksum = True
+      pt_parser.message_states[0x1AB].ignore_counter = True
 
     parsers = {
       Bus.pt: pt_parser,

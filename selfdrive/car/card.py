@@ -410,6 +410,10 @@ class Car:
       tracks_msg.liveTracks = RD
       self.pm.send('liveTracks', tracks_msg)
 
+    # Accord angle-loop EPS: the CarController's angle status for the frame carOutput above carries (0 for any other car)
+    if accord_angle_status := int(getattr(self.CI.CC, "angle_status", 0) or 0):
+      FPCS.accordAngleStatus = accord_angle_status
+
     fpcs_send = messaging.new_message('starpilotCarState')
     fpcs_send.valid = CS.canValid
     fpcs_send.starpilotCarState = FPCS

@@ -99,6 +99,10 @@ struct StarPilotCarState @0xf35cc4560bbf6ec2 {
   accelHardCruise @28 :Bool;  # current/releasing accel cruise button came from GM hard-press signal
   decelHardCruise @29 :Bool;  # current/releasing decel cruise button came from GM hard-press signal
   pulseAndGlide @30 :Bool;  # developer-only wheel-button pulse-and-glide mode is enabled
+  # Accord angle-loop EPS (V299): the Honda CarController's angle status for the frame carOutput carries; 0 elsewhere.
+  # 4 = the rate/jerk limit bound the setpoint, 16 = the error clip bound it, 256 = 0x1AB (EPS lane torque) stale or
+  # bad, so carState.steeringTorqueEps and the torque bar read 0.  1/2/8/32/64/128 and 512+ reserved (0).
+  accordAngleStatus @31 :UInt16;
 }
 
 struct StarPilotDeviceState @0xda96579883444c35 {

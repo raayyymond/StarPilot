@@ -7,7 +7,7 @@ from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA_BOSCH, HONDA_BOSCH_A, HONDA_BOSCH_A_RADAR_VERIFIED, HONDA_BOSCH_CANFD, \
                                                  HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags, \
-                                                 HONDA_ACCORD_EPS_ANGLE_LOOP_FW, HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY
+                                                 is_accord_eps_angle_loop_fw, HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
@@ -122,7 +122,7 @@ class CarInterface(CarInterfaceBase):
     for fw in car_fw:
       if fw.ecu == "eps" and b"," in fw.fwVersion:
         eps_modified = True
-      if fw.ecu == "eps" and fw.fwVersion.rstrip(b"\x00") == HONDA_ACCORD_EPS_ANGLE_LOOP_FW:
+      if fw.ecu == "eps" and is_accord_eps_angle_loop_fw(fw.fwVersion):
         eps_angle_loop_fw = True
 
     if eps_modified:

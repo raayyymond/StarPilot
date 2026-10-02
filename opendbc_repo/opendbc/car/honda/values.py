@@ -41,8 +41,8 @@ class CarControllerParams:
   STEER_DELTA_DOWN = 3
   STEER_GLOBAL_MIN_SPEED = 3 * CV.MPH_TO_MS
 
-  # ---- Angle mode: the Accord on the V298 angle-loop EPS firmware only (interface.py decides; see
-  # HONDA_ACCORD_EPS_ANGLE_LOOP_FW).  0xE4 STEER_TORQUE then carries an ANGLE SETPOINT, raw = round(-10 * deg) in the
+  # ---- Angle mode: the Accord on the angle-loop EPS firmware only (V298 A16A, V299 A16B; interface.py decides; see
+  # is_accord_eps_angle_loop_fw).  0xE4 STEER_TORQUE then carries an ANGLE SETPOINT, raw = round(-10 * deg) in the
   # frame of carState.steeringAngleDeg, and the EPS closes a position loop on it at 1 kHz.  The panda bounds NOTHING
   # on 0xE4 for Honda except "bytes 0-1 zero while not allowed" (safety/modes/honda.h, honda_tx_hook, "STEER: safety
   # check"), so every limit below is the fork's.
@@ -65,11 +65,24 @@ class CarControllerParams:
   ANGLE_ERROR_MAX_BP = [3.1, 8.0, 10.0, 11.75, 17.5, 26.9]  # m/s, the V298 gain-table knots
   ANGLE_ERROR_MAX_V = [17.0, 15.5, 19.5, 17.0, 8.5, 4.5]   # deg
   ANGLE_RAW_MAX = 4000  # raw clip before packing; the packer clips nothing and wraps past +-32767
-  # Driver override (option O1): while pressed the setpoint follows the hand, theta_meas + rate * lead.  The
-  # hysteresis brackets the EPS integrator freeze (~524 wire counts of hand torque, ~293 against an opposing hand).
-  ANGLE_OVERRIDE_ON = 600   # 0x18F STEER_TORQUE_SENSOR wire counts
-  ANGLE_OVERRIDE_OFF = 500
-  ANGLE_OVERRIDE_LEAD_S = 0.06  # s, the round trip from the EPS angle to an applied setpoint
+  # V299: NO fork-side driver override (operator ruling, 2026-10-02).  The setpoint never follows the hand.  The EPS
+  # is the override: its fade, and its integrator freeze at Honda's steeringPressed level (raw 1229 = wire 1200).  The
+  # error clip above is the only bound between the setpoint and the wheel.
+  # Operator params, each read ONCE when the controller is built (CarController.__init__): unknown key, unreadable or
+  # non-finite = the default, then clamped to [min, max].  The defaults are V298's values exactly.
+  ANGLE_MAX_RATE_PARAM = ("AccordAngleMaxRate", 120.0, 60.0, 250.0)  # deg/s; ANGLE_LIMITS.MAX_ANGLE_RATE = value / 100
+  ANGLE_CLIP_SCALE_PARAM = ("AccordAngleClipScale", 1.0, 1.0, 1.6)   # x the ANGLE_ERROR_MAX_V knots at BP <= 11.75 m/s
+  ANGLE_CLIP_SCALE_MAX_BP = 11.75
+  # Angle status word, starpilotCarState.accordAngleStatus (card.py copies CarController.angle_status, the frame
+  # carOutput carries).  Bits 1, 2, 8, 32, 64, 128 and 512+ are reserved (0).
+  ANGLE_STATUS_RATE = 4         # latActive and the rate/jerk limit bound the setpoint this frame
+  ANGLE_STATUS_CLIP = 16        # latActive and the error clip bound the setpoint this frame
+  ANGLE_STATUS_EPS_STALE = 256  # no good 0x1AB frame within EPS_TORQUE_STALE_NS: steeringTorqueEps (the bar) reads 0
+  # 0x1AB STEER_MOTOR_TORQUE on the angle-loop firmware = the EPS lane torque: 10-bit sign-magnitude (bit 9 = sign,
+  # + = right), LSB 8 lane counts, rail 2461 counts.  carState.steeringTorqueEps = -8 * s10 (+ = left).
+  EPS_TORQUE_LSB = 8
+  EPS_TORQUE_RAIL = 2461
+  EPS_TORQUE_STALE_NS = 100_000_000  # 0x1AB runs at 50 Hz (route 79: gap p50 20.1 ms, p99.9 30.8 ms)
   # 0xE4 byte 2 bits 3:2 (no DBC signal) = the EPS's gp-0x6803.  V298 runs its lane only when it reads 2, on every
   # frame including request-off ones; the stock camera sends 0 or 1 there, never 2.
   ANGLE_ARM = 2
@@ -118,15 +131,25 @@ class HondaFlags(IntFlag):
   HYBRID = 2048
   BOSCH_TJA_CONTROL = 4096
   EPS_MODIFIED = 8192
-  # Detected: the EPS reports the Accord angle-loop firmware (HONDA_ACCORD_EPS_ANGLE_LOOP_FW)
+  # Detected: the EPS reports the Accord angle-loop firmware family (is_accord_eps_angle_loop_fw)
   EPS_ANGLE_LOOP_FW = 16384
-  # The angle-interface switch is on but no EPS fwVersion reads HONDA_ACCORD_EPS_ANGLE_LOOP_FW (carstate: permanent fault)
+  # The angle-interface switch is on but no EPS fwVersion is the angle-loop family (carstate: permanent fault)
   EPS_ANGLE_LOOP_FW_MISSING = 32768
 
 
-# F181 of the Accord EPS angle-loop firmware (V298).  The comma keeps EPS_MODIFIED set; the string is unique to the
-# angle build, so a torque fork never meets it unknowingly and an angle fork never commands a torque image.
-HONDA_ACCORD_EPS_ANGLE_LOOP_FW = b"39990-TVA,A16A"
+# F181 of the Accord EPS angle-loop firmware FAMILY: 39990-TVA,A16 + exactly ONE capital letter (V298 = A16A,
+# V299 = A16B).  The comma keeps EPS_MODIFIED set.  The torque images read 39990-TVA,A160 (V294/V295: a digit, not
+# a letter) and stock 39990-TVA-A1x0, so neither matches; a torque fork never meets the family unknowingly.
+HONDA_ACCORD_EPS_ANGLE_LOOP_FW_FAMILY = b"39990-TVA,A16"
+
+
+def is_accord_eps_angle_loop_fw(fw_version: bytes) -> bool:
+  # the car pads fwVersion with NULs to 16 bytes (route 79 reads 39990-TVA,A16A + two NULs): strip them first
+  v = bytes(fw_version).rstrip(b"\x00")
+  family = HONDA_ACCORD_EPS_ANGLE_LOOP_FW_FAMILY
+  return len(v) == len(family) + 1 and v.startswith(family) and ord("A") <= v[-1] <= ord("Z")
+
+
 # Angle mode's vehicle delay (lagd adds the 0.2 s software part): the inner angle loop's lag, ~0.16-0.17 s at
 # 15-27 m/s on the V298 gains.  A model value; drive 1 learns it (UseAutoSteerDelay on).
 HONDA_ACCORD_ANGLE_STEER_ACTUATOR_DELAY = 0.15

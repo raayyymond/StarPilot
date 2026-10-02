@@ -479,6 +479,7 @@ CUSTOM_PATCH_KEYS = {
   "AccordHoldMap", "AccordFrictionHyst", "AccordRateLoopGain", "AccordErrorNotchQ", "AccordRefFilter",
   "AccordTorqueKiHigh", "AccordDobHz", "AccordHoldLevel", "AccordFrictionHystBand",
   "AccordDither", "AccordDitherGate", "AccordJerkLpHz", "AccordEpsAngleLoop",
+  "AccordAngleMaxRate", "AccordAngleClipScale", "AccordAngleBarFromEps",
 }
 
 
@@ -520,3 +521,7 @@ def test_galaxy_layout_custom_patches_section_tracks_every_patch_switch():
   assert _declared_default("AccordDitherGate") == "1"
   # V298: the angle interface is opt-in; it also needs the angle-loop EPS firmware to take effect
   assert _declared_default("AccordEpsAngleLoop") == "0"
+  # V299: the angle-interface params default to V298's behaviour exactly
+  assert _declared_default("AccordAngleMaxRate") == "120.0"
+  assert _declared_default("AccordAngleClipScale") == "1.0"
+  assert _declared_default("AccordAngleBarFromEps") == "0"

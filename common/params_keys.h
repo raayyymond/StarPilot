@@ -430,9 +430,16 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // torque-mode-era edit with no switch.  Default and stock 1.2 = the generic path, i.e. a full revert.
     {"AccordJerkLpHz", {PERSISTENT, FLOAT, "1.2", "1.2", 2, SETTINGS_SIMPLE}},
     // V298 (2026-10-01): send an ANGLE setpoint on 0xE4 (steerControlType angle, LatControlAngle).  Takes effect only
-    // when the EPS also reports the angle-loop firmware 39990-TVA,A16A, read at fingerprinting (restart after a change).
-    // On that firmware with this off, lateral reports a steer fault: the EPS lane ignores torque frames.
+    // when the EPS also reports the angle-loop firmware family 39990-TVA,A16<letter> (V298 A16A, V299 A16B), read at
+    // fingerprinting (restart after a change).  On that firmware with this off, lateral reports a steer fault: the EPS
+    // lane ignores torque frames.
     {"AccordEpsAngleLoop", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
+    // V299 (2026-10-02), angle interface only, read once at controller start; the defaults are V298's values.
+    // AccordAngleMaxRate: the setpoint rate limit, deg/s, clamped 60-250.  AccordAngleClipScale: x the error-clip knots at
+    // <= 11.75 m/s, clamped 1.0-1.6.  AccordAngleBarFromEps: the torque bar draws the EPS lane torque (0x1AB).
+    {"AccordAngleMaxRate", {PERSISTENT, FLOAT, "120.0", "120.0", 2, SETTINGS_SIMPLE}},
+    {"AccordAngleClipScale", {PERSISTENT, FLOAT, "1.0", "1.0", 2, SETTINGS_SIMPLE}},
+    {"AccordAngleBarFromEps", {PERSISTENT, BOOL, "0", "0", 2, SETTINGS_SIMPLE}},
     // rev 6.2 (2026-09-16): do not apply the lane-change jerk clamp to a TURN.  A model lateral-accel demand past
     // LANE_CHANGE_TURN_LAT_ACCEL inside a lane-change state latches the clamp off for the rest of that state.
     // Keeps lane-change smoothing entirely; 0 = the rev 3-6.1 behaviour.

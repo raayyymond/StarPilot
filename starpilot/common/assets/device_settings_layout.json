@@ -5027,8 +5027,49 @@
       {
         "key": "AccordEpsAngleLoop",
         "label": "Accord: EPS Angle Loop",
-        "description": "For the angle-loop EPS firmware (39990-TVA,A16A, V298) only. On: openpilot steers by ANGLE -- it sends the desired steering-wheel angle on 0xE4 and the EPS holds it with its own 1 kHz loop (angle controller, no torque tune). The fork limits the setpoint itself (rate 120 deg/s or the 3.6 m/s^3 jerk limit, an error clip to the measured angle by speed, 400 deg), follows the driver's hand above 600 counts of wheel torque, sends the measured angle while lateral is off, and faults lateral when the EPS angle is not valid. Read at startup: reboot after changing it, after flashing the EPS, and after a toggle restore. The switch and the EPS firmware must agree, or openpilot shows a permanent LKAS fault that disables openpilot ENTIRELY (longitudinal too, not just steering): the angle firmware with this switch off, unknown (params not rebuilt) or forced off by Safe Mode, and this switch on with any other EPS firmware or with no EPS firmware read. The alert's 'Restart the Car' does NOT clear it. The remedy is this switch (then Rebuild Params if it is missing, and reboot), or reflashing the V295 torque firmware.",
-        "picker_description": "Angle setpoint for the V298 angle-loop EPS.",
+        "description": "For the angle-loop EPS firmware family (39990-TVA,A16A = V298, 39990-TVA,A16B = V299) only. On: openpilot steers by ANGLE -- it sends the desired steering-wheel angle on 0xE4 and the EPS holds it with its own 1 kHz loop (angle controller, no torque tune). The fork limits the setpoint itself (rate AccordAngleMaxRate, default 120 deg/s, or the 3.6 m/s^3 jerk limit; an error clip to the measured angle by speed; 400 deg), sends the measured angle while lateral is off, and faults lateral when the EPS angle is not valid. No fork override: the EPS fade is the override -- the setpoint never follows the driver's hand; the EPS fades its lane torque and freezes its integrator at Honda's steering-pressed level, and the error clip bounds what it asks against the hand. Read at startup: reboot after changing it, after flashing the EPS, and after a toggle restore. The switch and the EPS firmware must agree, or openpilot shows a permanent LKAS fault that disables openpilot ENTIRELY (longitudinal too, not just steering): the angle firmware with this switch off, unknown (params not rebuilt) or forced off by Safe Mode, and this switch on with any other EPS firmware or with no EPS firmware read. The alert's 'Restart the Car' does NOT clear it. The remedy is this switch (then Rebuild Params if it is missing, and reboot), or reflashing the V295 torque firmware.",
+        "picker_description": "Angle setpoint for the angle-loop EPS (A16A/A16B); no fork override: the EPS fade is the override.",
+        "data_type": "bool",
+        "ui_type": "toggle",
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordAngleMaxRate",
+        "label": "Accord: Angle Setpoint Max Rate (deg/s)",
+        "description": "Angle interface only (AccordEpsAngleLoop on the A16A/A16B firmware). The fastest the fork moves the angle setpoint, in steering-wheel deg/s; the 3.6 m/s^3 lateral-jerk limit still applies below it. 120 = V298. Clamped to 60-250. Read at startup: reboot after changing it.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 60.0,
+        "max": 250.0,
+        "step": 10.0,
+        "precision": 0,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordAngleClipScale",
+        "label": "Accord: Angle Error Clip Scale (low speed)",
+        "description": "Angle interface only. Scales the error clip (how far the setpoint may sit from the measured angle) at the knots at or below 11.75 m/s: 17/15.5/19.5/17 deg at 3.1/8/10/11.75 m/s times this value; 8.5 deg at 17.5 m/s and 4.5 deg at 26.9 m/s are unchanged, so between 11.75 and 17.5 m/s the clip blends from 17 x scale to 8.5 deg. 1.0 = V298. Clamped to 1.0-1.6. Read at startup: reboot after changing it.",
+        "data_type": "float",
+        "ui_type": "numeric",
+        "min": 1.0,
+        "max": 1.6,
+        "step": 0.1,
+        "precision": 1,
+        "vehicle_makes": [
+          "Honda"
+        ],
+        "settings_tier": "simple"
+      },
+      {
+        "key": "AccordAngleBarFromEps",
+        "label": "Accord: Torque Bar from the EPS",
+        "description": "Angle interface only. On: the onroad torque bar (and the mici lane-line cue) draw the EPS's own lane torque, read from its 0x1AB frame, as a fraction of the 2461-count rail; the bar reads 0 if that frame is missing for more than 100 ms. Off: the lateral-acceleration estimate, as V298. Read once per drive.",
         "data_type": "bool",
         "ui_type": "toggle",
         "vehicle_makes": [

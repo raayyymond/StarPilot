@@ -10,6 +10,7 @@ from openpilot.selfdrive.controls.lib.lane_centering import get_lane_centering_v
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.lib.starpilot_theme import get_param_color, get_theme_color, get_visual_color, is_stock_color_scheme, with_alpha
 from openpilot.selfdrive.ui.onroad.starpilot.rainbow_path import RainbowPath
+from openpilot.selfdrive.ui.onroad.starpilot.torque_bar import accord_eps_bar
 from openpilot.selfdrive.ui.lib.starpilot_visuals import LeadInfoMode, blend_colors, lead_indicator_enabled, lead_info_mode
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.mici.onroad.starpilot_status import get_border_color
@@ -114,7 +115,9 @@ class ModelRenderer(Widget):
   def _render(self, rect: rl.Rectangle):
     sm = ui_state.sm
 
-    self._torque_filter.update(-ui_state.sm['carOutput'].actuatorsOutput.torque)
+    # Accord angle-loop EPS with AccordAngleBarFromEps: the EPS's measured lane torque (same value as the torque bar)
+    accord_bar = accord_eps_bar(sm, ui_state.CP)
+    self._torque_filter.update(accord_bar if accord_bar is not None else -ui_state.sm['carOutput'].actuatorsOutput.torque)
 
     # Check if data is up-to-date
     if (sm.recv_frame["liveCalibration"] < ui_state.started_frame or

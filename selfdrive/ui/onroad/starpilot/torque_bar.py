@@ -6,6 +6,8 @@ from collections import OrderedDict
 import numpy as np
 import pyray as rl
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
+from opendbc.car.honda.values import CarControllerParams as HondaCarControllerParams, HondaFlags
+from openpilot.common.params import Params, UnknownKeyName
 from openpilot.selfdrive.ui.lib.starpilot_visuals import blend_colors
 from openpilot.selfdrive.ui.onroad.starpilot.rivian_lateral_mode import rivian_lateral_mode
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
@@ -18,6 +20,33 @@ from openpilot.common.filter_simple import FirstOrderFilter
 TORQUE_ANGLE_SPAN = 12.7
 
 DEBUG = False
+
+# Accord angle-loop EPS (V299): AccordAngleBarFromEps, read once per onroad start (keyed on ui_state.started_frame)
+_accord_bar_param: dict[int, bool] = {}
+
+
+def _accord_bar_enabled() -> bool:
+  key = int(getattr(ui_state, "started_frame", 0))
+  if key not in _accord_bar_param:
+    try:
+      enabled = Params().get_bool("AccordAngleBarFromEps")
+    except UnknownKeyName:
+      enabled = False
+    _accord_bar_param.clear()
+    _accord_bar_param[key] = bool(enabled)
+  return _accord_bar_param[key]
+
+
+def accord_eps_bar(sm, CP) -> float | None:
+  """The torque bar on the Accord angle-loop EPS: the EPS's own lane torque (0x1AB, carState.steeringTorqueEps) as a
+  fraction of its 2461-count rail, -steeringTorqueEps / 2461: the sign the V298 angle-mode bar drew (route 79: same sign
+  on 85.4 % of 31,987 engaged hands-off frames).  None unless the car runs the angle interface (angle mode on the
+  angle-loop firmware) and the operator turned AccordAngleBarFromEps on: the caller then draws what it drew before.
+  carstate zeroes a stale 0x1AB (> 100 ms)."""
+  if CP is None or str(CP.steerControlType) != "angle" or str(CP.brand) != "honda" or \
+     not (int(CP.flags) & HondaFlags.EPS_ANGLE_LOOP_FW) or not _accord_bar_enabled():
+    return None
+  return float(np.clip(-sm['carState'].steeringTorqueEps / HondaCarControllerParams.EPS_TORQUE_RAIL, -1.0, 1.0))
 
 
 def quantized_lru_cache(maxsize=128):
@@ -164,6 +193,10 @@ class TorqueBar(Widget):
       return
 
     rivian_lateral_mode.update()
+    # Accord angle-loop EPS with AccordAngleBarFromEps: the EPS's measured lane torque, not the lateral-accel estimate
+    if (accord_bar := accord_eps_bar(ui_state.sm, ui_state.CP)) is not None:
+      self._torque_filter.update(accord_bar)
+      return
     # Angle-controlled cars, including Rivian's hybrid controller while its
     # angle channel is active, use a lateral-acceleration estimate for the bar.
     # The shared Rivian mode detector keys off the actual CAN torque so the bar

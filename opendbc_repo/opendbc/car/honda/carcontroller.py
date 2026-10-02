@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import numpy as np
 
@@ -18,10 +19,10 @@ from opendbc.car.honda.values import (
 )
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.common.pid import PIDController
-from opendbc.car.lateral import apply_steer_angle_limits_vm
+from opendbc.car.lateral import apply_steer_angle_limits_vm, get_max_angle_delta_vm
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -29,6 +30,18 @@ SteerControlType = structs.CarParams.SteerControlType
 
 BOSCH_BRAKE_FORCE_ON = -0.12
 BOSCH_BRAKE_FORCE_RELEASE = -0.02
+
+
+def read_accord_angle_param(store, key: str, default: float, lo: float, hi: float) -> float:
+  """One Accord angle-interface float param: unknown key (params not rebuilt), unreadable or non-finite -> default;
+  then clamped to [lo, hi]."""
+  try:
+    value = float(store.get_float(key, default=default))
+  except (UnknownKeyName, TypeError, ValueError):
+    value = default
+  if not math.isfinite(value):
+    value = default
+  return float(min(max(value, lo), hi))
 
 
 def update_honda_bosch_braking(braking: bool, gas_pedal_force: float, stopping: bool, long_active: bool) -> bool:
@@ -273,8 +286,15 @@ class CarController(CarControllerBase):
     self.angle_mode = CP.steerControlType == SteerControlType.angle
     if self.angle_mode:
       self.VM = VehicleModel(CP)
+      # V299 operator params, read once here (defaults = V298).  Per instance: the class limits stay V298's.
+      p = self.params
+      max_rate = read_accord_angle_param(self.param_store, *CarControllerParams.ANGLE_MAX_RATE_PARAM)
+      clip_scale = read_accord_angle_param(self.param_store, *CarControllerParams.ANGLE_CLIP_SCALE_PARAM)
+      p.ANGLE_LIMITS = dataclasses.replace(CarControllerParams.ANGLE_LIMITS, MAX_ANGLE_RATE=max_rate / 100.0)
+      p.ANGLE_ERROR_MAX_V = [v * clip_scale if bp <= CarControllerParams.ANGLE_CLIP_SCALE_MAX_BP else v
+                             for bp, v in zip(CarControllerParams.ANGLE_ERROR_MAX_BP, CarControllerParams.ANGLE_ERROR_MAX_V, strict=True)]
     self.apply_angle_last = None  # the limiter's last output; None until the first frame seeds it from the wheel
-    self.angle_override = False
+    self.angle_status = 0  # CarControllerParams.ANGLE_STATUS_* of the last frame; card.py publishes it
 
   def _angle_hold_allowed(self, CC, CS) -> bool:
     # Mirror of the panda's 0xE4 predicate, controls_allowed || aol_allowed: aol_allowed = ACC main on && the
@@ -283,31 +303,27 @@ class CarController(CarControllerBase):
     aol = bool(self.CP.alternativeExperience & ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
     return bool(CS.out.cruiseState.available) and (bool(CC.enabled) or aol)
 
-  def _update_angle(self, CC, CS) -> tuple[float, int]:
-    """Angle setpoint and the 0xE4 STEER_TORQUE field.  Returns (apply_angle deg, raw)."""
+  def _update_angle(self, CC, CS) -> tuple[float, int, int]:
+    """Angle setpoint and the 0xE4 STEER_TORQUE field.  Returns (apply_angle deg, raw, status bits)."""
     p = self.params
     steering_angle = float(CS.out.steeringAngleDeg)
-    driver_torque = abs(float(CS.out.steeringTorque))
-    was_override = self.angle_override
-    if CC.latActive:
-      self.angle_override = driver_torque > (p.ANGLE_OVERRIDE_OFF if self.angle_override else p.ANGLE_OVERRIDE_ON)
-    else:
-      self.angle_override = False
+    desired = float(CC.actuators.steeringAngleDeg)
 
-    # The limiter starts from the measured angle on the first frame ever (no step toward a 0 deg seed) and on the
-    # pressed->released edge (the O1 lead is dropped: the setpoint slews out from where the wheel is, not from ahead)
-    angle_last = self.apply_angle_last
-    if angle_last is None or (was_override and not self.angle_override):
-      angle_last = steering_angle
-    apply_angle = apply_steer_angle_limits_vm(float(CC.actuators.steeringAngleDeg), angle_last, CS.out.vEgoRaw,
-                                              steering_angle, CC.latActive, p, self.VM)
+    # No fork override (V299, operator ruling): the setpoint never follows the hand.  The limiter starts from the
+    # measured angle on the first frame ever (no step toward a 0 deg seed), and on every latActive rising edge, because
+    # with lateral off the limiter returns the measured angle (lateral.py apply_steer_angle_limits_vm).
+    angle_last = steering_angle if self.apply_angle_last is None else self.apply_angle_last
+    apply_angle = apply_steer_angle_limits_vm(desired, angle_last, CS.out.vEgoRaw, steering_angle, CC.latActive, p, self.VM)
+    status = 0
     if CC.latActive:
-      if self.angle_override:
-        # O1: the setpoint follows the hand (plus the round-trip lead); on release the rate limiter slews it back
-        apply_angle = steering_angle + float(CS.out.steeringRateDeg) * p.ANGLE_OVERRIDE_LEAD_S
+      max_delta = min(get_max_angle_delta_vm(max(CS.out.vEgoRaw, 1), self.VM, p), p.ANGLE_LIMITS.MAX_ANGLE_RATE)
+      if abs(desired - angle_last) > max_delta:
+        status |= p.ANGLE_STATUS_RATE
       error_max = float(np.interp(CS.out.vEgoRaw, p.ANGLE_ERROR_MAX_BP, p.ANGLE_ERROR_MAX_V))
-      apply_angle = float(np.clip(apply_angle, steering_angle - error_max, steering_angle + error_max))
-      apply_angle = float(np.clip(apply_angle, -p.ANGLE_LIMITS.STEER_ANGLE_MAX, p.ANGLE_LIMITS.STEER_ANGLE_MAX))
+      clipped = float(np.clip(apply_angle, steering_angle - error_max, steering_angle + error_max))
+      if clipped != apply_angle:
+        status |= p.ANGLE_STATUS_CLIP
+      apply_angle = float(np.clip(clipped, -p.ANGLE_LIMITS.STEER_ANGLE_MAX, p.ANGLE_LIMITS.STEER_ANGLE_MAX))
     self.apply_angle_last = apply_angle
 
     # raw = round(-10 * deg), half-up like the packer; left-positive degrees are negative raw
@@ -317,7 +333,7 @@ class CarController(CarControllerBase):
       raw = math.floor(-10.0 * steering_angle + 0.5)  # = the 0x14A STEER_ANGLE raw field: hold where the wheel is
     else:
       raw = 0  # the panda blocks a nonzero field here
-    return apply_angle, int(np.clip(raw, -p.ANGLE_RAW_MAX, p.ANGLE_RAW_MAX))
+    return apply_angle, int(np.clip(raw, -p.ANGLE_RAW_MAX, p.ANGLE_RAW_MAX)), status
 
   def _modified_civic_standard_active(self) -> bool:
     return self.CP.carFingerprint == CAR.HONDA_CIVIC_BOSCH and bool(self.CP.flags & HondaFlags.EPS_MODIFIED)
@@ -445,7 +461,10 @@ class CarController(CarControllerBase):
 
     # Send steering command.
     if self.angle_mode:
-      apply_angle, angle_raw = self._update_angle(CC, CS)
+      apply_angle, angle_raw, angle_status = self._update_angle(CC, CS)
+      if getattr(CS, "accord_eps_torque_stale", False):
+        angle_status |= self.params.ANGLE_STATUS_EPS_STALE
+      self.angle_status = angle_status
       can_sends.append(hondacan.create_steering_control(self.packer, self.CAN, angle_raw, CC.latActive, self.tja_control,
                                                         angle_arm=self.params.ANGLE_ARM))
     else:

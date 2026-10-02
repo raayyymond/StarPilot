@@ -1,7 +1,9 @@
-"""Accord EPS angle-loop interface (V298 firmware, F181 39990-TVA,A16A): the car-side invariants.
+"""Accord EPS angle-loop interface (firmware family F181 39990-TVA,A16<letter>: V298 A16A, V299 A16B): the car-side
+invariants.
 
-I1 torque path byte-identical to Dom 20d24ab79 · I2 the 0xE4 field by state · I3 the angle limits · I4 the override ·
-I5 no integrator · I7 the mode-3 steer fault · I8 the panda does not block the angle frames.  (I5's LatControlAngle half
+I1 torque path byte-identical to Dom 20d24ab79 · I2 the 0xE4 field by state · I3 the angle limits · I4 no fork override
+(V299, operator ruling 2026-10-02) · I5 no integrator · I7 the mode-3 steer fault · I8 the panda does not block the angle
+frames.  V299's own tests (route-79 identity, family detection, 0x1AB, params, status) are in test_angle_v299.py.  (I5's LatControlAngle half
 and I6 live in selfdrive/controls/tests/test_latcontrol.py, next to the other Accord tests.)
 """
 from collections import defaultdict
@@ -24,14 +26,16 @@ from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.hondacan import CanBus, create_steering_control
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.tests.accord_angle_replay import FakeParams, load_windows, replay_steering_frames
-from opendbc.car.honda.values import CAR, DBC, HONDA_ACCORD_EPS_ANGLE_LOOP_FW, CarControllerParams, HondaFlags
+from opendbc.car.honda.values import CAR, DBC, CarControllerParams, HondaFlags, is_accord_eps_angle_loop_fw
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm, apply_steer_angle_limits_vm
 from opendbc.car.structs import CarParams
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
 
 SteerControlType = CarParams.SteerControlType
 P = CarControllerParams
-FW_ANGLE = HONDA_ACCORD_EPS_ANGLE_LOOP_FW + b"\x00\x00"
+FW_ANGLE = b"39990-TVA,A16A\x00\x00"  # V298, as the car reports it (route 79: NUL-padded to 16 bytes)
+FW_ANGLE_B = b"39990-TVA,A16B\x00\x00"  # V299
+assert is_accord_eps_angle_loop_fw(FW_ANGLE) and is_accord_eps_angle_loop_fw(FW_ANGLE_B)
 FW_TORQUE = b"39990-TVA,A160\x00\x00"  # the torque-map image flying today (V294/V295)
 HONDA_H = Path(__file__).resolve().parents[3] / "safety" / "modes" / "honda.h"
 
@@ -106,8 +110,13 @@ class TestAccordAngleInterlock:
     assert CP.steerActuatorDelay == pytest.approx(0.15)
     assert CP.lateralTuning.which() == "pid"  # unused by LatControlAngle; keeps the torque conversion off
 
-    for fw, switch, flagged in ((FW_ANGLE, False, True), (FW_TORQUE, True, False), (b"39990-TVA-A160\x00\x00", True, False),
-                                (b"39990-TVA,A16B\x00\x00", True, False)):
+    # the family: V299's A16B takes the same path as V298's A16A
+    CP = accord_cp(monkeypatch, FW_ANGLE_B, True)
+    assert CP.steerControlType == SteerControlType.angle and CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW
+    assert not CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW_MISSING
+
+    for fw, switch, flagged in ((FW_ANGLE, False, True), (FW_ANGLE_B, False, True), (FW_TORQUE, True, False),
+                                (b"39990-TVA-A160\x00\x00", True, False), (b"39990-TVA,A16\x00\x00", True, False)):
       CP = accord_cp(monkeypatch, fw, switch)
       assert CP.steerControlType == SteerControlType.torque, (fw, switch)
       assert bool(CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW) == flagged, fw
@@ -307,57 +316,51 @@ class TestAccordAngleLimits:
       assert apply_angle == pytest.approx(min(error_max(v), get_max_angle_vm(v, ctrl.VM, P)))
 
 
-# --------------------------------------------------------------------------------------------- I4: the override
+# ---------------------------------------------------------------------------------- I4: no fork override (V299)
 
-class TestAccordAngleOverride:
-  def test_hysteresis_600_on_500_off(self, monkeypatch):
-    ctrl = angle_controller(monkeypatch)
-    pressed = []
-    for torque in (0, 550, 599, 601, 550, 501, 499, 550, -601, -501, -499):
-      step(ctrl, lat_active=True, desired=0.0, measured=0.0, driver_torque=torque)
-      pressed.append(ctrl.angle_override)
-    assert pressed == [False, False, False, True, True, True, False, False, True, True, False]
+class TestAccordAngleNoOverride:
+  def test_the_setpoint_never_follows_the_hand(self, monkeypatch):
+    # V299 (operator ruling 2026-10-02): no O1 gate, lead, debounce or takeover.  Whatever the hand torque, the setpoint
+    # is the limiter's output, bounded only by the error clip; the EPS fade and freeze are the override.
+    v = 12.0
+    for torque in (0, 550, 601, 900, 2000, -2000):
+      ctrl = angle_controller(monkeypatch)
+      step(ctrl, lat_active=True, desired=0.0, measured=0.0, v=v)
+      apply_angle, f, _ = step(ctrl, lat_active=True, desired=20.0, measured=-10.0, rate=-60.0, v=v, driver_torque=torque)
+      max_delta = min(get_max_angle_delta_vm(v, ctrl.VM, P), P.ANGLE_LIMITS.MAX_ANGLE_RATE)
+      assert apply_angle == pytest.approx(min(max_delta, -10.0 + error_max(v)))  # one rate step from 0, no lead
+      assert f.request == 1 and f.arm == 2
 
-  def test_setpoint_follows_the_hand_then_slews_back(self, monkeypatch):
+  def test_a_held_wheel_keeps_the_setpoint_at_the_clip_then_the_limiter_resumes(self, monkeypatch):
     v = 12.0
     ctrl = angle_controller(monkeypatch)
     for _ in range(100):
       step(ctrl, lat_active=True, desired=5.0, measured=4.0, v=v)
-    # the driver turns the wheel away against the model's 5 deg
+    # the driver turns the wheel away against the model's 5 deg: the setpoint stays on the model's side, at the clip
     measured = 4.0
     for _ in range(80):
       measured -= 0.6  # 60 deg/s
       apply_angle, f, _ = step(ctrl, lat_active=True, desired=5.0, measured=measured, rate=-60.0, v=v, driver_torque=900)
-      assert apply_angle == pytest.approx(measured - 60.0 * P.ANGLE_OVERRIDE_LEAD_S)
-      assert f.request == 1 and f.arm == 2
-    # release: the limiter restarts from the measured angle (the lead is dropped) and the setpoint returns to the
-    # model's angle under the normal rate limit (the wheel follows the setpoint here, a first-order plant)
+      assert apply_angle == pytest.approx(min(5.0, measured + error_max(v)))
+      assert f.request == 1
+    # release: no restart from the wheel -- the limiter continues from its own last output (the wheel follows here)
     max_delta = min(get_max_angle_delta_vm(v, ctrl.VM, P), P.ANGLE_LIMITS.MAX_ANGLE_RATE)
-    last = measured
-    for _ in range(200):
+    last = apply_angle
+    for _ in range(300):
       measured += 0.3 * (last - measured)
       apply_angle, _, _ = step(ctrl, lat_active=True, desired=5.0, measured=measured, v=v, driver_torque=100)
-      assert 0.0 <= apply_angle - last <= max_delta + 1e-9
+      assert abs(apply_angle - last) <= max_delta + 1e-9
+      assert abs(apply_angle - measured) <= error_max(v) + 1e-9
       last = apply_angle
-    assert apply_angle == pytest.approx(5.0) and not ctrl.angle_override
+    assert apply_angle == pytest.approx(5.0)
 
-  def test_release_restarts_the_limiter_from_the_wheel(self, monkeypatch):
-    v = 12.0
-    for desired, rate in ((-20.0, 60.0), (20.0, 60.0), (20.0, -60.0)):
-      ctrl = angle_controller(monkeypatch)
-      max_delta = min(get_max_angle_delta_vm(v, ctrl.VM, P), P.ANGLE_LIMITS.MAX_ANGLE_RATE)
-      step(ctrl, lat_active=True, desired=0.0, measured=0.0, v=v)
-      apply_angle, _, _ = step(ctrl, lat_active=True, desired=desired, measured=0.0, rate=rate, v=v, driver_torque=900)
-      assert ctrl.angle_override and apply_angle == pytest.approx(rate * P.ANGLE_OVERRIDE_LEAD_S)  # the O1 lead
-      apply_angle, _, _ = step(ctrl, lat_active=True, desired=desired, measured=0.0, rate=rate, v=v, driver_torque=0)
-      assert not ctrl.angle_override
-      # one rate step from the wheel toward the model's angle, not from the led setpoint
-      assert apply_angle == pytest.approx(math.copysign(max_delta, desired))
-
-  def test_override_lead_is_clipped_to_the_error_max(self, monkeypatch):
-    ctrl = angle_controller(monkeypatch)
-    apply_angle, _, _ = step(ctrl, lat_active=True, desired=0.0, measured=10.0, rate=900.0, v=20.0, driver_torque=2000)
-    assert apply_angle == pytest.approx(10.0 + error_max(20.0))
+  def test_the_override_is_gone(self):
+    for name in ("ANGLE_OVERRIDE_ON", "ANGLE_OVERRIDE_OFF", "ANGLE_OVERRIDE_LEAD_S"):
+      assert not hasattr(P, name)
+    assert "angle_override" not in inspect.getsource(CarController)
+    # the setpoint is never built from the wheel's rate (the O1 lead) or the hand torque
+    source = inspect.getsource(CarController._update_angle)
+    assert "steeringRateDeg" not in source and "steeringTorque" not in source
 
 
 # ------------------------------------------------------------------------------------------ I5: no integrator
@@ -376,7 +379,7 @@ class TestAccordAngleNoIntegrator:
     assert not re.search(r"self\.\w+\s*[+\-]=", source)
     assert "integr" not in source.lower()
     assigned = set(re.findall(r"self\.(\w+)\s*=", source))
-    assert assigned == {"angle_override", "apply_angle_last"}  # a flag and the limiter's last output, nothing else
+    assert assigned == {"apply_angle_last"}  # the limiter's last output, nothing else (V299: no override flag)
 
 
 # ----------------------------------------------------------------------------------- I7: the mode-3 steer fault
