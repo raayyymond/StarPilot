@@ -78,6 +78,23 @@ class TestLagd:
     assert lag == msg.liveDelay.lateralDelayEstimate
     assert valid_blocks == msg.liveDelay.validBlocks
 
+  def test_saved_params_dropped_when_steer_control_type_changes(self):
+    # a lag learned on the Accord's torque-map EPS must not seed its angle loop (and back)
+    params = Params()
+    torque_CP = car.CarParams(carFingerprint="HONDA_ACCORD", steerControlType=car.CarParams.SteerControlType.torque)
+    angle_CP = car.CarParams(carFingerprint="HONDA_ACCORD", steerControlType=car.CarParams.SteerControlType.angle)
+
+    msg = messaging.new_message('liveDelay')
+    msg.liveDelay.lateralDelayEstimate = 0.25
+    msg.liveDelay.validBlocks = 50
+    params.put("LiveDelay", msg.to_bytes())
+    params.put("CarParamsPrevRoute", torque_CP.to_bytes())
+    assert retrieve_initial_lag(params, angle_CP.as_reader()) is None
+    assert params.get("LiveDelay") is None
+
+    params.put("LiveDelay", msg.to_bytes())
+    assert retrieve_initial_lag(params, torque_CP.as_reader()) == (pytest.approx(0.25), 50)
+
   def test_ncc(self):
     lag_frames = random.randint(1, 19)
 
