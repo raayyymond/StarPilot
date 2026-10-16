@@ -40,7 +40,8 @@ def test_turn_lead_is_suppressed_only_during_applied_angle_control():
   assert turn_lead_allowed("rivian", LateralControlMode.torque)
   assert turn_lead_allowed("rivian", LateralControlMode.torqueRecovering)
   assert turn_lead_allowed("rivian", LateralControlMode.inactive)
-  assert turn_lead_allowed("ford", LateralControlMode.angle)
+  assert not turn_lead_allowed("honda", LateralControlMode.angle)
+  assert turn_lead_allowed("honda", LateralControlMode.inactive)
 
 
 @pytest.mark.parametrize("v_ego", [0.0, 5.0, 30.0])

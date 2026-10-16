@@ -315,7 +315,9 @@ def turn_lead_allowed(brand: str, lateral_control_mode: car.CarControl.Actuators
   # Torque steering mechanically damps the turn-lead fade. A direct angle
   # controller follows the resulting lead/catch-up cycle literally, which can
   # reverse the wheel command several times during one turn initiation.
-  return brand != "rivian" or lateral_control_mode != LateralControlMode.angle
+  # Measured on the Accord angle-loop EPS 2026-10-15: the fade's engaged_ratio makes the command ~ 2x(lead - measured),
+  # feedback on the wheel through the loop lag; the wheel hunted in every sharp turn.
+  return lateral_control_mode != LateralControlMode.angle
 
 
 # Turn-initiation lead. The model's action and the fixed 4/7 m probes are anchored in

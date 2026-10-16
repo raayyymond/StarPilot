@@ -26,6 +26,7 @@ from openpilot.common.params import Params
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 SteerControlType = structs.CarParams.SteerControlType
+LateralControlMode = structs.CarControl.Actuators.LateralControlMode
 
 BOSCH_BRAKE_FORCE_ON = -0.12
 BOSCH_BRAKE_FORCE_RELEASE = -0.02
@@ -657,6 +658,7 @@ class CarController(CarControllerBase):
     if self.angle_mode:
       new_actuators.steeringAngleDeg = apply_angle
       new_actuators.torqueOutputCan = angle_raw  # the 0xE4 STEER_TORQUE field as sent (-10 x deg)
+      new_actuators.lateralControlMode = LateralControlMode.angle  # controlsd gates the turn lead on it
 
     self.frame += 1
     return new_actuators, can_sends
