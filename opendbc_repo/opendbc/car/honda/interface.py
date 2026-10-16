@@ -6,7 +6,8 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA_BOSCH, HONDA_BOSCH_A, HONDA_BOSCH_A_RADAR_VERIFIED, HONDA_BOSCH_CANFD, \
-                                                 HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags
+                                                 HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags, \
+                                                 is_accord_eps_angle_loop_fw
 from opendbc.car.honda.carcontroller import CarController
 from opendbc.car.honda.carstate import CarState
 from opendbc.car.honda.radar_interface import RadarInterface
@@ -107,9 +108,12 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kiV = [1.2, 0.8, 0.5]
 
     eps_modified = False
+    eps_angle_loop_fw = False
     for fw in car_fw:
       if fw.ecu == "eps" and b"," in fw.fwVersion:
         eps_modified = True
+      if fw.ecu == "eps" and is_accord_eps_angle_loop_fw(fw.fwVersion):
+        eps_angle_loop_fw = True
 
     if eps_modified:
       ret.flags |= HondaFlags.EPS_MODIFIED.value
@@ -150,6 +154,15 @@ class CarInterface(CarInterfaceBase):
         ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.3], [0.09]]
       else:
         ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.6], [0.18]]
+      if eps_angle_loop_fw:
+        # angle-loop EPS firmware: the EPS closes the angle loop, openpilot sends the setpoint
+        ret.flags |= HondaFlags.EPS_ANGLE_LOOP_FW.value
+        ret.steerControlType = structs.CarParams.SteerControlType.angle
+        ret.steerActuatorDelay = CarControllerParams.ANGLE_STEER_ACTUATOR_DELAY
+      elif not docs and not any(fw.ecu == "eps" for fw in car_fw):
+        # EPS fw unread: an angle-loop EPS would ignore torque frames (engaged, no steering, no alert), so fault instead.
+        # Note: upstream lists this EPS as non-essential (lost without comma power); such an Accord faults here too.
+        ret.flags |= HondaFlags.EPS_FW_UNREAD.value
       if ret.transmissionType == TransmissionType.manual:
         CarControllerParams.BOSCH_GAS_LOOKUP_BP = [-0.2, 2.0]
 
