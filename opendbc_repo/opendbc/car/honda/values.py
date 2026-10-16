@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from enum import Enum, IntFlag
 
+import numpy as np
+
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.docs_definitions import CarFootnote, CarHarness, CarDocs, CarParts, Column
@@ -84,6 +86,42 @@ class HondaFlags(IntFlag):
   HYBRID = 2048
   BOSCH_TJA_CONTROL = 4096
   EPS_MODIFIED = 8192
+
+
+# ---- Accord, angle mode only (steerControlType == angle): the variable-ratio rack map.
+# In angle mode sR turns the model's curvature 1:1 into the angle setpoint, so the ratio is a tune here and the learner
+# is ignored.  SHAPE: absolute ratios measured over 82 routes, V[0] = the on-centre nominal.  Not measurements:
+# 0-23 deg (pinned by convention, not identified), 31-61 deg (interpolated across two bins that failed the lag test),
+# 236+ deg (frozen; above 303 deg the data is parking speed).  A compensation curve for calc_curvature's k = d/L,
+# not the rack's true geometry.  Bands: shape +/-0.12, level +/-0.57.
+ACCORD_ANGLE_SR_BP = [0.0, 23.0, 31.0, 61.0, 76.0, 95.0, 116.0, 151.0, 178.0, 227.0, 236.0, 303.0, 380.0]  # deg
+ACCORD_ANGLE_SR_V = [16.88, 16.88, 16.88, 16.25, 15.97, 15.45, 15.03, 14.68, 14.45, 14.09, 14.25, 12.98, 12.31]  # :1
+# LEVEL: the served on-centre ratio; the whole shape is scaled by LEVEL / V[0].  16.84 = the SteerRatio every angle
+# drive ran (V298/V299 configs).
+ACCORD_ANGLE_SR_LEVEL = 16.84
+
+
+def accord_angle_steer_ratio(steer_angle_deg: float) -> float:
+  """Local ratio of the Accord's rack at this wheel angle (deg, offset removed)."""
+  ratio = float(np.interp(abs(steer_angle_deg), ACCORD_ANGLE_SR_BP, ACCORD_ANGLE_SR_V))
+  return ratio * ACCORD_ANGLE_SR_LEVEL / ACCORD_ANGLE_SR_V[0]
+
+
+def accord_angle_at_own_ratio(angle_vm_deg: float, sr_vm: float, max_passes: int = 10) -> float:
+  """The angle setpoint with the map evaluated at the DESIRED angle instead of the measured one.
+
+  controlsd sets VM.sR = map(measured angle) and get_steer_from_curvature is linear in sR, so the consistent setpoint
+  is the fixed point theta = angle_vm_deg * map(theta) / sr_vm.  Each pass shrinks the error by <= 0.44 (worst on the
+  236-303 deg knot); stops within 0.01 deg, a tenth of the EPS setpoint quantum.
+  """
+  theta = float(angle_vm_deg)
+  for _ in range(max_passes):
+    nxt = float(angle_vm_deg) * accord_angle_steer_ratio(theta) / sr_vm
+    done = abs(nxt - theta) < 0.01
+    theta = nxt
+    if done:
+      break
+  return theta
 
 
 # Car button codes

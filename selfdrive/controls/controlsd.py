@@ -14,7 +14,7 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.chrysler.values import pacifica_hybrid_aol_stock_acc_mode
 from opendbc.car.gm.values import CAR as GM_CAR
-from opendbc.car.honda.values import CAR as HONDA_CAR
+from opendbc.car.honda.values import CAR as HONDA_CAR, accord_angle_steer_ratio
 from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
 from opendbc.car.nissan.values import CAR as NISSAN_CAR
 from opendbc.car.vehicle_model import VehicleModel
@@ -481,6 +481,9 @@ class Controls:
       sr *= get_bolt_2017_steer_ratio_scale(CS.vEgo)
     elif self.CP.carFingerprint == GM_CAR.CHEVROLET_BOLT_CC_2018_2021:
       sr *= BOLT_2018_2021_STEER_RATIO_TEST_SCALE
+    elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and self.CP.steerControlType == car.CarParams.SteerControlType.angle:
+      # angle-loop EPS: the variable-ratio rack map at the measured angle replaces the learner and the toggle
+      sr = accord_angle_steer_ratio(CS.steeringAngleDeg - lp.angleOffsetDeg)
     elif self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and not accord_ratio_is_explicit:
       sr *= get_honda_accord_steer_ratio_scale(CS.vEgo)
     self.VM.update_params(x, sr)
