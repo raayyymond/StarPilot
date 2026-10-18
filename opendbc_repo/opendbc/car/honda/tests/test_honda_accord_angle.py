@@ -72,6 +72,22 @@ def test_angle_fw_selects_angle_control(fw):
   assert CP.steerActuatorDelay == pytest.approx(P.ANGLE_STEER_ACTUATOR_DELAY)
 
 
+@pytest.mark.parametrize("stale", [
+  dict(force_torque_controller=True),
+  dict(nnff=True),
+  dict(nnff_lite=True),
+  dict(force_torque_controller=True, nnff=True, nnff_lite=True),
+])
+def test_angle_control_needs_no_params_and_survives_stale_toggles(stale):
+  """A fresh install, or one carrying a torque-era config, selects angle control from the EPS fw alone."""
+  car_fw = [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=b"39990-TVA,A16C", address=0x18DA30F1, subAddress=0)]
+  toggles = SimpleNamespace(**{**dict(always_on_lateral_lkas=False, force_torque_controller=False, nnff=False, nnff_lite=False), **stale})
+  CP = CarInterface.get_params(CAR.HONDA_ACCORD, gen_empty_fingerprint(), car_fw, False, False, False, toggles)
+  assert CP.steerControlType == CarParams.SteerControlType.angle
+  assert CP.lateralTuning.which() == "pid"  # the ForceTorqueController conversion is skipped for an angle car
+  assert CarController({Bus.pt: DBC[CAR.HONDA_ACCORD][Bus.pt]}, CP).angle_mode
+
+
 @pytest.mark.parametrize("fw", [None, b"39990-TVA-A160\x00\x00", b"39990-TVA,A160\x00\x00"])
 def test_other_fw_keeps_torque_control(fw):
   CP = accord_cp(fw)
