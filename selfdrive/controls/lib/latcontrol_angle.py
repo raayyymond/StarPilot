@@ -1,7 +1,7 @@
 import math
 
 from cereal import log
-from opendbc.car.honda.values import CAR as HONDA_CAR, accord_angle_at_own_ratio
+from opendbc.car.honda.values import CAR as HONDA_CAR, HondaFlags, accord_angle_at_own_ratio
 from opendbc.car.subaru.values import CAR as SUBARU_CAR
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.steering_saturation import STEER_ANGLE_SATURATION_THRESHOLD
@@ -53,7 +53,10 @@ class LatControlAngle(LatControl):
   def __init__(self, CP, CI, dt):
     super().__init__(CP, CI, dt)
     self.sat_check_min_speed = 5.
-    self.use_steer_limited_by_safety = CP.brand in ("tesla", "hyundai")
+    # Accord on the angle-loop EPS: the EPS angle loop lags 0.3-0.6 s, so a raw angle-error rule flags ordinary turn
+    # entries; its carcontroller limits the setpoint itself (lateral accel/jerk, error clip), so use carOutput instead
+    self.is_accord_angle_loop = CP.brand == "honda" and bool(CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW)
+    self.use_steer_limited_by_safety = CP.brand in ("tesla", "hyundai") or self.is_accord_angle_loop
     self.is_ascent = CP.carFingerprint == SUBARU_CAR.SUBARU_ASCENT_2023
     self.is_accord = CP.carFingerprint == HONDA_CAR.HONDA_ACCORD
     self.ascent_angle_target = None
