@@ -16,7 +16,10 @@ from opendbc.car.honda.hondacan import CanBus, create_steering_control
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR, DBC, CarControllerParams, HondaFlags, is_accord_eps_angle_loop_fw, \
                                      accord_angle_steer_ratio, ACCORD_ANGLE_SR_BP, ACCORD_ANGLE_SR_V
-from opendbc.car.lateral import apply_steer_angle_limits_vm
+from opendbc.car.interfaces import get_torque_params
+from opendbc.car.lateral import MAX_LATERAL_ACCEL, apply_steer_angle_limits_vm
+from opendbc.car.toyota.interface import CarInterface as ToyotaInterface
+from opendbc.car.toyota.values import CAR as TOYOTA
 from opendbc.car.structs import CarParams
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
 
@@ -94,6 +97,23 @@ def test_other_fw_keeps_torque_control(fw):
   assert CP.steerControlType == CarParams.SteerControlType.torque
   assert not CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW
   assert not CarController({Bus.pt: DBC[CAR.HONDA_ACCORD][Bus.pt]}, CP).angle_mode
+
+
+def test_max_lateral_accel_is_the_angle_limit_only_on_the_angle_fw():
+  # the onroad torque bar divides by CP.maxLateralAccel; the torque fit's 0.32 m/s^2 pegged it on every turn
+  torque_fit = get_torque_params()[CAR.HONDA_ACCORD]['MAX_LAT_ACCEL_MEASURED']
+  assert torque_fit == pytest.approx(0.3247, abs=1e-4)
+  assert accord_cp(b"39990-TVA,A16C").maxLateralAccel == pytest.approx(MAX_LATERAL_ACCEL)
+  assert MAX_LATERAL_ACCEL == pytest.approx(3.589, abs=1e-3)
+  for fw in (None, b"39990-TVA-A160\x00\x00", b"39990-TVA,A160\x00\x00"):
+    assert accord_cp(fw).maxLateralAccel == pytest.approx(torque_fit)
+  toggles = SimpleNamespace(always_on_lateral_lkas=False, force_torque_controller=False, nnff=False, nnff_lite=False)
+  angle_fw = [CarParams.CarFw(ecu=CarParams.Ecu.eps, fwVersion=b"39990-TVA,A16C", address=0x18DA30F1, subAddress=0)]
+  for car in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G):
+    CP = CarInterface.get_params(car, gen_empty_fingerprint(), angle_fw, False, False, False, toggles)
+    assert CP.maxLateralAccel == pytest.approx(get_torque_params()[car]['MAX_LAT_ACCEL_MEASURED'])
+  CP = ToyotaInterface.get_params(TOYOTA.TOYOTA_RAV4_TSS2, gen_empty_fingerprint(), [], False, False, False, toggles)
+  assert CP.maxLateralAccel == pytest.approx(get_torque_params()[TOYOTA.TOYOTA_RAV4_TSS2]['MAX_LAT_ACCEL_MEASURED'])
 
 
 def _steer_faults(CP):

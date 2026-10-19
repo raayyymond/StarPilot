@@ -4,6 +4,7 @@ from openpilot.common.params import Params, UnknownKeyName
 from opendbc.car import get_safety_config, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
+from opendbc.car.lateral import MAX_LATERAL_ACCEL
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HONDA_BOSCH, HONDA_BOSCH_A, HONDA_BOSCH_A_RADAR_VERIFIED, HONDA_BOSCH_CANFD, \
                                                  HONDA_NIDEC_ALT_SCM_MESSAGES, HONDA_BOSCH_RADARLESS, HondaSafetyFlags, \
@@ -159,6 +160,11 @@ class CarInterface(CarInterfaceBase):
         ret.flags |= HondaFlags.EPS_ANGLE_LOOP_FW.value
         ret.steerControlType = structs.CarParams.SteerControlType.angle
         ret.steerActuatorDelay = CarControllerParams.ANGLE_STEER_ACTUATOR_DELAY
+        # The torque fit's MAX_LAT_ACCEL_MEASURED (0.32 m/s^2) means nothing to an angle setpoint; the onroad torque
+        # bar divides by this, so normalise it by the angle limit instead (3.589 m/s^2, where the setpoint clamp binds).
+        # Measured engaged hands-off over 35 routes: p99.9 3.46 m/s^2, per-route maxima 3.4-4.1. Only the bar and the
+        # car docs read maxLateralAccel; no controller or torque tune does.
+        ret.maxLateralAccel = MAX_LATERAL_ACCEL
       elif not docs and not any(fw.ecu == "eps" for fw in car_fw):
         # EPS fw unread: an angle-loop EPS would ignore torque frames (engaged, no steering, no alert), so fault instead.
         # Note: upstream lists this EPS as non-essential (lost without comma power); such an Accord faults here too.
