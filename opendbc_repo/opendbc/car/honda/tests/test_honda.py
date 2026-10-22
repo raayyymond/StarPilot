@@ -10,6 +10,8 @@ from opendbc.car.honda.carcontroller import (
   BOSCH_BRAKE_FORCE_ON,
   BOSCH_BRAKE_FORCE_RELEASE,
   CarController,
+  bosch_gas_learn_speed,
+  bosch_gas_learning_allowed,
   get_civic_bosch_modified_steering_pressed,
   get_civic_bosch_modified_torque_lpf_tau,
   get_honda_bosch_wind_brake_mps2,
@@ -349,3 +351,16 @@ class TestHondaFingerprint:
 
     assert hrv3g_cp.longitudinalActuatorDelay == pytest.approx(0.4)
     assert accord_cp.longitudinalActuatorDelay == pytest.approx(0.5)
+
+
+def test_accord_bosch_gas_learner_is_slow_and_frozen_at_the_rail():
+  # 2020 Accord 2.0T/10AT: the launch accel error is turbo + shift lag, not gain (routes b5-b9, 2026-10-21)
+  assert bosch_gas_learn_speed(CAR.HONDA_ACCORD) == 2000.0
+  assert bosch_gas_learn_speed(CAR.HONDA_CIVIC_BOSCH) == 50.0
+  assert bosch_gas_learn_speed(CAR.HONDA_INSIGHT) == 150.0
+  # one 20 ms frame at a 1 m/s^2 error and 2 m/s^2 force moves the factor by 1e-3 (was 0.04)
+  assert 1.0 / bosch_gas_learn_speed(CAR.HONDA_ACCORD) * 2.0 == pytest.approx(1e-3)
+  # no learning while the last gas command sat on the 1600 rail
+  rail = CarControllerParams.BOSCH_GAS_LOOKUP_V[-1]
+  assert bosch_gas_learning_allowed(rail - 1.0, rail)
+  assert not bosch_gas_learning_allowed(rail, rail)

@@ -43,6 +43,28 @@ def update_honda_bosch_braking(braking: bool, gas_pedal_force: float, stopping: 
   return gas_pedal_force < BOSCH_BRAKE_FORCE_ON
 
 
+def bosch_gas_learn_speed(fingerprint) -> float:
+  """Frames of unit accel error x unit force per unit of gas-factor change (50 Hz)."""
+  if fingerprint == CAR.HONDA_INSIGHT:
+    return 150.0
+  if fingerprint in (CAR.ACURA_RDX_3G, CAR.ACURA_RDX_3G_MMR):
+    return 300.0
+  if fingerprint == CAR.HONDA_ACCORD:
+    # 2.0T + 10AT: during a launch the accel error is LAG (turbo spool, then each upshift's torque dip, ~2 s
+    # per gear), not gain.  At 50 the factor wound 0.24 -> 1.75 in 3 s and then crashed to the floor at boost,
+    # and the gas cut it produced re-armed the next cycle on every upshift (routes b5-b9, 2026-10-21).  A gain
+    # estimator has to average over the slowest plant dynamic, so it learns 40x slower: at most ~0.05/s at a
+    # 1 m/s^2 error and 2 m/s^2 force, i.e. under 0.1 across a whole launch.
+    return 2000.0
+  return 50.0
+
+
+def bosch_gas_learning_allowed(last_gas: float, gas_rail: float) -> bool:
+  """No learning against the gas rail: with the command already pinned there, a larger factor cannot change
+  the gas, so the error integrates as pure wind-up that is paid back as a cut when the error flips."""
+  return last_gas < gas_rail
+
+
 def get_civic_bosch_modified_torque_lpf_tau(torque_cmd: float, prev_torque_cmd: float, v_ego: float) -> float:
   torque_delta = abs(float(torque_cmd) - float(prev_torque_cmd))
   torque_cmd_abs = abs(float(torque_cmd))
@@ -490,13 +512,8 @@ class CarController(CarControllerBase):
             if actuators.longControlState == LongCtrlState.pid and not CS.out.gasPressed:
               gas_error = (accel if self.mvl_accord_mode else self.accel) - CS.out.aEgo
 
-              if gas_error != 0.0 and gas_pedal_force > min_gas:
-                if self.CP.carFingerprint == CAR.HONDA_INSIGHT:
-                  gas_learn_speed = 150.0
-                elif self.CP.carFingerprint in (CAR.ACURA_RDX_3G, CAR.ACURA_RDX_3G_MMR):
-                  gas_learn_speed = 300.0
-                else:
-                  gas_learn_speed = 50.0
+              if gas_error != 0.0 and gas_pedal_force > min_gas and                  bosch_gas_learning_allowed(self.bosch_last_gas, self.params.BOSCH_GAS_LOOKUP_V[-1]):
+                gas_learn_speed = bosch_gas_learn_speed(self.CP.carFingerprint)
                 gas_factor_floor = 0.01 if self.mvl_accord_mode else 0.1
                 gas_learn_force = (gas_pedal_force - min_gas) if self.mvl_accord_mode else gas_pedal_force
                 self.bosch_gas_factor = float(np.clip(
