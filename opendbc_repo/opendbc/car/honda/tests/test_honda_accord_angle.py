@@ -273,3 +273,14 @@ def test_steer_ratio_map_level():
   for deg in (0.0, 45.0, 120.0, -200.0, 500.0):
     expected = float(np.interp(abs(deg), ACCORD_ANGLE_SR_BP, ACCORD_ANGLE_SR_V)) * 16.84 / 16.88
     assert accord_angle_steer_ratio(deg) == pytest.approx(expected)
+
+
+def test_error_clip_is_the_p_room_under_the_firmware_sum_clamp():
+  # Operator rule (2026-10-21): the clip is the angle error where the V300 firmware's P term alone equals
+  # Kmax - Imax (sum clamp 15360 after the 254/256 taper, so 15481 before it; I cap 4096 / 6144 / 8192 by
+  # speed).  Integer mirror of the image: E = 16 * 10 * deg, E' = (E * G(v)) >> 8, P = (E' * 112) >> 8.
+  g_v = {3.1: 1178, 8.0: 1465, 10.0: 760, 11.75: 560, 17.5: 1068, 26.9: 2188}
+  for v, clip in zip(P.ANGLE_ERROR_MAX_BP, P.ANGLE_ERROR_MAX_V):
+    imax = 4096 if v <= 6.0 else (6144 if v <= 12.5 else 8192)
+    p_of = lambda deg: (((16 * round(10 * deg) * g_v[v]) >> 8) * 112) >> 8
+    assert p_of(clip) >= 15481 - imax > p_of(clip - 0.1)

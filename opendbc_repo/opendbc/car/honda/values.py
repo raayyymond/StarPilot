@@ -55,9 +55,12 @@ class CarControllerParams:
     MAX_ANGLE_RATE=2.5,  # deg/frame = 250 deg/s (V299 drives ran 250; Tesla and Rivian run 250 deg/s too)
   )
   # Error clip |setpoint - measured angle| <= ANGLE_ERROR_MAX(v): bounds the P torque the setpoint can demand.  Each
-  # knot = the error the inner loop carries while the setpoint slews at the max rate (model-sized, not measured).
+  # knot = the error at which the firmware's P term alone fills the room left under the PID sum clamp when the
+  # integral sits at its cap (operator rule, 2026-10-21): P = Kmax - Imax, read from the V300 image:
+  # P = ((16*10*deg * G(v)) >> 8) * 112 >> 8, Kmax = 15360 after the 254/256 taper (15481 before it),
+  # Imax = 4096 (<= 6 m/s), 6144 (6-12.5 m/s), 8192 (above, the ICL), G(v) = 1178/1465/760/560/1068/2188 at the knots.
   ANGLE_ERROR_MAX_BP = [3.1, 8.0, 10.0, 11.75, 17.5, 26.9]  # m/s, the firmware gain-table knots
-  ANGLE_ERROR_MAX_V = [17.0, 15.5, 19.5, 17.0, 8.5, 4.5]   # deg
+  ANGLE_ERROR_MAX_V = [35.4, 23.4, 45.0, 61.0, 25.0, 12.2]  # deg (was 17.0, 15.5, 19.5, 17.0, 8.5, 4.5, model-sized)
   ANGLE_RAW_MAX = 4000  # raw clip before packing
   ANGLE_ARM = 2  # 0xE4 STEER_CONTROL_ARM: the EPS lane runs only while it reads 2; sent on every frame
   ANGLE_STEER_ACTUATOR_DELAY = 0.15  # s, the inner angle loop's lag (model value; lagd learns the rest)
