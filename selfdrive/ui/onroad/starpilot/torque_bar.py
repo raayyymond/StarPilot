@@ -154,9 +154,12 @@ def accord_angle_error_bar(CP) -> bool:
 
 
 def accord_angle_error_fraction(setpoint_deg: float, angle_deg: float, v_ego: float) -> float:
-  """(setpoint - wheel) over the Accord error clip at this speed, clipped to +-1."""
+  """(setpoint - wheel) over the Accord error clip at this speed, clipped to +-1.
+
+  Negated like the torque branch: openpilot angles are left-positive and the bar draws +x to the
+  right, so the bar must point the way the EPS is pulling the wheel (left pull = bar left)."""
   error_max = float(np.interp(v_ego, HondaParams.ANGLE_ERROR_MAX_BP, HondaParams.ANGLE_ERROR_MAX_V))
-  return float(np.clip((setpoint_deg - angle_deg) / error_max, -1.0, 1.0))
+  return float(np.clip(-(setpoint_deg - angle_deg) / error_max, -1.0, 1.0))
 
 
 class TorqueBar(Widget):
@@ -177,7 +180,7 @@ class TorqueBar(Widget):
     rivian_lateral_mode.update()
     # Accord on the angle-loop EPS firmware: the bar is the angle error the setpoint carries,
     # (setpoint sent - wheel angle) / the carcontroller's error clip at this speed, so full
-    # scale means the clip is binding.  Left-positive, like the lateral-accel branch below.
+    # scale means the clip is binding.  Sign follows the torque branch: bar points the way the EPS pulls.
     if accord_angle_error_bar(ui_state.CP):
       car_state = ui_state.sm['carState']
       if not ui_state.sm['carControl'].latActive:
