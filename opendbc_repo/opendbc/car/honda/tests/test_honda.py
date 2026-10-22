@@ -10,6 +10,7 @@ from opendbc.car.honda.carcontroller import (
   BOSCH_BRAKE_FORCE_ON,
   BOSCH_BRAKE_FORCE_RELEASE,
   CarController,
+  bosch_brake_force_thresholds,
   bosch_gas_learn_speed,
   bosch_gas_learning_allowed,
   get_civic_bosch_modified_steering_pressed,
@@ -87,6 +88,25 @@ class TestHondaFingerprint:
 
     braking = update_honda_bosch_braking(braking, BOSCH_BRAKE_FORCE_RELEASE + 0.01, False, True)
     assert not braking
+
+  def test_accord_brake_mode_arms_at_its_floor_and_releases_to_a_coast(self):
+    # route bb (2026-10-21): brake mode delivers -0.3..-0.4 for any request above -0.25, so a request there is a coast
+    on, release = bosch_brake_force_thresholds(CAR.HONDA_ACCORD)
+    assert (on, release) == (-0.45, -0.20)
+    assert bosch_brake_force_thresholds(CAR.HONDA_CIVIC_BOSCH) == (BOSCH_BRAKE_FORCE_ON, BOSCH_BRAKE_FORCE_RELEASE)
+
+    # the forces that armed the brake 21 times in 5 min on route bb (-0.12..-0.23) now coast
+    for force in (-0.12, -0.19, -0.23, -0.44):
+      assert not update_honda_bosch_braking(False, force, False, True, on, release)
+    braking = update_honda_bosch_braking(False, -0.46, False, True, on, release)
+    assert braking
+    # once armed it stays through the floor band and lets go when the request is back at a coast
+    assert update_honda_bosch_braking(braking, -0.30, False, True, on, release)
+    assert update_honda_bosch_braking(braking, -0.21, False, True, on, release)
+    assert not update_honda_bosch_braking(braking, -0.19, False, True, on, release)
+    # stopping and inactive are unchanged
+    assert update_honda_bosch_braking(False, 0.5, True, True, on, release)
+    assert not update_honda_bosch_braking(True, -1.0, False, False, on, release)
 
   def test_bosch_braking_preserves_stopping_and_resets_inactive(self):
     assert update_honda_bosch_braking(False, 0.5, True, True)

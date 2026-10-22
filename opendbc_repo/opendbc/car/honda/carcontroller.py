@@ -32,15 +32,28 @@ BOSCH_BRAKE_FORCE_ON = -0.12
 BOSCH_BRAKE_FORCE_RELEASE = -0.02
 
 
-def update_honda_bosch_braking(braking: bool, gas_pedal_force: float, stopping: bool, long_active: bool) -> bool:
+def bosch_brake_force_thresholds(fingerprint) -> tuple[float, float]:
+  """(brake-mode ON, RELEASE) force thresholds in m/s^2, per car."""
+  if fingerprint == CAR.HONDA_ACCORD:
+    # Brake mode on this car has a FLOOR: a request between 0 and -0.25 m/s^2 is delivered at -0.3 to -0.4 with a
+    # -0.7 bite on entry (route bb, 2026-10-21, 21 entries in 5 min of no-lead cruise, each a 3-6 mph sag at ~18 s
+    # period = the "ping-pong").  With gas reaching zero at force -0.2 and the brake arming at -0.12 the car never
+    # coasted at all.  Arm the brake only once the request is at the floor, where it cannot overdeliver, and let it
+    # go as soon as the request rises back to what a coast gives, so the band in between is a coast (gas 0, no brake).
+    return -0.45, -0.20
+  return BOSCH_BRAKE_FORCE_ON, BOSCH_BRAKE_FORCE_RELEASE
+
+
+def update_honda_bosch_braking(braking: bool, gas_pedal_force: float, stopping: bool, long_active: bool,
+                               on: float = BOSCH_BRAKE_FORCE_ON, release: float = BOSCH_BRAKE_FORCE_RELEASE) -> bool:
   """Select Bosch brake mode from the same road-load-adjusted force used for gas."""
   if not long_active:
     return False
   if stopping:
     return True
   if braking:
-    return gas_pedal_force <= BOSCH_BRAKE_FORCE_RELEASE
-  return gas_pedal_force < BOSCH_BRAKE_FORCE_ON
+    return gas_pedal_force <= release
+  return gas_pedal_force < on
 
 
 def bosch_gas_learn_speed(fingerprint) -> float:
@@ -551,7 +564,9 @@ class CarController(CarControllerBase):
           stopping = actuators.longControlState == LongCtrlState.stopping
           bosch_braking = None
           if not self.mvl_accord_mode:
-            self.bosch_braking = update_honda_bosch_braking(self.bosch_braking, gas_pedal_force, stopping, CC.longActive)
+            brake_on, brake_release = bosch_brake_force_thresholds(self.CP.carFingerprint)
+            self.bosch_braking = update_honda_bosch_braking(self.bosch_braking, gas_pedal_force, stopping, CC.longActive,
+                                                            brake_on, brake_release)
             bosch_braking = self.bosch_braking
           self.stopping_counter = self.stopping_counter + 1 if stopping else 0
           if not self.mvl_accord_mode or mvl_radar_owned:
