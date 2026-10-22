@@ -6,6 +6,7 @@ from collections import OrderedDict
 import numpy as np
 import pyray as rl
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
+from opendbc.car.honda.values import CarControllerParams as HondaParams, HondaFlags
 from openpilot.selfdrive.ui.lib.starpilot_visuals import blend_colors
 from openpilot.selfdrive.ui.onroad.starpilot.rivian_lateral_mode import rivian_lateral_mode
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
@@ -148,6 +149,16 @@ def arc_bar_pts(r_mid: float, thickness: float,
 DEFAULT_MAX_LAT_ACCEL = 3.0  # m/s^2
 
 
+def accord_angle_error_bar(CP) -> bool:
+  return bool(CP) and CP.brand == "honda" and bool(CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW)
+
+
+def accord_angle_error_fraction(setpoint_deg: float, angle_deg: float, v_ego: float) -> float:
+  """(setpoint - wheel) over the Accord error clip at this speed, clipped to +-1."""
+  error_max = float(np.interp(v_ego, HondaParams.ANGLE_ERROR_MAX_BP, HondaParams.ANGLE_ERROR_MAX_V))
+  return float(np.clip((setpoint_deg - angle_deg) / error_max, -1.0, 1.0))
+
+
 class TorqueBar(Widget):
   def __init__(self, demo: bool = False):
     super().__init__()
@@ -164,6 +175,18 @@ class TorqueBar(Widget):
       return
 
     rivian_lateral_mode.update()
+    # Accord on the angle-loop EPS firmware: the bar is the angle error the setpoint carries,
+    # (setpoint sent - wheel angle) / the carcontroller's error clip at this speed, so full
+    # scale means the clip is binding.  Left-positive, like the lateral-accel branch below.
+    if accord_angle_error_bar(ui_state.CP):
+      car_state = ui_state.sm['carState']
+      if not ui_state.sm['carControl'].latActive:
+        self._torque_filter.update(0.0)
+      else:
+        setpoint = ui_state.sm['carOutput'].actuatorsOutput.steeringAngleDeg
+        self._torque_filter.update(accord_angle_error_fraction(setpoint, car_state.steeringAngleDeg, car_state.vEgoRaw))
+      return
+
     # Angle-controlled cars, including Rivian's hybrid controller while its
     # angle channel is active, use a lateral-acceleration estimate for the bar.
     # The shared Rivian mode detector keys off the actual CAN torque so the bar
