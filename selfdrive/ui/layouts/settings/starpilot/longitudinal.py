@@ -1155,7 +1155,7 @@ class StarPilotLongitudinalLayout(_SettingsPage):
     self._navigate_to(panel_name)
 
   def _build_personality_profile_rows(self, profile: str) -> list[SettingRow]:
-    follow_min = 0.5
+    follow_min = 0.4
     follow_max = 2.5 if profile == "Traffic" else 3.0
     p = profile
     rows = [
@@ -1169,7 +1169,7 @@ class StarPilotLongitudinalLayout(_SettingsPage):
         SettingRow(f"{p}FollowHigh", "value", tr_noop("Follow High"),
                    subtitle="",
                    get_value=lambda: f"{self._params.get_float(p + 'FollowHigh'):.2f}s",
-                   on_click=lambda: self._show_slider(p + "FollowHigh", 1.0, 3.0, step=0.05, unit="s", value_type="float"))
+                   on_click=lambda: self._show_slider(p + "FollowHigh", follow_min, 3.0, step=0.05, unit="s", value_type="float"))
       )
     rows.extend([
       SettingRow(f"{p}JerkAccel", "value", tr_noop("Accel Smoothness"),

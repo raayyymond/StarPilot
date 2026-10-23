@@ -506,7 +506,7 @@ def test_invalid_payload_never_writes(monkeypatch):
   client, params = _client(monkeypatch)
   for payload in (
     {"profile": "standard", "category": "braking", "preset": "custom", "curve": [True] * 10},
-    {"profile": "standard", "category": "following", "preset": "custom", "curve": [0.74] * 10},
+    {"profile": "standard", "category": "following", "preset": "custom", "curve": [0.39] * 10},
   ):
     response = client.put("/api/personality_profiles", json=payload)
     assert response.status_code == 400
@@ -868,7 +868,7 @@ def test_advanced_personality_values_require_numbers_in_supported_range(monkeypa
 def test_legacy_follow_values_require_numbers_in_supported_range(monkeypatch):
   client, params = _client(monkeypatch, {"IsOnroad": False})
   key = "AggressiveFollow"
-  for invalid in (True, "1.25", 0.49, 3.01):
+  for invalid in (True, "1.25", 0.39, 3.01):
     assert client.put("/api/params", json={"key": key, "value": invalid}).status_code == 400
   assert key not in params.values
 

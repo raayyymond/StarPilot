@@ -112,10 +112,10 @@ def test_every_state_affecting_personality_param_is_included_in_bulk_restore_par
 
 
 def test_legacy_follow_values_reject_coercion_and_out_of_range_inputs():
-  for invalid in (True, "1.25", math.nan, math.inf, 0.49, 3.01):
+  for invalid in (True, "1.25", math.nan, math.inf, 0.39, 3.01):
     with pytest.raises(ValueError):
       lpp.validate_personality_follow_value(invalid)
-  assert lpp.validate_personality_follow_value(0.5) == 0.5
+  assert lpp.validate_personality_follow_value(0.4) == 0.4
   assert lpp.validate_personality_follow_value(1.25) == 1.25
   assert lpp.validate_personality_follow_value(3) == 3.0
 
@@ -392,7 +392,7 @@ def test_profile_update_is_atomic_and_accepts_bounded_following_category():
   updated = update_personality_profile(updated, "standard", "following", "custom", following, True, False)
   assert profiles["standard"]["following"]["preset"] == "dom_default"
   assert updated["standard"]["following"] == {"preset": "custom", "curve": [round(value, 4) for value in following]}
-  for invalid in ([0.74] * 10, [3.01] * 10, [math.nan] * 10, [True] * 10, [1.0] * 9):
+  for invalid in ([0.39] * 10, [3.01] * 10, [math.nan] * 10, [True] * 10, [1.0] * 9):
     with pytest.raises(ValueError):
       update_personality_profile(updated, "standard", "following", "custom", invalid, True, False)
 

@@ -3843,7 +3843,7 @@ def _get_effective_legacy_following_curve(profile_id: str) -> list[float]:
       parsed = defaults[key]
     if not math.isfinite(parsed):
       parsed = defaults[key]
-    return float(np.clip(parsed, 0.5 if key == "TrafficFollow" else CURVE_BOUNDS["following"][0], CURVE_BOUNDS["following"][1]))
+    return float(np.clip(parsed, CURVE_BOUNDS["following"][0], CURVE_BOUNDS["following"][1]))
 
   if profile_id == "traffic":
     breakpoints = (0.0, 25.0 / CV.MPH_TO_MS)
