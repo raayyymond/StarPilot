@@ -55,9 +55,9 @@ def test_registered_half_second_follow_reaches_mpc_and_resets_to_stock_owner(tmp
 def test_sub_half_second_saved_value_remains_invalid_and_unmodified(tmp_path):
   params = Params(str(tmp_path))
   params.put_bool('CustomPersonalities', True, block=True)
-  params.put('TrafficFollow', .499, block=True)
+  params.put('TrafficFollow', .399, block=True)
   assert not read_traffic_settings(params).valid
-  assert params.get('TrafficFollow') == .499
+  assert params.get('TrafficFollow') == .399
 
 
 def test_half_second_headway_is_valid_approach_input_without_extra_steady_gap():
@@ -72,7 +72,7 @@ def test_half_second_headway_is_valid_approach_input_without_extra_steady_gap():
 @pytest.mark.parametrize("personality", [log.LongitudinalPersonality.aggressive,
                                         log.LongitudinalPersonality.standard,
                                         log.LongitudinalPersonality.relaxed])
-@pytest.mark.parametrize("follow", [0.5, 1.0, 3.0])
+@pytest.mark.parametrize("follow", [0.4, 0.5, 1.0, 3.0])
 def test_following_bounds_across_speed_personality_and_profiles(tmp_path, speed, personality, follow):
   params = Params(str(tmp_path))
   params.put_bool('CustomPersonalities', True, block=True)

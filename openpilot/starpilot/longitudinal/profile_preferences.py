@@ -23,8 +23,8 @@ SCALARS = {name: tuple(name.title() + suffix for suffix in SUFFIXES) for name in
 FLAGS = ()
 KEYS = ("CustomPersonalities", PERSONALITY_PROFILES_PARAM, *FLAGS,
         *(key for name in NAMES for key in SCALARS[name]))
-FOLLOW_MIN_SECONDS = 0.5
-TRAFFIC_SAVED_MIN_SECONDS = 0.5
+FOLLOW_MIN_SECONDS = 0.4  # operator ruling 2026-10-22 (was 0.5)
+TRAFFIC_SAVED_MIN_SECONDS = 0.4
 FOLLOW_MAX_SECONDS = 3.0
 JERK_MIN_PERCENT = 25.0
 JERK_MAX_PERCENT = 200.0

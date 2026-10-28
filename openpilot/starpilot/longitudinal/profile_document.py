@@ -42,7 +42,7 @@ FOLLOWING_PRESETS = ("dom_default", "close", "medium", "far", "traffic", "custom
 CURVE_BOUNDS = {
   "acceleration": (0.0, 3.5),
   "braking": (0.5, 2.0),
-  "following": (0.5, 3.0),
+  "following": (0.4, 3.0),  # operator ruling 2026-10-22: 0.4 s floor on every surface
 }
 _V2_CURVE_BOUNDS = {
   "acceleration": (0.0, 6.0),
@@ -52,7 +52,7 @@ _V2_CURVE_BOUNDS = {
 _V1_CURVE_BOUNDS = dict(_V2_CURVE_BOUNDS)
 # Dom's Traffic default is below the point editor's minimum. Keep it losslessly
 # after initialization/reset, while applying CURVE_BOUNDS to newly edited points.
-_V3_CURVE_BOUNDS = {**_V2_CURVE_BOUNDS, "braking": (0.35, 2.0), "following": (0.5, 3.0)}
+_V3_CURVE_BOUNDS = {**_V2_CURVE_BOUNDS, "braking": (0.35, 2.0), "following": (0.4, 3.0)}
 PERSONALITY_ADVANCED_PARAM_KEYS = frozenset(
   f"{profile}{suffix}"
   for profile in ("Traffic", "Aggressive", "Standard", "Relaxed")
@@ -92,8 +92,9 @@ def validate_personality_follow_value(raw_value) -> float:
   if not isinstance(raw_value, numbers.Real) or isinstance(raw_value, bool):
     raise ValueError("Following values must be JSON numbers.")
   value = float(raw_value)
-  if not math.isfinite(value) or value < 0.5 or value > 3.0:
-    raise ValueError("Following values must be between 0.5 and 3.0.")
+  low, high = CURVE_BOUNDS["following"]
+  if not math.isfinite(value) or value < low or value > high:
+    raise ValueError(f"Following values must be between {low} and {high}.")
   return round(value, 4)
 
 

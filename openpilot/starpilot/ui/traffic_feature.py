@@ -48,7 +48,7 @@ class TrafficFeature:
       number = float(raw) if raw is not None else float(self.params.get_default_value(key))
     except (TypeError, ValueError, OverflowError):
       return None, False
-    low = 0.5 if key.endswith("Follow") else 25.0
+    low = 0.4 if key.endswith("Follow") else 25.0
     high = 3.0 if key.endswith("Follow") else 200.0
     return number, math.isfinite(number) and low <= number <= high
 
@@ -70,7 +70,7 @@ class TrafficFeature:
       shown = str(value) if valid else "Invalid saved value"
       rows.append(FeatureRow(key, LABELS[key], shown, source[key], default_value=str(self.params.get_default_value(key)),
                              step=0.05 if key == FOLLOW else 5.0,
-                             minimum=0.5 if key == FOLLOW else 25.0,
+                             minimum=0.4 if key == FOLLOW else 25.0,
                              maximum=3.0 if key == FOLLOW else 200.0, unit=unit,
                              available=allowed and valid,
                              reason=(active_note + ". " + ("Following time at low speeds; blends toward Relaxed as speed rises." if key == FOLLOW else

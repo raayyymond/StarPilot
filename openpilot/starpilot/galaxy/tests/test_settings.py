@@ -915,7 +915,7 @@ class SettingsGatewayTest(unittest.TestCase):
     page = self.page("traffic")
     follow = next(i for i, row in enumerate(page["rows"]) if row["label"] == "Low-speed follow")
     self.assertTrue(page["rows"][follow]["action"])
-    self.assertEqual(page["rows"][follow]["minimum"], 0.5)
+    self.assertEqual(page["rows"][follow]["minimum"], 0.4)
     self.assertFalse(any(row["label"] == "Restore supported Traffic follow" for row in page["rows"]))
     intent = self.gateway.preview(page["view"], follow, 1, self.session, self.generation)
     path.write_bytes(b"0.6")

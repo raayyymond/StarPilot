@@ -540,7 +540,7 @@ class LongitudinalMpc:
   def update(self, radarstate, personality=log.LongitudinalPersonality.standard,
              *, follow_seconds: float | None = None, acceleration_max: float | None = None, stop_line_m: float | None = None, modelV2=None):
     t_follow = get_T_FOLLOW(personality)
-    if follow_seconds is not None and math.isfinite(follow_seconds) and 0.5 <= follow_seconds <= 3.0:
+    if follow_seconds is not None and math.isfinite(follow_seconds) and 0.4 <= follow_seconds <= 3.0:  # floor matches FOLLOW_MIN_SECONDS
       t_follow = follow_seconds
 
     model_leads = getattr(modelV2, "leadsV3", ()) if modelV2 is not None else ()

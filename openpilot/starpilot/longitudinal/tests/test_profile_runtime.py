@@ -250,7 +250,7 @@ class ProfileRuntimeTests(unittest.TestCase):
     assert first is not None
     self.assertAlmostEqual(first.follow_seconds, 1.50)  # Ordinary standard starts at 1.45 s.
     self.assertGreaterEqual(first.follow_seconds, min(1.45, target.follow_seconds))
-    invalid = ProfileTuning('traffic', 0.49, 1.0, 1.0, 1.0, 1.0, 1.0)
+    invalid = ProfileTuning('traffic', 0.39, 1.0, 1.0, 1.0, 1.0, 1.0)
     self.assertIsNone(smoother.sample(invalid, log.LongitudinalPersonality.standard, 0.05,
                                       traffic_mode=True))
     self.assertIsNone(smoother.applied)
