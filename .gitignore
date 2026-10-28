@@ -104,8 +104,9 @@ build/
 !.vscode/extensions.json
 !.vscode/*.code-snippets
 
-# agents
-.claude/
+# agents (shared skills are tracked; everything else under .claude/ stays local)
+.claude/*
+!.claude/skills/
 .context/
 PLAN.md
 TASK.md
