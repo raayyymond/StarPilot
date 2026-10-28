@@ -46,7 +46,7 @@ def test_disabled_update_preserves_original_gas_ramp_without_requesting_brakes()
   assert controller.bosch_gas_factor == controller.bosch_wind_factor == 1.0
 
 
-@pytest.mark.parametrize("identity,rate", ((CAR.HONDA_ACCORD, 50.0), (CAR.HONDA_INSIGHT, 150.0),
+@pytest.mark.parametrize("identity,rate", ((CAR.HONDA_ACCORD, 2000.0), (CAR.HONDA_CIVIC_BOSCH, 50.0), (CAR.HONDA_INSIGHT, 150.0),
                                          (CAR.ACURA_RDX_3G, 300.0), (CAR.ACURA_RDX_3G_MMR, 300.0)))
 def test_learning_uses_actual_vehicle_rate_and_driver_gas_override(identity, rate):
   controller = owner(identity)
@@ -60,7 +60,8 @@ def test_learning_uses_actual_vehicle_rate_and_driver_gas_override(identity, rat
 
 
 def test_braking_hysteresis_stopping_and_inactive_release():
-  controller = owner()
+  # the shared -0.12 / -0.02 thresholds; the Accord has its own (test_accord_brake_mode_arms_at_its_floor_...)
+  controller = owner(CAR.HONDA_CIVIC_BOSCH)
   cc, cs = inputs(state="off")
   assert controller.update(cc, cs, -0.13)[3]
   assert controller.update(cc, cs, -0.03)[3]
@@ -127,3 +128,26 @@ def test_actual_configure_loads_typed_factors_without_startup_rewrite():
     learning.owner.set_factors(1.2, 0.9)
     learning.persist(18000)
     assert writes == [("HondaGasFactorParams", 1.2), ("HondaWindFactorParams", 0.9)]
+
+
+def test_accord_brake_mode_arms_at_its_floor_in_the_owner():
+  # route bb (2026-10-21): the request band that armed the brake (-0.12..-0.23) now coasts on the Accord
+  controller = owner()
+  cc, cs = inputs(state="off")
+  assert not controller.update(cc, cs, -0.13)[3]
+  assert not controller.update(cc, cs, -0.44)[3]
+  assert controller.update(cc, cs, -0.46)[3]
+  assert controller.update(cc, cs, -0.21)[3]
+  assert not controller.update(cc, cs, -0.19)[3]
+
+
+def test_gas_learner_frozen_while_the_last_gas_sat_on_the_rail():
+  controller = owner(CAR.HONDA_CIVIC_BOSCH)
+  rail = controller.params.BOSCH_GAS_LOOKUP_V[-1]
+  cc, cs = inputs(measured=0.5)
+  controller.bosch_last_gas = rail
+  controller.update(cc, cs, 1.0)
+  assert controller.bosch_gas_factor == 1.0
+  controller.bosch_last_gas = rail - 1.0
+  controller.update(cc, cs, 1.0)
+  assert controller.bosch_gas_factor == pytest.approx(1.0 + 0.5 / 50.0)
