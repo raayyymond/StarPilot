@@ -15,6 +15,7 @@ from openpilot.common.realtime import config_realtime_process, DT_CTRL, Priority
 from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
+from opendbc.car.honda.values import CAR as HONDA_CAR, accord_angle_steer_ratio
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
@@ -55,6 +56,25 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
+
+# rev 6.2: a model lateral-accel demand at or past this, inside a lane-change state, is a TURN, not a lane change.
+# 1.5 m/s^2 sits above every lane change measured on route 76 (~0.5-0.7 m/s^2) and below the 2.1 m/s^2 the model
+# asked for at the corner the clamp held back.  Keyed on lateral acceleration, not curvature, so it cannot fire at a
+# crawl.  Applies only while lane-change smoothing is on.
+LANE_CHANGE_TURN_LAT_ACCEL = 1.5
+
+
+def lane_change_turn_latch(latched: bool, in_lane_change: bool, desired_curvature: float, v_ego: float) -> bool:
+  """Latch that says 'this lane-change state is really a corner'.
+
+  Clears whenever the lane-change state clears, and sets -- for the rest of that state -- the first frame the
+  model asks for LANE_CHANGE_TURN_LAT_ACCEL or more of lateral acceleration.  Latched rather than
+  instantaneous so a demand hovering at the threshold cannot chatter the smoothing clamp on and off
+  mid-manoeuvre.
+  """
+  if not in_lane_change:
+    return False
+  return bool(latched) or abs(float(desired_curvature)) * float(v_ego) ** 2 >= LANE_CHANGE_TURN_LAT_ACCEL
 
 
 class Controls:
@@ -105,6 +125,7 @@ class Controls:
       now_ns=0 if os.getenv('REPLAY') == '1' else time.monotonic_ns())
     self.lane_change_policy = self.lane_change_preferences.applied
     self.lane_change_smoother = LaneChangeSmoother()
+    self.lc_turn_latched = False
     self.lane_centering_host = LaneCenteringHost(self.params) if lane_runtime_supported(self.CP) else None
     self.torque_host = (TorqueHost(self.params, self.CP, allow_learning=(self.torque_learning_allowed
                         if self.lateral_controller_selection.policy is not None else None))
@@ -206,6 +227,9 @@ class Controls:
     torque_extension = getattr(self.LaC, 'starpilot_extension', None)
     if torque_extension is not None:
       sr = torque_extension.vehicle_model_ratio(sr, CS.vEgo)
+    if self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and self.CP.steerControlType == car.CarParams.SteerControlType.angle:
+      # angle-loop EPS: the variable-ratio rack map at the measured angle replaces the learner
+      sr = accord_angle_steer_ratio(CS.steeringAngleDeg - lp.angleOffsetDeg)
     self.VM.update_params(x, sr)
 
     steer_angle_without_offset = math.radians(CS.steeringAngleDeg - lp.angleOffsetDeg)
@@ -402,12 +426,23 @@ class Controls:
     previous_curvature = self.desired_curvature
     lane_policy_now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
     self.refresh_lane_change_policy(CS, model_v2, lane_policy_now_ns)
-    factor = self.lane_change_smoother.factor(
-      active=bool(CC.latActive and CS.canValid and not CS.canTimeout and self.sm.all_checks(['modelV2']) and
-                  self.lane_change_policy.enabled), lane_change_state=model_v2.meta.laneChangeState,
-      speed=CS.vEgo, minimum_speed=self.lane_change_policy.minimum_speed_mps,
-      duration=self.lane_change_policy.duration_s, previous=previous_curvature, desired=new_desired_curvature,
-      turn_assist=assist)
+    # rev 6.2 (2026-09-16): a corner is not a lane change.  Route 76: a nudgeless lane change auto-started by the turn
+    # blinker six seconds before a right turn held the setpoint 1.2-1.3 m/s^2 behind the model through the corner entry.
+    # A model demand past LANE_CHANGE_TURN_LAT_ACCEL inside a lane-change state latches the smoothing off for the rest of
+    # that state and releases it at once (relaxing a LIMIT is not a step in the output).  Lane-change smoothing is kept.
+    in_lane_change = model_v2.meta.laneChangeState in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
+    self.lc_turn_latched = lane_change_turn_latch(getattr(self, 'lc_turn_latched', False), in_lane_change,
+                                                  new_desired_curvature, CS.vEgo)
+    if self.lc_turn_latched:
+      self.lane_change_smoother.reset()
+      factor = 1.0
+    else:
+      factor = self.lane_change_smoother.factor(
+        active=bool(CC.latActive and CS.canValid and not CS.canTimeout and self.sm.all_checks(['modelV2']) and
+                    self.lane_change_policy.enabled), lane_change_state=model_v2.meta.laneChangeState,
+        speed=CS.vEgo, minimum_speed=self.lane_change_policy.minimum_speed_mps,
+        duration=self.lane_change_policy.duration_s, previous=previous_curvature, desired=new_desired_curvature,
+        turn_assist=assist)
     new_desired_curvature = limit_rate(CS.vEgo, previous_curvature, new_desired_curvature, factor)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, previous_curvature, new_desired_curvature, lp.roll)
     if self.last_lane_centering_result is not None and self.last_lane_centering_result.correction != 0.0:

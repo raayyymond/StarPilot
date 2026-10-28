@@ -97,6 +97,26 @@ class TestLagd(OpenpilotTestCase):
         put_cache(params, "CarParamsPrevRoute", CP, block=True)
         assert retrieve_initial_lag(params, CP) is None
 
+  def test_saved_params_dropped_when_steer_control_type_changes(self):
+    # a lag learned on the Accord's torque-map EPS must not seed its angle loop (and back)
+    params = Params()
+    torque_CP = car.CarParams.new_message(carFingerprint="HONDA_ACCORD", steerControlType=car.CarParams.SteerControlType.torque)
+    angle_CP = car.CarParams.new_message(carFingerprint="HONDA_ACCORD", steerControlType=car.CarParams.SteerControlType.angle)
+
+    msg = messaging.new_message('lateralDelay')
+    msg.lateralDelay.lateralDelayEstimate = 0.25
+    msg.lateralDelay.validBlocks = 50
+    msg.lateralDelay.version = VERSION
+    put_cache(params, "LiveDelay", msg, block=True)
+    put_cache(params, "CarParamsPrevRoute", torque_CP, block=True)
+    assert retrieve_initial_lag(params, angle_CP) is None
+    assert params.get("LiveDelay") is None
+
+    put_cache(params, "LiveDelay", msg, block=True)
+    lag, valid_blocks = retrieve_initial_lag(params, torque_CP)
+    assert abs(lag - 0.25) < 1e-6
+    assert valid_blocks == 50
+
   def test_ncc(self):
     rng = np.random.default_rng()
     lag_frames = random.randint(1, 19)

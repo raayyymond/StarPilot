@@ -372,6 +372,9 @@ def retrieve_initial_lag(params: Params, CP: car.CarParams):
         ld = last_lag_msg.lateralDelay
         if last_CP.carFingerprint != CP.carFingerprint:
           raise Exception("Car model mismatch")
+        # a lag learned under torque control does not describe an angle loop (and back): start from CP's value
+        if last_CP.steerControlType != CP.steerControlType:
+          raise Exception("Steer control type mismatch")
 
         lag, valid_blocks, status, version = ld.lateralDelayEstimate, ld.validBlocks, ld.status, ld.version
         assert valid_blocks <= BLOCK_NUM, "Invalid number of valid blocks"
