@@ -76,8 +76,8 @@ from openpilot.starpilot.ui.onroad_dm import DriverMonitorLayer
 from openpilot.starpilot.favorites.owner import FavoritesOwner
 from openpilot.starpilot.controllers.cruise_action import CruiseActionPublisher, ui_authority as cruise_action_authority
 from openpilot.starpilot.controllers.wheel_actions import WheelConsumer
-from openpilot.starpilot.system.android_auto.projection_bookmark import BookmarkReceiver
-from openpilot.starpilot.system.android_auto.projection_slc_action import SlcActionReceiver
+from openpilot.starpilot.system.starport.projection_bookmark import BookmarkReceiver
+from openpilot.starpilot.system.starport.projection_slc_action import SlcActionReceiver
 from openpilot.starpilot.controllers.mode_actions import ModeActionPublisher, producer_available, authority as mode_action_authority
 from openpilot.starpilot.favorites.actions import (BOOKMARK, CYCLE_PERSONALITY, EXPERIMENTAL, INCREASE_SPEED, DECREASE_SPEED, SET_SPEED,
                                                   FORCE_COAST, PULSE_GLIDE, DISENGAGE, TRAFFIC, SWITCHBACK, SCREEN_OFF, mapped_actions)

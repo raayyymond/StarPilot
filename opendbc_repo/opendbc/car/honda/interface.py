@@ -100,7 +100,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kiBP = [0., 5., 35.]
       ret.longitudinalTuning.kiV = [1.2, 0.8, 0.5]
 
-    eps_observations = [fw for fw in car_fw if fw.ecu == "eps"]
+    eps_observations = [fw for fw in car_fw if fw.ecu == "eps" and not fw.logging]
     # Accord angle-loop EPS firmware (39990-TVA,A16<letter>): the EPS closes the angle loop and openpilot sends the
     # setpoint.  Not a torque-modified EPS, so it is kept out of the MODIFIED_EPS_FW allow-list check below (which would
     # otherwise make the car dashcam-only).  Every EPS response must be the family; a mixed read falls through to it.

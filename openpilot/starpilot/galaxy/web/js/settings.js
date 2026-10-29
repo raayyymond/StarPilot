@@ -3,6 +3,7 @@ import { GxState } from "./state.js"
 import { connectionError } from "./polling.js"
 import { reactive, nextTick } from "../vendor/vue/vue.esm-browser.js"
 import { GalaxySettingRow, settingControl } from "./galaxy-setting-row.js"
+import { ReverseProxySettings } from "./reverse-proxy.js"
 import { OnroadLayoutPage } from "./onroad-layout.js"
 import { FavoritesPage } from "./favorites.js"
 import { SoundPacks } from "./sound-packs.js"
@@ -17,11 +18,12 @@ const post = (fetcher, path, body, signal) => fetcher(path, {
 
 export const SETTINGS_SECTIONS = Object.freeze([
   { id: "lateral", label: "Lateral (Steering)", icon: "bi-arrows-move", pages: ["aol", "lane_change", "torque", "lane"] },
-  { id: "longitudinal", label: "Longitudinal (Speed & Following)", icon: "bi-speedometer2", pages: ["profiles", "conditional", "curve", "slc", "aggressive", "standard", "relaxed", "traffic"] },
+  { id: "longitudinal", label: "Longitudinal (Speed & Following)", icon: "bi-speedometer2", pages: ["profiles", "conditional", "curve", "slc", "personalities", "aggressive", "standard", "relaxed", "traffic"] },
   { id: "wheel", label: "Wheel Controls", icon: "bi-controller", pages: ["wheel"] },
   { id: "visual", label: "Visual (Display & UI)", icon: "bi-eye", pages: ["appearance", "ui_layout", "favorites", "pip"] },
   { id: "sounds", label: "Sounds & Alerts", icon: "bi-volume-up", pages: ["sounds"] },
   { id: "device", label: "Device & Data", icon: "bi-hdd", pages: ["display", "data"] },
+  { id: "localization", label: "Localization", icon: "bi-globe", pages: ["localization"] },
   { id: "developer", label: "Developer", icon: "bi-code-slash", pages: ["developer"] },
 ])
 
@@ -256,7 +258,7 @@ export class SettingsFeed {
 
 export const SettingsPage = {
   emits: ["nested"],
-  components: { GxDialog, GxState, GalaxySettingRow, OnroadLayoutPage, FavoritesPage, SoundPacks, CloudProviderPage, GxNotice },
+  components: { GxDialog, GxState, GalaxySettingRow, OnroadLayoutPage, FavoritesPage, SoundPacks, CloudProviderPage, ReverseProxySettings, GxNotice },
   props: {
     mode: { type: String, required: true }, unauthorized: { type: Function, required: true },
     initialPage: { type: String, default: "hub" }, title: { type: String, default: "Toggles" },
@@ -347,7 +349,7 @@ export const SettingsPage = {
     },
     async openCropEditor() { (await import("./router.js")).navigate("/cameras/pip") },
     // The embedded editor switches targets through the routed editor, which keeps the leave guard.
-    async openLayoutTarget(target) { (await import("./router.js")).navigate(target === "projection" ? "/theme_maker/android_auto" : "/theme_maker") },
+    async openLayoutTarget(target) { (await import("./router.js")).navigate(target === "projection" ? "/theme_maker/starport" : "/theme_maker") },
     rowKey(row, index) { return `${this.state.data.page}:${row.key || row.page || index}` },
     closeLayout() { this.state.layoutOpen = false; this.state.section = "visual"; this.feed.start(this.initialPage) },
     closeFavorites() { this.state.favoritesOpen = false; this.state.section = "visual"; this.feed.start("hub") },
@@ -435,6 +437,7 @@ export const SettingsPage = {
       <template v-else>
         <GxNotice v-if="state.data && state.data.vehicleIdentified === false" tone="info">Vehicle not identified yet. Turn on the car and wait for fingerprinting; vehicle-specific settings will then appear here.</GxNotice>
         <CloudProviderPage ref="cloudProvider" v-if="state.developerOpen" :mode="mode" :unauthorized="unauthorized" />
+        <ReverseProxySettings v-if="state.developerOpen" :mode="mode" :unauthorized="unauthorized" />
         <GxState v-if="state.status === 'loading'" loading>Reading your device’s saved preferences…</GxState>
         <GxNotice tone="danger" v-else-if="state.status === 'unavailable' && !state.error">The device could not read these preferences. Reconnecting automatically…</GxNotice>
         <GxNotice tone="danger" v-if="state.error">{{ state.error }}

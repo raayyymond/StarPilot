@@ -6,127 +6,127 @@
       "reason": "Skipped: netifaces not installed",
       "source_blob": "e0f6abb458d61bfedc6df4aa7d1983e385d941d3"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_apk_identity.py::test_real_android_auto_17_6_xapk": {
+    "openpilot/starpilot/system/starport/tests/test_apk_identity.py::test_real_starport_17_6_xapk": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "real_xapk",
       "reason": "Skipped: the user's own Android Auto XAPK is not in .cache/",
-      "source_blob": "a58afe41442cdbd4fa42f40da6b7596b4bf0f900"
+      "source_blob": "b642d677dcabd4d51f8379dd05d9c72cdcf35f37"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-32-18-0-0]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-32-18-0-0]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-32-18-4-2]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-32-18-4-2]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-32-20-3-5]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-32-20-3-5]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-40-18-0-6]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[False-40-18-0-6]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-32-18-0-0]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-32-18-0-0]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-32-18-4-2]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-32-18-4-2]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-32-20-3-5]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-32-20-3-5]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-40-18-0-6]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_composed_car_frame_converts_to_the_same_picture[True-40-18-0-6]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[False-32-18-0-0]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[False-32-18-0-0]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[False-32-18-4-2]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[False-32-18-4-2]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[False-32-20-3-5]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[False-32-20-3-5]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[True-32-18-0-0]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[True-32-18-0-0]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[True-32-18-4-2]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[True-32-18-4-2]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
-    "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[True-32-20-3-5]": {
+    "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py::test_fused_projection_conversion_matches_rgba_composition[True-32-20-3-5]": {
       "basis": "Existing exact capability guard, preserved from8b9338a0; skipped remains unavailable, never passed",
       "guard": "gpu_env",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6"
+      "source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753"
     },
     "openpilot/starpilot/ui/tests/test_onroad_map.py::test_overlay_draws_heading_up_roads_route_and_soft_edges": {
       "basis": "Existing map fixture alias gl=test_gpu_nv12.gpu; both consumer and shared guard definition pinned; unavailable remains SKIPPED, never passed",
       "guard": "gpu_env",
-      "guard_source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6",
-      "guard_source_path": "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py",
+      "guard_source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753",
+      "guard_source_path": "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "606859b459240ea1e73a4542ab901a782a9b001e"
+      "source_blob": "b3784c7cc0ed58db03aab594c335341a2a11dd1a"
     },
     "openpilot/starpilot/ui/tests/test_onroad_map.py::test_overlay_opacity_fades_map_background": {
       "basis": "Existing map fixture alias gl=test_gpu_nv12.gpu; both consumer and shared guard definition pinned; unavailable remains SKIPPED, never passed",
       "guard": "gpu_env",
-      "guard_source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6",
-      "guard_source_path": "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py",
+      "guard_source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753",
+      "guard_source_path": "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "606859b459240ea1e73a4542ab901a782a9b001e"
+      "source_blob": "b3784c7cc0ed58db03aab594c335341a2a11dd1a"
     },
     "openpilot/starpilot/ui/tests/test_onroad_map.py::test_overlay_without_gps_waits_without_drawing_roads": {
       "basis": "Existing map fixture alias gl=test_gpu_nv12.gpu; both consumer and shared guard definition pinned; unavailable remains SKIPPED, never passed",
       "guard": "gpu_env",
-      "guard_source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6",
-      "guard_source_path": "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py",
+      "guard_source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753",
+      "guard_source_path": "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "606859b459240ea1e73a4542ab901a782a9b001e"
+      "source_blob": "b3784c7cc0ed58db03aab594c335341a2a11dd1a"
     },
     "openpilot/starpilot/ui/tests/test_onroad_map.py::test_route_stays_bright_at_minimum_map_opacity": {
       "basis": "Existing map fixture alias gl=test_gpu_nv12.gpu; both consumer and shared guard definition pinned; unavailable remains SKIPPED, never passed",
       "guard": "gpu_env",
-      "guard_source_blob": "d9d6f940a5c752a14e861c954c765f450a2953d6",
-      "guard_source_path": "openpilot/starpilot/system/android_auto/tests/test_gpu_nv12.py",
+      "guard_source_blob": "242e8c56fe75b4eb9422bfa2424a91d8d98c8753",
+      "guard_source_path": "openpilot/starpilot/system/starport/tests/test_gpu_nv12.py",
       "reason": "Skipped: STARPILOT_AUTO_GL_TEST=1 enables tests requiring a real graphics context",
-      "source_blob": "606859b459240ea1e73a4542ab901a782a9b001e"
+      "source_blob": "b3784c7cc0ed58db03aab594c335341a2a11dd1a"
     }
   },
   "independent_functions": {
@@ -1844,7 +1844,7 @@
       "cases": 46,
       "seconds": 0.13803778700071234
     },
-    "openpilot/starpilot/galaxy/test_android_auto_http.py": {
+    "openpilot/starpilot/galaxy/test_starport_http.py": {
       "basis": "Exact 65660a4 hosted main40623875380: all 39 nodes passed, 3.334134s setup/call/teardown; 25% estimate margin, retaining any higher same-source prior estimate. Scheduling only; no test deadline change.",
       "blob": "94be2511e9f71babb5ee3398cf9ec3603f6be1b4",
       "cases": 39,
@@ -1982,25 +1982,25 @@
       "cases": 936,
       "seconds": 1.740757
     },
-    "openpilot/starpilot/system/android_auto/tests/test_android_auto.py": {
+    "openpilot/starpilot/system/starport/tests/test_starport.py": {
       "basis": "Exact 65660a4 hosted main40623875380: all 72 nodes passed, 22.037476s setup/call/teardown; 25% estimate margin, retaining any higher same-source prior estimate. Scheduling only; no test deadline change.",
       "blob": "c4c3d21bea7d749438afeb20886652bca06208bb",
       "cases": 72,
       "seconds": 27.546846
     },
-    "openpilot/starpilot/system/android_auto/tests/test_bugsink_report.py": {
+    "openpilot/starpilot/system/starport/tests/test_bugsink_report.py": {
       "basis": "Exact 65660a4 hosted main40623875380: all 33 nodes passed, 0.737380s setup/call/teardown; 25% estimate margin, retaining any higher same-source prior estimate. Scheduling only; no test deadline change.",
       "blob": "b759b5e8dc1c52623809ff957bc282ca31c7e539",
       "cases": 33,
       "seconds": 0.921725
     },
-    "openpilot/starpilot/system/android_auto/tests/test_nav_status.py": {
+    "openpilot/starpilot/system/starport/tests/test_nav_status.py": {
       "basis": "max per-case complete phase seconds across hosted runs40231700807 and40235133424",
       "blob": "b89014e81c9632bc657b0230f4420f6645e195f1",
       "cases": 53,
       "seconds": 0.07452517499984879
     },
-    "openpilot/starpilot/system/android_auto/tests/test_projection_favorites.py": {
+    "openpilot/starpilot/system/starport/tests/test_projection_favorites.py": {
       "basis": "Exact 65660a4 hosted main40623875380: all 30 nodes passed, 0.129013s setup/call/teardown; 25% estimate margin, retaining any higher same-source prior estimate. Scheduling only; no test deadline change.",
       "blob": "f764ed41b38f0316097995fa73640981f3942240",
       "cases": 30,

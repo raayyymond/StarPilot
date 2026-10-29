@@ -22,6 +22,7 @@ from openpilot.starpilot.longitudinal.accel_profile import A_CRUISE_MAX_VALS_TRA
 from openpilot.starpilot.longitudinal.profile_runtime import TRAFFIC_CRUISE_BRAKE_MAGNITUDE
 from openpilot.starpilot.longitudinal.lead_approach_runtime import KEY as LEAD_APPROACH_KEY
 from openpilot.starpilot.longitudinal.lead_takeoff_preferences import KEY as LEAD_TAKEOFF_KEY
+from openpilot.starpilot.longitudinal.encouragement import KEY as NUDGE_KEY
 from openpilot.starpilot.longitudinal.planner_selection import KEY as PLANNER_SELECTION_KEY, save_selection
 
 from openpilot.starpilot.longitudinal.profile_document import (
@@ -88,6 +89,7 @@ BOOL_DEFAULTS = {
   "CustomPersonalities": False, PLANNER_SELECTION_KEY: True,
   LEAD_APPROACH_KEY: False,
   LEAD_TAKEOFF_KEY: False,
+  NUDGE_KEY: True,
   CURVE_MASTER_KEY: False, CURVE_NO_LEAD_KEY: False,
   "ShowCSCStatus": False,
   "ForceAutoTuneOff": False, "AlwaysOnLateral": True, "NostalgiaMode": False,
@@ -474,7 +476,7 @@ class FeatureSettingsOwner:
       return None
 
   def _apply_lead_preference(self, request: FeatureSettingsRequest) -> bool:
-    if (request.key not in (LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY) or request.value not in ("On", "Off") or
+    if (request.key not in (LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY, NUDGE_KEY) or request.value not in ("On", "Off") or
         request.dependencies or request.capability is not None or request.vehicle_fingerprint is not None):
       return False
     if request.expected not in (None, b"0", b"1"):
@@ -827,8 +829,12 @@ class FeatureSettingsOwner:
           self.gm_ev_preset.capability() is not None or self.volt_radar.capability() is not None or
           self.panda_wake.capability() is not None or preap_radar_capability(self.vehicle_params()) is not None):
         rows.append(FeatureRow("", "Vehicle Settings", "Configure features supported by your vehicle", page=FeaturePage.VEHICLE, available=True))
-      rows.extend(FeatureRow("", name.title() + " Personality", "", page=name, available=True)
-                  for name in (*PROFILE_NAMES, "traffic"))
+      rows.append(FeatureRow("", "Driving Personalities", "Adjust Aggressive, Standard, Relaxed and Traffic profiles",
+                             page=FeaturePage.PERSONALITIES, available=True))
+    elif page == FeaturePage.PERSONALITIES:
+      title = "Driving Personalities"
+      rows = [FeatureRow("", name.title() + " Personality", "", page=name, available=True)
+              for name in (*PROFILE_NAMES, "traffic")]
     elif page == FeaturePage.VEHICLE:
       title = "Vehicle Settings"
       rows = list(self._alpha_long_rows(parked))
@@ -1148,6 +1154,9 @@ class FeatureSettingsOwner:
       rows.append(self._bool_row(LEAD_TAKEOFF_KEY, "Faster Takeoffs", self.authority("preferences"),
                                 reason="Improves launches from a stop and responds sooner when a lead starts moving. " +
                                        "Selected acceleration profiles, stop detection and vehicle limits still apply."))
+      rows.append(self._bool_row(NUDGE_KEY, "Experimental Speed Nudge", self.authority("preferences"),
+                                reason="Gently recovers toward set speed when Experimental mode hesitates on a clear road. " +
+                                       "Leads, stops, curve limits and driver overrides retain priority."))
       document, raw, valid = self._document()
       for category, field, label, choices in (
         ('acceleration', 'selectedAccelerationProfile', 'Selected Acceleration Profile',
@@ -1160,7 +1169,8 @@ class FeatureSettingsOwner:
                                preset_label(selected) if valid else 'Invalid document', raw,
                                tuple(preset_label(choice) for choice in choices) if valid else (),
                                available=allowed and valid,
-                               reason='Personalities set to Selected Profile follow this choice; explicit overrides stay unchanged.',
+                               reason=(CATEGORY_HELP[category] if category == 'braking' else
+                                       'Personalities set to Selected Profile follow this choice; explicit overrides stay unchanged.'),
                                default_value=preset_label('dom_default' if category == 'acceleration' else DEFAULT_DECELERATION_PROFILE)))
       health = read_profile_health(self.params)
       master = health.values["CustomPersonalities"]
@@ -1260,7 +1270,7 @@ class FeatureSettingsOwner:
                                    capability=capability, dependencies=traffic_dependencies,
                                    default_value=str(round(max(low, min(high, default_curve[index])), 4))))
     fingerprint = self.vehicle_fingerprint()
-    rows = [replace(row, vehicle_fingerprint=None if row.key in (PLANNER_SELECTION_KEY, LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY,
+    rows = [replace(row, vehicle_fingerprint=None if row.key in (PLANNER_SELECTION_KEY, LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY, NUDGE_KEY,
                                                               "ShowSpeedLimits", "AlwaysAllowUploads") or
                     row.key.startswith('conditional:') and not row.key.startswith(BUTTON_PREFIX) else fingerprint)
             for row in rows]
@@ -1374,7 +1384,7 @@ class FeatureSettingsOwner:
         return False
       return save_selection(self.params, request.value, request.expected,
                             authorized=lambda: self.authority("preferences"))
-    if key in (LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY):
+    if key in (LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY, NUDGE_KEY):
       return self._apply_lead_preference(request)
     if key in CRUISE_KEYS:
       return self._apply_cruise(request)
