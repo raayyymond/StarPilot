@@ -14,6 +14,21 @@ an open source driver assistance system.
 **This is the StarPilot 7.0 development branch (`SecretGoodStarPilot`). Feature migration,
 vehicle qualification, and Auto Learn validation are still in progress.**
 
+## This fork: 2020 Honda Accord (`raayyymond/StarPilot`, branch `dev`)
+
+Upstream `firestar5683/StarPilot` `Dom`, merged regularly, plus the changes below. The car runs the
+angle-loop EPS firmware (`39990-TVA,A16C`); its contract and numbers are in [docs/ACCORD.md](docs/ACCORD.md).
+Newest first. Each entry names the drive that found it.
+
+| Date | Area | Change | Why |
+|---|---|---|---|
+| 2026-10-29 | StarPort | Wi-Fi join pinned to the adapter's channel/BSSID with a scan on every retry; adapter restart (repeat `WifiVersionRequest`) restarts the handshake at once; projection focus re-requested when the head unit never grants it | AA took ~3 min to connect, then never showed (drive `00000008--30ceb9ab86`) |
+| 2026-10-29 | Longitudinal | Lead takeoff clamps standstill `vEgo` jitter (−0.0002 m/s) to 0 | Each negative reading reset the takeoff, so the car sat ~2.5 s after the lead left (segs 4, 6) |
+| 2026-10-29 | UI | StarPilot torque bar shows the Accord setpoint−wheel angle error | It showed a lateral-accel estimate minus road roll; the device's +1.87° roll bias drew a constant left pull |
+| 2026-10-27 | Longitudinal | Following-distance floor 0.4 s on every surface | 7.0 port of the 6.x behaviour |
+| 2026-10-27 | Controls, UI | Angle-mode rack map, saturation from the limiter, lane-change turn gate, lagd guard, angle-error torque bar | Accord angle-loop EPS port to 7.0 |
+| 2026-10-27 | Honda | Bosch gas learner ÷2000 with rail freeze; brake arms at −0.45 / releases at −0.20 | Launch jerk and set-speed brake ping-pong |
+
 Openpilot provides
 * Automated Lane Centering
 * Adaptive Cruise Control
