@@ -1,7 +1,7 @@
 # Accord durable facts (fork side)
 
 Short, stable facts an agent needs before touching the Accord code. Evidence for each lives in the
-kit repo `C:/Users/dudei/Desktop/Projects/accord-eps-torque-mod`: `docs/STATE.md` (current state),
+kit repo `~/Desktop/Projects/accord-eps-torque-mod`: `docs/STATE.md` (current state),
 `docs/BUILD-LINEAGE*.md` (every flashed firmware and what it did), `docs/handoffs/<YYYY-MM>/`
 (session narratives). Values below are read from the fork code on `dev` (2026-10-27); the code is
 the source of truth if they drift.

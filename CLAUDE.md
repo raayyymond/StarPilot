@@ -2,7 +2,7 @@
 
 Operator's fork of `firestar5683/StarPilot`. **Fork-only car work happens here.** Firmware work, and
 anything that needs firmware + fork together, happens in the kit repo
-`C:/Users/dudei/Desktop/Projects/accord-eps-torque-mod` (read-only from here). This file is an INDEX.
+`~/Desktop/Projects/accord-eps-torque-mod` (read-only from here). This file is an INDEX.
 Keep it short; durable facts go in `docs/ACCORD.md`, not here.
 
 ## 🛑 Load `openpilot-iteration` before any control change
@@ -49,7 +49,7 @@ Tests that pin it:
 
 ## Python and tests
 
-- Python = `C:/Users/dudei/anaconda3/envs/bin_decompile/python.exe`. **Never `python3`** (Windows
+- Python = `~/anaconda3/envs/bin_decompile/python.exe`. **Never `python3`** (Windows
   Store stub).
 - Local tests need, in Windows path form:
   `PYTHONPATH="<root>;<root>/opendbc_repo;<root>/msgq_repo;<root>/rednose_repo;<root>/panda"`.
