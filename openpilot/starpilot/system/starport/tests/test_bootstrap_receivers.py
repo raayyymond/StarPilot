@@ -22,6 +22,8 @@ def scripted(frames, *, ping_interval=bs.JOIN_PING_INTERVAL):
   queue = list(frames)
 
   def receive(timeout):
+    if boot.queue:  # frames the bootstrap put back, as the real next_frame reads them first
+      return boot.queue.pop(0)
     if queue:
       item = queue.pop(0)
       if isinstance(item, BaseException):
@@ -100,3 +102,42 @@ def test_stop_during_the_join_is_not_reported_as_connected():
   with pytest.raises(bs.BootstrapError, match="cancelled"):
     boot.run(join, cancelled=stop.is_set)
   assert bs.WIFI_CONNECT_STATUS not in sent
+
+
+def test_adapter_restarting_during_the_join_is_answered_on_the_same_link():
+  # 2026-10-29 OTTOCAST: ~12 s after WifiStartResponse the adapter asks for the version again, then resets RFCOMM.
+  restart = [(bs.WIFI_VERSION_REQUEST, field(1, 1) + field(2, 7)), (bs.WIFI_START_REQUEST, ENDPOINT), (bs.WIFI_INFO_RESPONSE, INFO)]
+  boot, sent = scripted([(bs.WIFI_START_REQUEST, ENDPOINT), (bs.WIFI_INFO_RESPONSE, INFO)])
+  arrived = []
+  scripted_receive = boot.next_frame.side_effect
+  boot.next_frame.side_effect = lambda timeout: arrived.pop(0) if arrived and not boot.queue else scripted_receive(timeout)
+  joins, first_join_stopped = [], threading.Event()
+
+  def join(credentials):
+    joins.append(credentials)
+    if len(joins) == 1:
+      arrived.extend(restart)  # the adapter gives up while we are still joining
+      while not boot.join_is_cancelled():
+        time.sleep(0.01)
+      first_join_stopped.set()
+      raise RuntimeError("cancelled")
+
+  result = boot.run(join)
+  assert first_join_stopped.is_set() and len(joins) == 2 and result.version == (1, 7)
+  assert sent.count(bs.WIFI_VERSION_RESPONSE) == 1 and sent.count(bs.WIFI_START_RESPONSE) == 2
+  assert sent[-1] == bs.WIFI_CONNECT_STATUS and sent.count(bs.WIFI_CONNECT_STATUS) == 1  # no failure reported for the first join
+
+
+def test_an_adapter_that_keeps_restarting_fails_the_attempt():
+  restart = (bs.WIFI_VERSION_REQUEST, field(1, 1) + field(2, 7))
+  boot, sent = scripted([(bs.WIFI_START_REQUEST, ENDPOINT), (bs.WIFI_INFO_RESPONSE, INFO)] +
+                        [restart, (bs.WIFI_START_REQUEST, ENDPOINT), (bs.WIFI_INFO_RESPONSE, INFO)] *
+                        (bs.MAX_HANDSHAKE_RESTARTS + 1))
+
+  def join(credentials):
+    while not boot.join_is_cancelled():
+      time.sleep(0.01)
+    raise RuntimeError("cancelled")
+
+  with pytest.raises(bs.BootstrapError, match="kept restarting"):
+    boot.run(join)

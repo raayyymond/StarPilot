@@ -51,6 +51,11 @@ BSSID_SHARE = 0.75
 CONNECTION_ID = "starpilot-starport"
 SECURITY_WPA3 = (32,)
 AUTOCONNECT_MARKER = DATA_DIR / "wifi_autoconnect_paused.json"
+# A wireless adapter gives up ~12 s after sending its network (2026-10-29 OTTOCAST), and NetworkManager spent 6-15 s of
+# that scanning every channel for a hidden SSID. Where this interface already sees the car's BSSID broadcasting, pin it
+# to that channel; a sighting older than this may be from before the access point restarted on another channel.
+AP_FRESH_S = 30.0
+SCAN_REUSE_S = 5.0  # a scan requested this recently (device preparation just before the join) is not asked for again
 
 
 class NetworkError(RuntimeError):
@@ -63,6 +68,11 @@ class DedicatedUnavailable(NetworkError):
 
 class JoinTimeout(NetworkError):
   """The car's network never came up in time."""
+
+
+def _boottime() -> float:
+  """NetworkManager's AccessPoint.LastSeen clock."""
+  return time.clock_gettime(time.CLOCK_BOOTTIME) if hasattr(time, "CLOCK_BOOTTIME") else time.monotonic()
 
 
 def _boot_id() -> str:
@@ -104,14 +114,29 @@ def recover_autoconnect(log: Callable[..., None], marker: Path = AUTOCONNECT_MAR
   return True
 
 
-def connection_settings(credentials: WifiCredentials, interface: str) -> dict:
+def band_channel(frequency: int) -> tuple[str, int] | None:
+  """NetworkManager's band and channel for a frequency in MHz, or None outside 2.4/5 GHz."""
+  if frequency == 2484:
+    return "bg", 14
+  if 2412 <= frequency <= 2472 and (frequency - 2407) % 5 == 0:
+    return "bg", (frequency - 2407) // 5
+  if 5000 < frequency <= 5895 and frequency % 5 == 0:
+    return "a", (frequency - 5000) // 5
+  return None
+
+
+def connection_settings(credentials: WifiCredentials, interface: str, frequency: int = 0, hidden: bool = True) -> dict:
+  """``frequency``/``hidden=False`` only for a BSSID this interface saw broadcasting: a profile that is not hidden never
+  matches a hidden access point, and a pinned channel never finds one that moved."""
   wireless = {
     "ssid": ("ay", credentials.ssid.encode("utf-8")),
     "mode": ("s", "infrastructure"),
-    "hidden": ("b", True),  # projection networks are often hidden; harmless when broadcast
+    "hidden": ("b", hidden or not credentials.bssid),  # projection networks are often hidden; harmless when broadcast
   }
   if credentials.bssid:
     wireless["bssid"] = ("ay", bytes.fromhex(credentials.bssid.replace(":", "")))
+    if (pinned := band_channel(frequency)) is not None:
+      wireless["band"], wireless["channel"] = ("s", pinned[0]), ("u", pinned[1])
   settings = {
     "connection": {
       "type": ("s", "802-11-wireless"),
@@ -153,6 +178,7 @@ class NetworkLease:
     self.device_ready = False
     self.autoconnect_paused = False
     self.marker = AUTOCONNECT_MARKER
+    self.scan_requested_at = -SCAN_REUSE_S
     self._lock = threading.Lock()
 
   def _open(self) -> DBusRouter:
@@ -263,10 +289,12 @@ class NetworkLease:
         except NetworkError:
           pass
       self._delete_stale_profiles()
+      frequency = self._seen_frequency(credentials) if credentials.bssid else 0
+      self._request_scan()  # every attempt: a retry's access point may have restarted since the last scan
       self.log("wifi_joining", interface=self.interface, **{k: v for k, v in credentials.describe().items() if k != "key_length"},
-               had_previous=bool(self.previous_connection))
+               had_previous=bool(self.previous_connection), pinned_freq=frequency)
       body = self._call(NM_PATH, NM_IFACE, "AddAndActivateConnection2", "a{sa{sv}}ooa{sv}",
-                        (connection_settings(credentials, self.interface), self.device_path, "/",
+                        (connection_settings(credentials, self.interface, frequency, hidden=not frequency), self.device_path, "/",
                          {"persist": ("s", "volatile")}), timeout=15.0)
       self.connection_path, self.active_path = body[0], body[1]
 
@@ -290,6 +318,32 @@ class NetworkLease:
       self._check_overlap()
     self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **self._radio())
     return self.local_ip
+
+  def _seen_frequency(self, credentials: WifiCredentials) -> int:
+    """The channel this interface recently saw the car's BSSID broadcast its SSID on, or 0."""
+    try:
+      body = self._call(self.device_path, NM_WIRELESS_IFACE, "GetAllAccessPoints")
+      for access_point in body[0] if body else []:
+        if self._get(access_point, NM_AP_IFACE, "HwAddress").upper() != credentials.bssid:
+          continue
+        last_seen = int(self._get(access_point, NM_AP_IFACE, "LastSeen"))
+        if (bytes(self._get(access_point, NM_AP_IFACE, "Ssid")) != credentials.ssid.encode("utf-8") or
+            last_seen < 0 or _boottime() - last_seen > AP_FRESH_S):
+          return 0
+        return int(self._get(access_point, NM_AP_IFACE, "Frequency"))
+    except (NetworkError, TypeError, ValueError):
+      pass
+    return 0
+
+  def _request_scan(self) -> None:
+    if time.monotonic() - self.scan_requested_at < SCAN_REUSE_S:
+      return
+    try:
+      self._call(self.device_path, NM_WIRELESS_IFACE, "RequestScan", "a{sv}", ({},))
+      self.scan_requested_at = time.monotonic()
+      self.log("wifi_scan_requested", interface=self.interface)
+    except NetworkError as error:
+      self.log("wifi_scan_request_failed", error=str(error))
 
   def _frequency(self, path: str) -> int:
     access_point = self._get(path, NM_WIRELESS_IFACE, "ActiveAccessPoint")
@@ -333,11 +387,7 @@ class NetworkLease:
       self._wait_step(deadline, cancelled, f"NetworkManager did not take {self.interface}")
     self.device_ready = True
     # A new interface has never scanned, so the car's BSSID would be rejected until a scan finds it.
-    try:
-      self._call(path, NM_WIRELESS_IFACE, "RequestScan", "a{sv}", ({},))
-      self.log("wifi_scan_requested", interface=self.interface)
-    except NetworkError as error:
-      self.log("wifi_scan_request_failed", error=str(error))
+    self._request_scan()
 
   def _pause_autoconnect(self) -> None:
     """Keep NetworkManager from rejoining home Wi-Fi between attempts; release(restore=True) turns it back on."""

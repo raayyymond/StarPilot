@@ -67,6 +67,11 @@ USB_CONFIGURE_WAIT = 15.0    # slower receivers need time to enumerate after the
 LINK_CHECK_INTERVAL = 1.0    # how often the link watcher asks whether the car's Wi-Fi is still up
 LINK_CHECK_SLOW = 1.0        # a link check slower than this is logged (NetworkManager answers over D-Bus)
 STREAM_STALL_LOG = 1.0       # a streaming loop pass slower than this is logged
+# A head unit that answers the first VideoFocusRequest with native focus and then stays silent (2026-10-29 Honda,
+# 15 min with no frames) is asked again: after this long, then every FOCUS_RETRY_INTERVAL, at most FOCUS_RETRIES times.
+FOCUS_RETRY_FIRST = 3.0
+FOCUS_RETRY_INTERVAL = 10.0
+FOCUS_RETRIES = 5
 REPORTED_SETTINGS = ("connection", "usb_mode", "view", "encoder", "fps", "bitrate_kbps", "rate_control", "gpu_nv12",
                      "async_readback", "wifi_interface", "dedicated_wifi_interface", "verify_head_unit", "version_status",
                      "rfcomm_channel", "phone_class", "auto_connect")
@@ -1563,6 +1568,8 @@ class Supervisor:
     wait_for_frame = False
     audio = getattr(session, "audio", None)
     nav = getattr(session, "nav", None)
+    focus_retries = 0
+    next_focus_retry = started + FOCUS_RETRY_FIRST
     self._stage("streaming")
     while not self._stop.is_set():
       pass_started = time.monotonic()
@@ -1608,6 +1615,12 @@ class Supervisor:
       for action in source.drain_controls():
         if action == NATIVE_FOCUS:
           session.request_native()
+      # Only while the car has never granted focus this session: once it has, native focus is the driver's choice.
+      if session.focus_epoch == 0 and not session.focused and focus_retries < FOCUS_RETRIES and now >= next_focus_retry:
+        focus_retries += 1
+        next_focus_retry = now + FOCUS_RETRY_INTERVAL
+        session.request_projection()
+        self.log("projection_rerequested", attempt=focus_retries, after_s=round(now - started, 1))
       state = "streaming" if session.focused else "suspended"
       if self._status["state"] != state:
         self._set(state=state)
