@@ -1,3 +1,41 @@
+# raayyymond/StarPilot: 2020 Honda Accord fork
+
+This fork tracks upstream [firestar5683/StarPilot](https://github.com/firestar5683/StarPilot) `Dom` (merged
+regularly into `dev`) and adds what one 2020 Honda Accord needs. That car runs a modified EPS firmware
+(`39990-TVA,A16C`) that closes its own 1 kHz angle loop, so openpilot steers it by **angle**, not torque.
+Everything below is gated to that car (`HondaFlags.EPS_ANGLE_LOOP_FW`, detected from the EPS firmware string)
+unless noted; other cars behave as upstream. Contract and numbers: [docs/ACCORD.md](docs/ACCORD.md).
+
+**How it differs from upstream**
+
+- **Steering by angle (opendbc Honda).** EPS firmware detection selects `steerControlType = angle`. The
+  carcontroller sends an angle setpoint on 0xE4 with the arm bit every frame, holds the measured angle when
+  idle, clips the setpoint error to the firmware's per-speed limits, and limits rate (250 °/s) and lateral
+  accel/jerk. The DBC and carstate decode the angle-loop signals.
+- **Lateral control (controlsd, latcontrol_angle, lagd).** A variable-ratio rack map replaces the learned steer
+  ratio. Saturation comes from the carcontroller's limiter rather than a raw angle-error threshold. On all
+  cars, lagd discards a lag learned under the other steer control type.
+- **Lane changes (all cars).** A lane-change state whose model demand reaches 1.5 m/s² is treated as a turn,
+  so lane-change smoothing no longer holds the car back through a corner.
+- **Longitudinal (Bosch Honda).** The gas-factor learner divides by 2000 and freezes on the gas rail, which
+  removes the launch jerk. The brake arms at −0.45 and releases at −0.20, which stops the set-speed brake
+  ping-pong.
+- **Following distance (all cars).** The floor is 0.4 s (upstream 0.5 s) in the planner, the profiles and
+  Galaxy.
+- **Lead takeoff (all cars).** Standstill speed jitter (−0.0002 m/s) is clamped to 0 so it can no longer reset
+  the takeoff, which left the car sitting after the lead pulled away.
+- **Torque bar.** On the Accord it shows the setpoint-minus-wheel angle error against the current limit,
+  instead of a lateral-accel estimate that drew the device's roll bias as a constant pull.
+- **StarPort / Android Auto (all cars).** The wireless join is pinned to the adapter's channel and access point,
+  with a scan on every retry. An adapter that restarts the handshake is answered on the same link. Projection
+  focus is requested again when the head unit never grants it.
+- **Tooling.** `CLAUDE.md`, `docs/ACCORD.md` and `.claude/skills/` hold the agent context for this car.
+
+Branches: `dev` (work), `accord-PTM` (frozen V300 release), `dev-dom6` (pre-7.0 line). Firmware lives in a
+separate kit repo; nothing here sends CAN or flashes.
+
+---
+
 # StarPilot
 
 
@@ -13,21 +51,6 @@ an open source driver assistance system.
 
 **This is the StarPilot 7.0 development branch (`SecretGoodStarPilot`). Feature migration,
 vehicle qualification, and Auto Learn validation are still in progress.**
-
-## This fork: 2020 Honda Accord (`raayyymond/StarPilot`, branch `dev`)
-
-Upstream `firestar5683/StarPilot` `Dom`, merged regularly, plus the changes below. The car runs the
-angle-loop EPS firmware (`39990-TVA,A16C`); its contract and numbers are in [docs/ACCORD.md](docs/ACCORD.md).
-Newest first. Each entry names the drive that found it.
-
-| Date | Area | Change | Why |
-|---|---|---|---|
-| 2026-10-29 | StarPort | Wi-Fi join pinned to the adapter's channel/BSSID with a scan on every retry; adapter restart (repeat `WifiVersionRequest`) restarts the handshake at once; projection focus re-requested when the head unit never grants it | AA took ~3 min to connect, then never showed (drive `00000008--30ceb9ab86`) |
-| 2026-10-29 | Longitudinal | Lead takeoff clamps standstill `vEgo` jitter (−0.0002 m/s) to 0 | Each negative reading reset the takeoff, so the car sat ~2.5 s after the lead left (segs 4, 6) |
-| 2026-10-29 | UI | StarPilot torque bar shows the Accord setpoint−wheel angle error | It showed a lateral-accel estimate minus road roll; the device's +1.87° roll bias drew a constant left pull |
-| 2026-10-27 | Longitudinal | Following-distance floor 0.4 s on every surface | 7.0 port of the 6.x behaviour |
-| 2026-10-27 | Controls, UI | Angle-mode rack map, saturation from the limiter, lane-change turn gate, lagd guard, angle-error torque bar | Accord angle-loop EPS port to 7.0 |
-| 2026-10-27 | Honda | Bosch gas learner ÷2000 with rail freeze; brake arms at −0.45 / releases at −0.20 | Launch jerk and set-speed brake ping-pong |
 
 Openpilot provides
 * Automated Lane Centering
