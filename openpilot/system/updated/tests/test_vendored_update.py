@@ -255,6 +255,20 @@ class TestVendoredUpdate(unittest.TestCase):
     self.commit_source("Invalid submodule configuration")
     self.assert_rejected_before_checkout()
 
+  def test_finalize_survives_git_cleanup_timeout(self):
+    real_run = self.updated.run
+
+    def slow_gc(command, cwd=None):
+      if command == ["git", "gc"]:
+        (self.finalized / ".git" / "objects" / "pack" / ".tmp-1-pack-partial.pack").write_bytes(b"partial")
+        raise subprocess.TimeoutExpired(command, 300)
+      return real_run(command, cwd)
+
+    self.updated.run = slow_gc
+    self.updated.finalize_update()
+    self.assertTrue((self.finalized / ".overlay_consistent").exists())
+    self.assertEqual(list((self.finalized / ".git" / "objects" / "pack").glob(".tmp-*")), [])
+
   def test_finalize_invalid_tree_clears_existing_readiness(self):
     self.finalized.mkdir()
     (self.finalized / ".overlay_consistent").touch()

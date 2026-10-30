@@ -256,7 +256,10 @@ def finalize_update() -> None:
   try:
     run(["git", "gc"], FINALIZED)
     cloudlog.event("Done git cleanup", duration=time.monotonic() - t)
-  except subprocess.CalledProcessError:
+  except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    # Cleanup is optional; a large repo can outlast the timeout. Drop the killed repack's partial packs.
+    for partial in Path(FINALIZED, ".git", "objects", "pack").glob(".tmp-*"):
+      partial.unlink(missing_ok=True)
     cloudlog.exception(f"Failed git cleanup, took {time.monotonic() - t:.3f} s")
 
   set_consistent_flag(True)
