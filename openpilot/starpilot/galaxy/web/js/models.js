@@ -165,9 +165,10 @@ export function modelActionAllowed(data, action, model = null) {
   if (data.isOnroad !== false && !["favorite", "unfavorite", "cancel"].includes(action)) return false
   if (action === "jetlink") return data.jetlink !== undefined
   if (["select-small", "select-big"].includes(action)) {
-    if (data.downloading || data.randomizer === true) return false
+    if (data.downloading && data.refreshing !== true || data.randomizer === true) return false
     if (action === "select-big" && model === null) return true
-    return model?.installed === true && model.selectable === true && fitsModelProfile(model, action === "select-big" ? "big" : "small")
+    // the manager marks what each Active can take: installed models, or under Jetlink a big one with an ONNX
+    return model?.selectable === true && fitsModelProfile(model, action === "select-big" ? "big" : "small")
   }
   if (action === "download") return !data.downloading && !!model && !model.installed && model.downloadAvailable === true
   if (action === "downloadAll") return !data.downloading && data.models.some(m => !m.installed && m.downloadAvailable === true)
@@ -322,7 +323,7 @@ export const ModelsPage = {
   components: { GxDialog, GxState, GxSummary, GalaxySelect, GxNotice },
   props: { mode: { type: String, required: true }, unauthorized: { type: Function, required: true } },
   data() {
-    return { loading: true, error: "", message: "", trackingProgress: false, busy: "", selectionUncertain: true, disposed: false,
+    return { polarisAbout: false, loading: true, error: "", message: "", trackingProgress: false, busy: "", selectionUncertain: true, disposed: false,
       sortMode: "release_date", userFilter: "all", communityFilter: "all", hardwareFilter: readHardwareFilter(),
       models: [], currentModel: "", activeSmallModel: "", activeBigModel: "", capabilities: {},
       summary: { installed: 0, missing: 0, total: 0 }, status: { isOnroad: true },
@@ -339,8 +340,10 @@ export const ModelsPage = {
       if (!model.loadedId) return model.health === "loading" ? "Loading…" : "Identity unverified"
       return model.catalog.find(item => item.id === model.loadedId)?.name || model.loadedId
     },
-    installedSmallModels() { return this.models.filter(m => (m.value === this.activeSmallModel || m.installed && m.selectable) && fitsModelProfile(m, "small")) },
-    installedBigModels() { return this.models.filter(m => (m.value === this.activeBigModel || m.installed && m.selectable) && fitsModelProfile(m, "big")) },
+    installedSmallModels() { return this.models.filter(m => (m.value === this.activeSmallModel || m.selectable) && fitsModelProfile(m, "small")) },
+    installedBigModels() { return this.models.filter(m => (m.value === this.activeBigModel || m.selectable) && fitsModelProfile(m, "big")) },
+    // the manager words it: under Jetlink, the Jetlink app's choice
+    bigNoneLabel() { return this.status.bigNoneLabel || "None — always use Active Small" },
     sorted() {
       return this.models.filter(m => matchesHardware(m, this.hardwareFilter))
         .filter(m => this.userFilter === "all" || !!m.userFavorite === (this.userFilter === "yes"))
@@ -389,6 +392,12 @@ export const ModelsPage = {
     this.manager.stop()
   },
   methods: {
+    isPolaris(model) { return ["spz_polaris_r3a", "spz_polaris_r3b"].includes(model?.value) },
+    polarisTitleParts(model) {
+      const label = model.label || model.value
+      const emoji = label.search(/\p{Extended_Pictographic}/u)
+      return emoji < 0 ? [label, ""] : [label.slice(0, emoji), label.slice(emoji)]
+    },
     hardwareLabel, fileSizeText,
     setHardwareFilter(value) { this.hardwareFilter = saveHardwareFilter(value) },
     toggleHardware(kind, checked) {
@@ -527,20 +536,21 @@ export const ModelsPage = {
               <label class="gx-switch"><input type="checkbox" role="switch" aria-label="Model Randomizer" :checked="status.randomizer === true" :disabled="!actionAvailable(status.randomizer ? 'disable-randomizer' : 'enable-randomizer')" @change="toggleRandomizer($event)"><span class="gx-switch__track"></span><span class="gx-switch__thumb"></span></label>
             </div>
             <p v-if="status.randomizer" class="gx-model-reason">A different verified model is chosen each start. {{ status.gpuAvailable && activeBigModel ? 'Big GPU' : 'Small on-device' }} models are used. {{ (status.blacklistedModels || []).length }} excluded. Favorites only mark your preferred models.</p>
-            <p v-if="!status.gpuAvailable" class="gx-model-reason">An external GPU is not detected. Active Small is used; your Big selection is saved for later.</p>
+            <p v-if="status.jetlinkBig === true" class="gx-model-reason">Jetlink runs Active Big on its host, which downloads the model itself. A model chosen in the Jetlink app shows here once the comma connects.</p>
+            <p v-else-if="!status.gpuAvailable" class="gx-model-reason">An external GPU is not detected. Active Small is used; your Big selection is saved for later.</p>
 
             <div class="gx-model-control">
               <label class="gx-row__label" for="gx-model-small">Active Small · On-device</label>
               <GalaxySelect id="gx-model-small" class="gx-field" :value="pendingChoice?.action === 'select-small' ? pendingChoice.value : activeSmallModel" :disabled="selectionUncertain || capabilities.select !== true || status.isOnroad || status.randomizer" @change="runAction('select-small', installedSmallModels.find(m => m.value === $event.target.value))">
-                <option v-for="m in installedSmallModels" :key="m.value" :value="m.value" :disabled="!m.installed || !m.selectable">{{ m.label || m.value }}</option>
+                <option v-for="m in installedSmallModels" :key="m.value" :value="m.value" :disabled="!m.selectable">{{ m.label || m.value }}</option>
               </GalaxySelect>
             </div>
 
             <div class="gx-model-control">
               <label class="gx-row__label" for="gx-model-big">Active Big · GPU</label>
               <GalaxySelect id="gx-model-big" class="gx-field" :value="pendingChoice?.action === 'select-big' ? pendingChoice.value : activeBigModel" :disabled="selectionUncertain || capabilities.select !== true || status.isOnroad || status.randomizer" @change="$event.target.value ? runAction('select-big', installedBigModels.find(m => m.value === $event.target.value)) : runAction('select-big')">
-                <option value="">None — always use Active Small</option>
-                <option v-for="m in installedBigModels" :key="m.value" :value="m.value" :disabled="!m.installed || !m.selectable">{{ m.label || m.value }}</option>
+                <option value="">{{ bigNoneLabel }}</option>
+                <option v-for="m in installedBigModels" :key="m.value" :value="m.value" :disabled="!m.selectable">{{ m.label || m.value }}</option>
               </GalaxySelect>
             </div>
 
@@ -569,10 +579,11 @@ export const ModelsPage = {
         </template>
         <template v-else>
           <div class="gx-card-grid">
-            <section class="gx-card gx-model-card" v-for="m in sorted" :key="m.value">
+            <section class="gx-card gx-model-card" :class="{'gx-model-card--polaris': isPolaris(m)}" v-for="m in sorted" :key="m.value">
               <div class="gx-panel">
                 <div class="gx-model-card__heading">
-                  <strong>{{ m.label || m.value }}</strong>
+                  <strong v-if="isPolaris(m)"><span class="gx-model-card__title">{{ polarisTitleParts(m)[0] }}</span><span>{{ polarisTitleParts(m)[1] }}</span></strong>
+                  <strong v-else>{{ m.label || m.value }}</strong>
                   <div class="gx-model-card__actions">
                     <button v-if="rowState(m) === 'available' && m.downloadAvailable" type="button" class="gx-icon-btn" :disabled="!actionAvailable('download', m)" :aria-label="'Download ' + m.label" :title="'Download ' + m.label" @click="runAction('download', m)"><i class="bi bi-download" aria-hidden="true"></i></button>
                     <button type="button" class="gx-icon-btn" :disabled="!actionAvailable(m.userFavorite ? 'unfavorite' : 'favorite', m)" :aria-label="(m.userFavorite ? 'Remove from your favorites: ' : 'Add to your favorites: ') + m.label" :title="m.userFavorite ? 'Remove from your favorites' : 'Add to your favorites'" @click="runAction(m.userFavorite ? 'unfavorite' : 'favorite', m)">
@@ -581,6 +592,8 @@ export const ModelsPage = {
                   </div>
                 </div>
                 <div class="gx-actions gx-tags">
+                  <span v-if="isPolaris(m)" class="gx-chip gx-polaris-badge"><span class="gx-polaris-badge__star" aria-hidden="true">✦</span> StarPilot Custom</span>
+                  <button v-if="isPolaris(m)" type="button" class="gx-icon-btn" aria-label="About Polaris models" title="About Polaris models" @click="polarisAbout = true"><i class="bi bi-question-circle" aria-hidden="true"></i></button>
                   <span v-if="m.communityFavorite" class="gx-chip">Community Favorite</span>
                   <span v-if="rowState(m) === 'active'" class="gx-chip gx-chip--selected">Selected</span>
                   <span class="gx-chip">{{ m.value }}</span>
@@ -612,6 +625,14 @@ export const ModelsPage = {
           </div>
         </template>
       </template>
+      <GxDialog v-if="polarisAbout" labelledby="gx-polaris-about-title" @close="polarisAbout = false">
+        <h3 id="gx-polaris-about-title">About Polaris models</h3>
+        <p>Polaris models aren't made or endorsed by comma. They're community fine-tunes of comma's RDFv4.</p>
+        <p>Turns, everyday steering, gas and brake are each taught by whichever comma model handles them best, with real human drives where none do.</p>
+        <p>They're experimental. Stay alert and ready to take over.</p>
+        <p>Tell us how they drive at <a href="https://submit.firestar.link" target="_blank" rel="noopener noreferrer">submit.firestar.link</a>.</p>
+        <div class="gx-settings__controls gx-actions"><button type="button" class="gx-btn" @click="polarisAbout = false">Got it</button></div>
+      </GxDialog>
       <GxDialog v-if="dialog" labelledby="gx-model-dialog-title" @close="finishDialog(false)">
           <h3 id="gx-model-dialog-title">{{ dialog.title }}</h3><p>{{ dialog.message }}</p>
           <div class="gx-settings__controls gx-actions"><button class="gx-btn gx-btn--tonal" type="button" @click="finishDialog(false)">Cancel</button><button ref="confirmButton" class="gx-btn" :class="{'gx-btn--danger': dialog.danger}" type="button" @click="finishDialog(true)">{{ dialog.confirmLabel }}</button></div>

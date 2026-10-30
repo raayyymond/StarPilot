@@ -2,7 +2,7 @@
 
 ## Jetlink external inference
 
-The comma-side Jetlink client and USB transport in `jetlink_repo` are by Zeph Leggett and the [Jetlink contributors](https://github.com/zoompilot/jetlink). They are vendored from revision `bf4dc940e98f5d3ed9b7163adb021439010d634f` under the MIT license, retained in [jetlink_repo/LICENSE](jetlink_repo/LICENSE). StarPilot's adapter (`openpilot/starpilot/models/jetlink_adapter.py`) builds on Jetlink's openpilot layer and owns its param names, Always On Lateral rule, model runner reset, settings and alerts. Companion applications and inference servers remain distributed by Jetlink.
+The comma-side Jetlink client and USB transport in `jetlink_repo` are by Zeph Leggett and the [Jetlink contributors](https://github.com/zoompilot/jetlink). They are vendored from revision `a863c3801da6fd925d14eb1f5b1e250f8efcc649` under the MIT license, retained in [jetlink_repo/LICENSE](jetlink_repo/LICENSE). StarPilot's adapter (`openpilot/starpilot/models/jetlink_adapter.py`) builds on Jetlink's openpilot layer and owns its param names, Always On Lateral rule, model runner reset, settings and alerts. Companion applications and inference servers remain distributed by Jetlink.
 
 ## MRR35 Hyundai angle and radar
 
@@ -37,3 +37,11 @@ The Pre-AP configuration, pedal codec/feedback, VirtualDAS feedforward table, gr
 ## Ford optional pinion measurement
 
 The default-off Use Pinion Yaw Sensor measurement option is adapted from jrneulight’s BluePilot PR #145 (https://github.com/BluePilotDev/bluepilot/pull/145), merged as `fe5b019568c8c13fb894dc6d8d779d60985051a8`. Its per-platform geometry, native pinion measurement, integrity requirements and host vehicle-model compensation are retained. StarPilot adapts the option to its existing exact safety-profile word, modern curvature checks, AOL authority and Galaxy/native settings; the upstream maintainers do not maintain this integration. Existing upstream copyright and license notices remain in THIRD_PARTY_NOTICES.md.
+
+## Subaru angle steering from Jacob Waller's fork
+
+Subaru angle support includes implementation maintained and integrated by **Jacob Waller (jacobw)** in [jacobwaller/openpilot, jul-angle-based](https://github.com/jacobwaller/openpilot/tree/542816196a18dba5f6f0af093c1ece4f415b5a22), with its [opendbc implementation at 8acbeccdab45a47aa7af170d2d17b61f0eb5e4f0](https://github.com/jacobwaller/opendbc/tree/8acbeccdab45a47aa7af170d2d17b61f0eb5e4f0). Jacob authored the VehicleModel angle-limit type correction and integrated the Crosstrek support. The branch also retains the original angle implementation and follow-up work by **lukasloetkolben and elkoled**, alongside comma contributors; their authorship remains theirs.
+
+The inherited source covers Subaru angle platform/firmware definitions, `ES_Status` cruise state, angle controller/CAN integration, vehicle-model limits and native angle enforcement. StarPilot has additional platform-specific limits, driver handoff, discovery and AOL safety guards; this attribution does not claim identical tuning or complete parity with the reference fork. Original source commits, author names, emails and titles are recorded in [the Subaru origin history](opendbc_repo/opendbc/car/subaru/ORIGIN_HISTORY.tsv).
+
+The explicit StarPilot [jacobw Subaru adapter](opendbc_repo/opendbc/car/subaru/JACOBW.md) additionally integrates that branch's low-speed filter, target-first limiting and Crosstrek EPS envelope. Its preserved stricter guards and platform scope are documented alongside the code.

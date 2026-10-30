@@ -10,8 +10,8 @@ from openpilot.starpilot.models.catalog import BUNDLED_CURRENT, BY_ID
 from openpilot.starpilot.models.status import ModelHealth, ModelStatus, ModelVariant
 from openpilot.starpilot.ui.feature_settings_state import feature_row_top, FeatureInput
 from openpilot.starpilot.ui.models_compact import ModelsCompact, _ModelsPage, _display_text
-from openpilot.starpilot.ui.models_state import (model_page, model_action_allowed, model_catalog_rows, model_profile_choices, model_profile_request,
-                                                home_model_label)
+from openpilot.starpilot.ui.models_state import (model_page, model_action_allowed, model_catalog_rows, model_manager_rows, model_profile_choices,
+                                                model_profile_request, home_model_label)
 from openpilot.starpilot.ui.presentation import Profile
 from openpilot.starpilot.ui.settings_state import Destination
 from openpilot.starpilot.ui.shell import ShellMode, ShellView
@@ -138,6 +138,19 @@ class TestModelManager(unittest.TestCase):
     self.assertEqual([m["value"] for m in model_catalog_rows(self.data, "community")], ["pending"])
     self.assertEqual([m["value"] for m in model_catalog_rows(self.data, "favorites")], ["big"])
 
+  def test_jetlink_chooses_active_big_by_its_onnx(self):
+    # under Jetlink the manager marks the big models with an ONNX selectable, downloaded or not, and words none
+    onnx = {**self.missing, "value": "onnx", "label": "Onnx", "selectable": True}
+    data = {**self.data, "models": [self.small, {**self.big, "selectable": False}, onnx], "jetlinkBig": True,
+            "activeBigModel": "onnx", "bigNoneLabel": "Jetlink app's choice"}
+    self.assertEqual(model_profile_choices(data, "big"), (("Jetlink app's choice", ""), ("Onnx", "onnx")))
+    self.assertEqual(model_profile_request(data, "big", "onnx"), {"profile": "big", "model": "onnx"})
+    self.assertIsNone(model_profile_request(data, "big", "big"))
+    self.assertEqual(model_profile_choices(data, "small"), (("Small", "small"),))
+    # a model chosen in the Jetlink app that StarPilot does not list is named as the app's
+    app = {**data, "activeBigModel": "", "bigNoneLabel": "Cinque Terre V3 Model · from the Jetlink app"}
+    self.assertEqual(model_manager_rows(app)[2].value, "Cinque Terre V3 Model · from the Jetlink app")
+
   def test_parked_and_protected_guards(self):
     self.assertFalse(model_action_allowed(self.data, "delete", self.big))
     self.assertTrue(model_action_allowed({**self.data, "activeBigModel": ""}, "delete", self.big))
@@ -229,6 +242,43 @@ class TestModelManager(unittest.TestCase):
       session.model_manager_action.assert_not_called()
       owner._action(page, "preferences", "small")
       session.model_manager_action.assert_called_with("preferences", {"userFavorites": ["big", "small"]})
+
+  def test_catalog_refresh_preserves_offline_selection_guards(self):
+    data = self.data | {"downloading": True, "refreshing": True}
+    self.assertTrue(model_action_allowed(data, "active", self.small, "small"))
+    self.assertTrue(model_action_allowed(data, "active", self.big, "big"))
+    self.assertFalse(model_action_allowed(data, "active", self.pending, "small"))
+    self.assertFalse(model_action_allowed(data | {"isOnroad": True}, "active", self.big, "big"))
+    self.assertFalse(model_action_allowed(data | {"randomizer": True}, "active", self.big, "big"))
+    self.assertFalse(model_action_allowed(data | {"refreshing": False}, "active", self.big, "big"))
+    self.assertFalse(model_action_allowed(data, "delete", self.small))
+    state = model_page(ModelStatus(BUNDLED_CURRENT, None, None, ModelHealth.UNAVAILABLE, False, None, None), data)
+    self.assertTrue(state.rows[1].available)
+    self.assertTrue(state.rows[2].available)
+
+  def test_reopening_selector_reuses_rows_but_rechecks_current_state(self):
+    session = mock.Mock()
+    session.model_manager_snapshot.return_value = self.data
+    session.model_snapshot.return_value = model_page(ModelStatus(BUNDLED_CURRENT, None, None, ModelHealth.UNAVAILABLE, False, None, None))
+    owner = ModelsCompact(session)
+    def new_page(*args):
+      return SimpleNamespace(current=None, manager=None)
+    def populate(page, state, data):
+      page.current, page.manager = state, data
+    with mock.patch("openpilot.starpilot.ui.models_compact._ModelsPage", side_effect=new_page) as constructor, \
+         mock.patch("openpilot.starpilot.ui.models_compact.gui_app.push_widget") as push, \
+         mock.patch.object(owner, "_populate", side_effect=populate) as rebuild:
+      owner.open("catalog", "small")
+      first = push.call_args.args[0]
+      owner.open("catalog", "big")
+      owner.open("catalog", "small")
+      self.assertIs(push.call_args.args[0], first)
+      self.assertEqual(constructor.call_count, 2)
+      self.assertEqual(rebuild.call_count, 2)
+      session.model_manager_snapshot.return_value = self.data | {"isOnroad": True}
+      owner.open("catalog", "small")
+      self.assertEqual(rebuild.call_count, 3)
+      self.assertTrue(push.call_args.args[0].manager['isOnroad'])
 
 
 if __name__ == "__main__":

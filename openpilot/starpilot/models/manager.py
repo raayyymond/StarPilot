@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -206,6 +207,24 @@ def verified_artifact(model_id: str, entries: dict[str, dict], root: Path = ROOT
     return None
 
 
+def onnx_sha256(row: dict) -> str | None:
+  """The ONNX a big model was built from, by the hash the catalog gives it: what Jetlink runs. None without one."""
+  digests = row.get("source_sha256")
+  if not isinstance(digests, dict) or len(digests) != 1:
+    return None
+  digest = next(iter(digests.values()))
+  return digest if isinstance(digest, str) and SHA.fullmatch(digest) else None
+
+
+def jetlink_active_big(entries: dict[str, dict], pick: dict | None) -> tuple[str, str]:
+  """Active Big while Jetlink runs the big model: the model whose ONNX Jetlink was told to run, and what none
+  means, the Jetlink app's choice, named when it is one StarPilot does not list."""
+  sha = pick["sha256"] if pick else None
+  mid = next((mid for mid, row in entries.items() if row.get("uses_external_gpu") and onnx_sha256(row) == sha), "") if sha else ""
+  name = pick.get("displayName") if pick and not mid else None
+  return mid, f"{name} · from the Jetlink app" if isinstance(name, str) and name else "Jetlink app's choice"
+
+
 def shipped_default() -> Path | None:
   from openpilot.common.file_chunker import materialize_file_chunked
 
@@ -295,6 +314,7 @@ class ModelManager:
     self.download_all = False
     self.job_id = ""
     self.checked: dict[str, tuple[tuple, bool]] = {}
+    self.snapshot_checked: dict[str, tuple[tuple, bool]] = {}
     self.verify_queue: deque[tuple[str, dict, tuple, str]] = deque()
     self.verifying: dict[str, tuple] = {}
     self.verify_worker: threading.Thread | None = None
@@ -341,7 +361,8 @@ class ModelManager:
       if not busy and job.get("state") == "running":
         job.update(state="interrupted", progress="Previous model download was interrupted", model="", downloadAll=False, cancelRequested=False)
         atomic_json(self.root / ".download-job.json", job)
-      return {**job, "downloading": busy}
+      return {**job, "downloading": busy,
+              "refreshing": busy and job.get("state") == "running" and job.get("operation") == "refresh_manifest"}
 
   def _publish_job(self, *, progress: str | None = None, model: str | None = None) -> None:
     with state_lock(self.root):
@@ -415,6 +436,17 @@ class ModelManager:
       self.checked[key] = (signature, verified_artifact(mid, entries, self.root, variant) is not None)
     return self.checked[key][1]
 
+  def _verification_receipt(self, mid: str, variant: str) -> Path:
+    return self.root / ".verified" / f"{mid}-{variant}.json"
+
+  def _remember_verification(self, mid: str, variant: str, signature: tuple) -> None:
+    if len(signature) != 8:
+      return
+    try:
+      atomic_json(self._verification_receipt(mid, variant), {"version": 1, "signature": list(signature)})
+    except OSError:
+      logging.exception("Could not save model verification for %s", mid)
+
   def _snapshot_installed(self, mid: str, row: dict, variant: str = "standard") -> tuple[bool, bool]:
     if mid == DEFAULT_SMALL and variant == "standard" and self._signature(mid, row, variant) is None:
       row = {**row, "shipped": True, "artifact_sha256": DEFAULT_SMALL_SHA256, "artifact_size": DEFAULT_SMALL_SIZE}
@@ -428,6 +460,20 @@ class ModelManager:
     checked = self.checked.get(key)
     if checked is not None and checked[0] == signature:
       return checked[1], False
+    if len(signature) == 8:
+      if self.snapshot_checked.get(key, (None,))[0] != signature:
+        try:
+          receipt = read_json(self._verification_receipt(mid, variant), 4096)
+          valid = receipt == {"version": 1, "signature": list(signature)}
+        except (OSError, ValueError, TypeError):
+          valid = False
+        self.snapshot_checked[key] = (signature, valid)
+      if self.snapshot_checked[key][1]:
+        return True, False
+    if self.verify_worker is not None and not self.verify_worker.is_alive():
+      self.verify_worker = None
+      self.verifying.clear()
+      self.verify_queue.clear()
     if not self.verify_closed and self.verifying.get(key) != signature:
       self.verifying[key] = signature
       self.verify_queue.append((mid, row, signature, variant))
@@ -446,12 +492,18 @@ class ModelManager:
         key = f"{mid}:{variant}"
         if self.verifying.get(key) != signature:
           continue
-      valid = (shipped_default() if row.get("shipped") else verified_artifact(mid, {mid: row}, self.root, variant)) is not None
+      try:
+        valid = (shipped_default() if row.get("shipped") else verified_artifact(mid, {mid: row}, self.root, variant)) is not None
+      except Exception:
+        logging.exception("Model verification failed for %s", mid)
+        valid = False
       with self.lock:
         if self.verifying.get(key) == signature:
           self.verifying.pop(key)
           if self._signature(mid, artifact_entry(mid, {mid: row}, variant), variant) == signature:
             self.checked[key] = (signature, valid)
+            if valid:
+              self._remember_verification(mid, variant, signature)
 
   def selected_gpu_status(self) -> tuple[bool, bool]:
     """Verify the selected download asynchronously, without starting a model or download job."""
@@ -473,6 +525,12 @@ class ModelManager:
       entries, prefs = catalog(self.root), preferences(self.root)
       parked, gpu = self.parked(), self.gpu_present()
       job = self._job_status()
+      owner = self.jetlink_owner()
+      jetlink = owner.snapshot()
+      # with Jetlink running the big model, Active Big is its choice: a model whose ONNX the catalog names
+      jetlink_big = owner.chooses_big(jetlink)
+      active_big, big_none = (jetlink_active_big(entries, owner.pick()) if jetlink_big else
+                              (prefs["big"], "None — always use Active Small"))
       models = []
       for mid, row in entries.items():
         installed, checking = self._snapshot_installed(mid, row)
@@ -484,19 +542,21 @@ class ModelManager:
                        "installed": installed, "checking": checking,
                        "builtin": mid == DEFAULT_SMALL,
                        "requiresGpu": requires_gpu, "gpuAvailable": gpu or not requires_gpu, "small": not requires_gpu,
-                       "selectable": installed, "downloadAvailable": published, "artifactSize": row.get("artifact_size", 0),
+                       "selectable": onnx_sha256(row) is not None if requires_gpu and jetlink_big else installed,
+                       "downloadAvailable": published, "artifactSize": row.get("artifact_size", 0),
                        "unavailableReason": "" if installed else "Checking artifact" if checking else
                        "Download required" if published else f"{GENERATION} download not published"})
       count = sum(bool(row["installed"]) for row in models)
-      return {"schemaVersion": 1, "models": models, "activeSmallModel": prefs["small"], "activeBigModel": prefs["big"],
+      return {"schemaVersion": 1, "models": models, "activeSmallModel": prefs["small"], "activeBigModel": active_big,
+              "jetlinkBig": jetlink_big, "bigNoneLabel": big_none,
               "currentModel": prefs["big"] if gpu and prefs["big"] else prefs["small"], "userFavorites": prefs["userFavorites"],
               "sortMode": prefs["sortMode"], "randomizer": prefs["randomizer"], "blacklistedModels": prefs["blacklistedModels"],
               "summary": {"total": len(models), "installed": count, "missing": len(models)-count},
               "jobId": job.get("jobId", ""), "cancelRequested": job.get("cancelRequested", False),
               "downloadVariant": job.get("variant", "standard"),
               "modelToDownload": job.get("model", ""), "downloadAll": job.get("downloadAll", False),
-              "downloading": job["downloading"], "progress": job.get("progress", ""),
-              "isOnroad": not parked, "gpuAvailable": gpu, "jetlink": self.jetlink_owner().snapshot(),
+              "downloading": job["downloading"], "refreshing": job["refreshing"], "progress": job.get("progress", ""),
+              "isOnroad": not parked, "gpuAvailable": gpu, "jetlink": jetlink,
               "capabilities": {"select": parked, "download": parked, "downloadAll": parked, "cancel": True,
                                "jetlink": parked, "refresh": parked, "favorites": True, "delete": parked, "randomizer": parked, "exclusions": parked}}
 
@@ -587,7 +647,7 @@ class ModelManager:
           try:
             atomic_json(self.root / ".download-job.json", {
               "schemaVersion": 1, "jobId": self.job_id, "state": "running", "model": self.downloading,
-              "progress": self.progress, "downloadAll": self.download_all, "cancelRequested": False, "variant": variant,
+              "progress": self.progress, "downloadAll": self.download_all, "cancelRequested": False, "variant": variant, "operation": action,
             })
           except BaseException:
             lock.close()
@@ -602,26 +662,38 @@ class ModelManager:
           raise
         return {"message": message}
       if action == "active":
-        if self._job_status()["downloading"]:
+        job = self._job_status()
+        if job["downloading"] and not job["refreshing"]:
           raise ModelError("Wait for the model download to finish before selecting a model")
         if (set(payload) != {"profile", "model"} or payload["profile"] not in ("small", "big") or
             not isinstance(payload["model"], str)):
           raise ModelError("Invalid model selection")
         if preferences(self.root)["randomizer"]:
           raise ModelError("Turn Model Randomizer off before choosing a model")
-        mid, profile = payload["model"], payload["profile"]
+        mid, profile, entries = payload["model"], payload["profile"], catalog(self.root)
+        # Jetlink runs a big model's ONNX, so it needs no download here, only the catalog's hash for it
+        jetlink = profile == "big" and self.jetlink_owner().chooses_big()
         if mid != BUNDLED_CURRENT and not (profile == "big" and mid == ""):
-          if mid not in catalog(self.root) or catalog(self.root)[mid].get("uses_external_gpu", False) != (profile == "big"):
+          if mid not in entries or entries[mid].get("uses_external_gpu", False) != (profile == "big"):
             raise ModelError("Model does not match the selected hardware profile")
-          if not self._installed(mid, catalog(self.root)):
+          if jetlink:
+            if onnx_sha256(entries[mid]) is None:
+              raise ModelError("Jetlink cannot run this model yet: its catalog entry names no ONNX")
+          elif not self._installed(mid, entries):
             raise ModelError("Download and verify this model first")
         with state_lock(self.root):
           self._require_parked()
           saved = preferences(self.root)
           if saved["randomizer"]:
             raise ModelError("Turn Model Randomizer off before choosing a model")
-          if self._job_busy():
+          job = self._read_job()
+          if self._job_busy() and not (job.get("state") == "running" and job.get("operation") == "refresh_manifest"):
             raise ModelError("Wait for the model download to finish before selecting a model")
+          if jetlink:
+            # Chestnut's choice stays as it was; none leaves the model to the Jetlink app
+            row = entries.get(mid, {})
+            self.jetlink_owner().choose(onnx_sha256(row), row.get("name", ""))
+            return {"message": "Model selected for Jetlink"}
           saved[profile] = mid
           atomic_json(self.root / "preferences.json", saved)
         return {"message": "Model selected for the next drive"}

@@ -58,7 +58,7 @@ from openpilot.starpilot.conditional_mode.runtime_settings import (ConditionalSe
 from openpilot.starpilot.conditional_mode.status import settings_fingerprint
 from openpilot.starpilot.feature_runtime import enabled as feature_enabled
 from openpilot.starpilot.nostalgia import aol_no_entry, paddle_cancel, physical_cancel, saved_enabled as nostalgia_saved_enabled
-from openpilot.starpilot.lateral.low_speed_advisory import LowSpeedAdvisory
+from openpilot.starpilot.lateral.low_speed_advisory import LowSpeedAdvisory, advisory_eligible
 from openpilot.starpilot.lateral.lane_change_status_wire import alert_wording, decode as decode_lane_status, fresh_for_model
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -310,7 +310,10 @@ class SelfdriveD:
       device = self.sm['deviceState']
       drive_id = (int(device.startedMonoTime) if self.sm.seen['deviceState'] and self.sm.alive['deviceState'] and
                   self.sm.valid['deviceState'] and device.started else 0)
-      show_low_speed = self.low_speed_advisory.update(float(CS.vEgo), float(self.CP.minSteerSpeed), drive_id=drive_id)
+      eligible = advisory_eligible(self.CP, CS, active=self.active,
+        intent=self.aol_last_intent if self.aol_replay else None)
+      show_low_speed = self.low_speed_advisory.update(float(CS.vEgo), float(self.CP.minSteerSpeed),
+        drive_id=drive_id, eligible=eligible)
       self.events.add_from_msg([event for event in car_events if event.name != EventName.belowSteerSpeed])
       if show_low_speed:
         self.events.add(EventName.belowSteerSpeed)
@@ -1076,6 +1079,11 @@ class SelfdriveD:
     return intent
 
   def update_alerts(self, CS):
+    # Engagement may change after car events; retire only the inactive advisory.
+    if (EventName.belowSteerSpeed in self.events.names or 'belowSteerSpeed/warning' in self.AM.alerts) and not advisory_eligible(
+        self.CP, CS, active=self.active, intent=self.aol_last_intent if self.aol_replay else None):
+      self.events.events = [event for event in self.events.names if event != EventName.belowSteerSpeed]
+      self.AM.alerts.pop('belowSteerSpeed/warning', None)
     clear_event_types = set()
     if ET.WARNING not in self.state_machine.current_alert_types:
       clear_event_types.add(ET.WARNING)
@@ -1363,12 +1371,22 @@ class SelfdriveD:
 
       if (toyota_qualified(self.CP, marked_only=True) and CS.standstill or
           angle_qualified(self.CP, marked_only=True) or
-          self.CP.brand == 'hyundai' and CS.brakePressed and len(self.CP.safetyConfigs) == 1 and
+          self.CP.brand == 'hyundai' and len(self.CP.safetyConfigs) == 1 and
           stock_canfd_qualified(self.CP, marked_only=True)):
         native = current_native(self.sm, self.CP, now_ns=now_ns, axis_session_id=self.aol_session_id)
         if stock_lateral_role(self, CS, native, intent, allow_independent_cancel=True,
-                              allow_independent_brake=True, now_ns=now_ns):
+                              allow_independent_brake=True, allow_independent_gas=True, now_ns=now_ns):
           user_disable = False
+    if (user_disable and fresh_successor and proof[6] and not proof[7] and proof[8] and not proof[9] and
+        decision.desired_lateral and not decision.desired_longitudinal and not decision.longitudinal_active and
+        not self.enabled and not self.active and self.CP.brand == 'toyota' and toyota_qualified(self.CP, marked_only=True) and
+        CS.cruiseState.available and not CS.cruiseState.enabled and
+        self.CS_prev.cruiseState.available and not self.CS_prev.cruiseState.enabled and
+        all(valid and sample.cruiseState.available and not sample.cruiseState.enabled
+            for sample, valid in getattr(self, 'car_state_samples', ()))):
+      # An already-off PCM is not a new cruise cancellation. Only a fresh,
+      # independently checked LAT source may replace the expired LAT-only proof.
+      user_disable = any(event.userDisable and event.name != EventName.pcmDisable for event in self.events.to_msg())
     if user_disable and self.held_axis_override_wait(CS, proof, now_ns, fresh_successor=fresh_successor and qualified_gm(self.CP))[0]:
       # A fresh same-owner source can establish its own LAT permission after
       # an old output expires. Held-brake continuity does not renew that output;
@@ -1767,9 +1785,10 @@ class SelfdriveD:
         proof[5] != companion.integrity_epoch or not ((intent.allowedLatch and intent.lateralArmed) or ordinary_ford) or
         not native.requestedLateral or not native.lateralAllowed or
         not native.requestedLongitudinal or native.longitudinalAllowed or not native.pandaInventory or
-        CS.brakePressed or CS.regenBraking or CS.gasPressed or CS.steeringPressed or
+        CS.brakePressed or CS.regenBraking or CS.gasPressed or CS.steeringPressed and not ordinary_ford or
         any(self.events.contains(kind) for kind in (ET.IMMEDIATE_DISABLE, ET.SOFT_DISABLE, ET.USER_DISABLE,
-                                                  ET.OVERRIDE_LATERAL, ET.OVERRIDE_LONGITUDINAL))):
+                                                  ET.OVERRIDE_LONGITUDINAL)) or
+        not ordinary_ford and self.events.contains(ET.OVERRIDE_LATERAL)):
       return False
     def identity(state):
       return (state.axisSessionId, state.pandaSerial, state.safetyModel, state.safetyParam,
@@ -2116,7 +2135,7 @@ class SelfdriveD:
       if ET.WARNING not in self.state_machine.current_alert_types:
         self.state_machine.current_alert_types.append(ET.WARNING)
     if (getattr(self, 'aol_fault_reason', 'none') == 'availabilityPause' and
-        (self.CP.brand != 'ford' or self.enabled or intent is not None and intent.allowedLatch) and
+        (self.enabled or intent is not None and intent.allowedLatch) and
         ET.WARNING not in self.state_machine.current_alert_types):
       self.state_machine.current_alert_types.append(ET.WARNING)
     axis_published = bool(not REPLAY and self.aol_replay and self.axis_transport_required)

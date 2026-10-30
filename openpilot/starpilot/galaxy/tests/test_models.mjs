@@ -96,7 +96,11 @@ globalThis.document = priorDocument
 
 assert.match(ModelsPage.template, /offline preview/)
 assert.match(ModelsPage.template, /Active Small/)
-assert.match(ModelsPage.template, /None — always use Active Small/)
+assert.match(ModelsPage.template, /\{\{ bigNoneLabel \}\}/)
+// the manager words no Active Big; under Jetlink, the Jetlink app's choice
+const noneLabel = (status) => ModelsPage.computed.bigNoneLabel.call({ status })
+assert.equal(noneLabel({}), "None — always use Active Small")
+assert.equal(noneLabel({ bigNoneLabel: "Jetlink app's choice" }), "Jetlink app's choice")
 console.log("Model status client lifecycle checks passed")
 
 const expanded = fixture()
@@ -129,8 +133,10 @@ const managerPayload = { schemaVersion: 1, models: [small, big, pending, missing
 assert.equal(modelActionAllowed(managerPayload, "select-small", small), true)
 assert.equal(modelActionAllowed(managerPayload, "select-big", small), false)
 assert.equal(modelActionAllowed(managerPayload, "select-small", { ...small, selectable: false }), false)
-assert.equal(modelActionAllowed(managerPayload, "select-small", { ...small, installed: false }), false)
 assert.equal(modelActionAllowed(managerPayload, "select-big"), true)
+// what the manager marks selectable, downloaded or not: under Jetlink, a big model with an ONNX
+assert.equal(modelActionAllowed(managerPayload, "select-big", { ...missing, selectable: true }), true)
+assert.equal(modelActionAllowed(managerPayload, "select-big", { ...big, selectable: false }), false)
 assert.equal(modelActionAllowed(managerPayload, "download", pending), false)
 assert.equal(modelActionAllowed(managerPayload, "download", missing), true)
 assert.equal(modelActionAllowed(managerPayload, "delete", big), false)
@@ -304,3 +310,23 @@ assert.equal(liveLink.manager.data.jetlink.state, "checking execution")
 liveLink.manager.stop()
 
 assert.ok(ModelsPage.template.includes('href="https://github.com/StarPilotHQ/StarPilot/blob/SecretGoodStarPilot/openpilot/starpilot/models/JETLINK.md"'), "Jetlink setup guide points at the branch that contains it")
+
+const refreshingCatalog = { ...managerPayload, downloading: true, refreshing: true }
+assert.equal(modelActionAllowed(refreshingCatalog, "select-small", small), true)
+assert.equal(modelActionAllowed(refreshingCatalog, "select-big", big), true)
+assert.equal(modelActionAllowed(refreshingCatalog, "select-big", missing), false)
+assert.equal(modelActionAllowed({ ...refreshingCatalog, isOnroad: true }, "select-big", big), false)
+assert.equal(modelActionAllowed({ ...refreshingCatalog, randomizer: true }, "select-big", big), false)
+assert.equal(modelActionAllowed({ ...refreshingCatalog, refreshing: false }, "select-big", big), false)
+assert.equal(modelActionAllowed(refreshingCatalog, "delete", small), false)
+
+for (const value of ["spz_polaris_r3a", "spz_polaris_r3b"]) assert.equal(ModelsPage.methods.isPolaris({value}), true)
+for (const value of ["polaris", "spz_polaris_r3a_copy", "lightspeed", undefined]) assert.equal(ModelsPage.methods.isPolaris({value, label: "Polaris"}), false)
+assert.equal(ModelsPage.methods.isPolaris(null), false)
+
+for (const label of ["Polaris R3 A ⚠️🧪", "Polaris R3 B ⚠️🧪", "Polaris R3 A", "Polaris R3 B 🚀"]) {
+  const [text, emojis] = ModelsPage.methods.polarisTitleParts({label})
+  assert.equal(text + emojis, label)
+  assert.equal(/\p{Extended_Pictographic}/u.test(text), false)
+}
+assert.deepEqual(ModelsPage.methods.polarisTitleParts({value: "spz_polaris_r3a"}), ["spz_polaris_r3a", ""])
