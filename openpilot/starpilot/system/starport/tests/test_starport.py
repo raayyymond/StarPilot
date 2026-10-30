@@ -1287,3 +1287,26 @@ def test_discovery_waits_past_the_message_timeout_for_a_slow_adapter():
     sender.join()
     a.close()
     b.close()
+
+
+@pytest.mark.parametrize("closed_after", [1, None])
+def test_tcp_retries_stop_once_the_car_closes_rfcomm(identity, tmp_path, monkeypatch, closed_after):
+  # 2026-10-29 OTTOCAST: refused, RFCOMM reset 1 s later, then 5 more tries over 28 s that all failed.
+  from openpilot.starpilot.system.starport import supervisor as supervisor_module
+  sup, _ = make_supervisor(identity, tmp_path, monkeypatch, lambda *a, **k: socket.socketpair()[0])
+  tries = []
+
+  def refuse(*args, **kwargs):
+    tries.append(args[0])
+    raise ConnectionRefusedError(111, "Connection refused")
+
+  monkeypatch.setattr(supervisor_module.socket, "create_connection", refuse)
+  monkeypatch.setattr(sup, "_wait", lambda seconds: None)
+  result = type("R", (), {"endpoint": bs.Endpoint("192.168.1.101", 59609)})()
+  lease = type("L", (), {"local_ip": ""})()
+  with pytest.raises(RuntimeError) as failure:
+    sup._connect_tcp(result, lease, link_lost=lambda: closed_after is not None and len(tries) >= closed_after)
+  if closed_after is None:
+    assert len(tries) == supervisor_module.TCP_ATTEMPTS and "did not accept" in str(failure.value)
+  else:
+    assert len(tries) == closed_after and "closed the Bluetooth link" in str(failure.value)

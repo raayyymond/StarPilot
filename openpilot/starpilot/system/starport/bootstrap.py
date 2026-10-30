@@ -252,6 +252,7 @@ class WirelessBootstrap:
     self.frames_seen = 0
     self.cancelled: Callable[[], bool] = lambda: False
     self.join_cancelled = threading.Event()
+    self.link_closed = threading.Event()  # set when keepalive saw the head unit close or break RFCOMM
 
   def join_is_cancelled(self) -> bool:
     """For join_wifi: stop on user cancellation or once the handshake has failed."""
@@ -497,6 +498,13 @@ class WirelessBootstrap:
 
   def keepalive(self, stop: threading.Event) -> None:
     """Keep the RFCOMM link serviced for the life of the projection session."""
+    try:
+      self._keepalive(stop)
+    finally:
+      if not stop.is_set():
+        self.link_closed.set()
+
+  def _keepalive(self, stop: threading.Event) -> None:
     while not stop.is_set():
       try:
         message_id, payload = self.next_frame(0.5)

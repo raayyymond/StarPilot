@@ -1261,7 +1261,7 @@ class Supervisor:
     keepalive_stop = threading.Event()
     threading.Thread(target=boot.keepalive, args=(keepalive_stop,), name="aa_rfcomm_keepalive", daemon=True).start()
     try:
-      self._project(result, lease, ident)
+      self._project(result, lease, ident, link_lost=boot.link_closed.is_set)
     finally:
       keepalive_stop.set()
 
@@ -1448,7 +1448,7 @@ class Supervisor:
     elif name == "wifi_joining":
       self._set(state="joining_wifi", last_stage="joining_wifi", detail=str(values.get("ssid", "")))
 
-  def _connect_tcp(self, result, lease) -> socket.socket:
+  def _connect_tcp(self, result, lease, link_lost: Callable[[], bool] = lambda: False) -> socket.socket:
     self._stage("connecting_tcp", f"{result.endpoint.ip}:{result.endpoint.port}")
     last_error: Exception | None = None
     for attempt in range(TCP_ATTEMPTS):
@@ -1461,6 +1461,10 @@ class Supervisor:
       except OSError as error:
         last_error = error
         self.log("tcp_retry", attempt=attempt + 1, error=str(error))
+        # A head unit closes RFCOMM only once it accepted us or gave up; with no connection it gave up. 2026-10-29
+        # OTTOCAST: it refused, closed RFCOMM 1 s later, and 5 more tries over 28 s all failed. A fresh attempt took 11 s.
+        if link_lost():
+          raise RuntimeError(f"Car closed the Bluetooth link without accepting the projection connection: {error}")
         self._wait(1.0 + attempt * 0.5)
     raise RuntimeError(f"Car did not accept the projection connection: {last_error}")
 
@@ -1471,9 +1475,10 @@ class Supervisor:
     except Exception:  # DBus errors vary; the pairing request is optional
       return ""
 
-  def _project(self, result, lease, ident, connect=None, fragment_acks: bool = False) -> None:
+  def _project(self, result, lease, ident, connect=None, fragment_acks: bool = False,
+               link_lost: Callable[[], bool] = lambda: False) -> None:
     config = self.config
-    sock = connect() if connect is not None else self._connect_tcp(result, lease)
+    sock = connect() if connect is not None else self._connect_tcp(result, lease, link_lost)
     ca = ident.root if config.get("verify_head_unit", False) else None
     session = ProjectionSession(sock, ident.cert, ident.key, self.log, ca)
     session.fragment_acks = fragment_acks

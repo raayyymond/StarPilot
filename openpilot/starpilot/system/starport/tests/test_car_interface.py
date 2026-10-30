@@ -497,3 +497,90 @@ def test_every_join_requests_a_scan(monkeypatch):
   lease.acquire(credentials(), timeout=2.0)
   assert nm.calls.count("RequestScan") == 2
   assert nm.calls.index("RequestScan", nm.calls.index("AddAndActivateConnection2") + 1) < len(nm.calls) - 1
+
+
+class HomeNM(SightedNM):
+  """wlan0 is on home Wi-Fi at `home_freq`; aa0 saw the car broadcasting on 5180."""
+
+  def __init__(self, home_freq=2462, **kwargs):
+    super().__init__(**kwargs)
+    self.home_freq = home_freq
+    self.home_state = 100
+    self.active_state = 2
+
+  def call(self, path, interface, member, signature=None, body=(), timeout=10.0):
+    if member == "Disconnect" and path == "/dev/wlan0":
+      self.home_state = 30
+    if member == "AddAndActivateConnection2":
+      self.active_state = 2
+    return super().call(path, interface, member, signature, body, timeout)
+
+  def get(self, path, interface, name):
+    if name == "State" and path == "/dev/wlan0":
+      return self.home_state
+    if name == "State" and path == "/active/aa":
+      return self.active_state
+    if name == "Frequency" and path == "/ap/wlan0":
+      return self.home_freq
+    return super().get(path, interface, name)
+
+
+def test_dedicated_join_takes_wlan0_off_home_wifi_on_another_channel(tmp_path):
+  nm = HomeNM()
+  lease = nm_lease(nm)
+  lease.marker = tmp_path / "paused.json"
+  lease.acquire(credentials(), timeout=2.0)
+  assert nm.calls.index("Disconnect") < nm.calls.index("AddAndActivateConnection2")  # DHCP never shares the radio
+  assert ("/dev/wlan0", "Autoconnect", False) in nm.set and network._paused_interface(lease.marker) == "wlan0"
+  assert dict(lease.log.events)["wifi_home_paused"] == {"interface": "wlan0", "freq": 2462}
+  lease.release(restore=False)  # between attempts home Wi-Fi stays off
+  assert ("/dev/wlan0", "Autoconnect", True) not in nm.set
+  lease.acquire(credentials(), timeout=2.0)
+  assert nm.calls.count("Disconnect") == 1
+  lease.release(restore=True)
+  assert nm.set[-1] == ("/dev/wlan0", "Autoconnect", True) and not lease.marker.exists()
+  assert "wifi_home_restored" in lease.log.names()
+
+
+def test_dedicated_join_keeps_home_wifi_on_the_cars_channel(tmp_path):
+  nm = HomeNM(home_freq=5180)
+  lease = nm_lease(nm)
+  lease.marker = tmp_path / "paused.json"
+  lease.acquire(credentials(), timeout=2.0)
+  assert "Disconnect" not in nm.calls and not lease.marker.exists()
+
+
+def test_wlan0_join_never_pauses_itself(tmp_path):
+  nm = HomeNM()
+  lease = nm_lease(nm, dedicated=False)
+  lease.interface = "wlan0"
+  lease.marker = tmp_path / "paused.json"
+  lease.acquire(credentials(), timeout=2.0)
+  assert "Disconnect" not in nm.calls and "wifi_home_paused" not in lease.log.names()
+
+
+def test_handshake_restart_keeps_the_join_in_progress(tmp_path, monkeypatch):
+  # 2026-10-29: DHCP finished 11.4 s in, the adapter restarted at 12 s, and the working connection was deleted.
+  nm = HomeNM()
+  lease = nm_lease(nm)
+  lease.marker = tmp_path / "paused.json"
+  lease.acquire(credentials(), timeout=2.0)
+  nm.active_state = 1  # still getting its address when the adapter asks again
+  monkeypatch.setattr(network.time, "sleep", lambda _: setattr(nm, "active_state", 2))
+  assert lease.acquire(credentials(), timeout=2.0) == "192.168.180.183"
+  assert nm.calls.count("AddAndActivateConnection2") == 1 and "wifi_join_reused" in lease.log.names()
+
+
+@pytest.mark.parametrize("change", ["credentials", "deactivated"])
+def test_a_different_or_dead_join_is_replaced(tmp_path, change):
+  nm = HomeNM()
+  lease = nm_lease(nm)
+  lease.marker = tmp_path / "paused.json"
+  lease.acquire(credentials(), timeout=2.0)
+  again = credentials()
+  if change == "credentials":
+    again = WifiCredentials(ssid="Car-4E91", key="new-key", bssid="C6:B7:57:F7:4E:91", security=8, ap_type=0)
+  else:
+    nm.active_state = 4  # the adapter's access point restarted and dropped us
+  lease.acquire(again, timeout=2.0)
+  assert nm.calls.count("AddAndActivateConnection2") == 2 and "wifi_join_reused" not in lease.log.names()

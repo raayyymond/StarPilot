@@ -39,7 +39,9 @@ NM_WIRELESS_IFACE = "org.freedesktop.NetworkManager.Device.Wireless"
 NM_AP_IFACE = "org.freedesktop.NetworkManager.AccessPoint"
 DEVICE_TYPE_WIFI = 2
 DEVICE_STATE_DISCONNECTED = 30
+DEVICE_STATE_ACTIVATED = 100
 DEVICE_READY_TIMEOUT_S = 5.0
+ACTIVE_STATE_ACTIVATING = 1
 ACTIVE_STATE_ACTIVATED = 2
 ACTIVE_STATE_DEACTIVATED = 4
 # The car sends its Wi-Fi details ~4 s after ignition, but a Honda's access point took ~55 s from ignition to appear
@@ -165,7 +167,8 @@ def connection_settings(credentials: WifiCredentials, interface: str, frequency:
 
 class NetworkLease:
   def __init__(self, log: Callable[..., None], interface: str = "wlan0", dedicated: bool = False):
-    """``dedicated``: the interface exists only for the car, so never fall back to another one or touch its previous network."""
+    """``dedicated``: the interface exists only for the car, so never fall back to another one or touch its previous network.
+    wlan0 keeps its saved networks but is taken off home Wi-Fi until the session ends (see _pause_home_wifi)."""
     self.log = log
     self.interface = interface
     self.dedicated = dedicated
@@ -177,6 +180,8 @@ class NetworkLease:
     self.local_ip = ""
     self.device_ready = False
     self.autoconnect_paused = False
+    self.joined: WifiCredentials | None = None  # what active_path was activated for
+    self.home_path = ""  # dedicated mode: the wlan0 device this lease disconnected from home Wi-Fi
     self.marker = AUTOCONNECT_MARKER
     self.scan_requested_at = -SCAN_REUSE_S
     self._lock = threading.Lock()
@@ -270,6 +275,7 @@ class NetworkLease:
       except NetworkError:
         pass
     self.active_path = self.connection_path = ""
+    self.joined = None
 
   def _acquire_once(self, credentials: WifiCredentials, timeout: float, cancelled: Callable[[], bool]) -> str:
     with self._lock:
@@ -280,23 +286,27 @@ class NetworkLease:
       else:
         self.device_path = self._wifi_device()
         self._pause_autoconnect()
-      active = self._get(self.device_path, NM_DEVICE_IFACE, "ActiveConnection")
-      if active and active != "/" and not self.previous_connection and not self.dedicated:
-        try:
-          previous = self._get(active, NM_ACTIVE_IFACE, "Connection")
-          if self._connection_id(previous) != CONNECTION_ID:
-            self.previous_connection = previous
-        except NetworkError:
-          pass
-      self._delete_stale_profiles()
-      frequency = self._seen_frequency(credentials) if credentials.bssid else 0
-      self._request_scan()  # every attempt: a retry's access point may have restarted since the last scan
-      self.log("wifi_joining", interface=self.interface, **{k: v for k, v in credentials.describe().items() if k != "key_length"},
-               had_previous=bool(self.previous_connection), pinned_freq=frequency)
-      body = self._call(NM_PATH, NM_IFACE, "AddAndActivateConnection2", "a{sa{sv}}ooa{sv}",
-                        (connection_settings(credentials, self.interface, frequency, hidden=not frequency), self.device_path, "/",
-                         {"persist": ("s", "volatile")}), timeout=15.0)
-      self.connection_path, self.active_path = body[0], body[1]
+      if not self._reusable(credentials):
+        active = self._get(self.device_path, NM_DEVICE_IFACE, "ActiveConnection")
+        if active and active != "/" and not self.previous_connection and not self.dedicated:
+          try:
+            previous = self._get(active, NM_ACTIVE_IFACE, "Connection")
+            if self._connection_id(previous) != CONNECTION_ID:
+              self.previous_connection = previous
+          except NetworkError:
+            pass
+        self._delete_stale_profiles()
+        frequency = self._seen_frequency(credentials) if credentials.bssid else 0
+        if self.dedicated:
+          self._pause_home_wifi(frequency)
+        self._request_scan()  # every attempt: a retry's access point may have restarted since the last scan
+        self.log("wifi_joining", interface=self.interface, **{k: v for k, v in credentials.describe().items() if k != "key_length"},
+                 had_previous=bool(self.previous_connection), pinned_freq=frequency)
+        body = self._call(NM_PATH, NM_IFACE, "AddAndActivateConnection2", "a{sa{sv}}ooa{sv}",
+                          (connection_settings(credentials, self.interface, frequency, hidden=not frequency), self.device_path, "/",
+                           {"persist": ("s", "volatile")}), timeout=15.0)
+        self.connection_path, self.active_path = body[0], body[1]
+        self.joined = credentials
 
     deadline = time.monotonic() + timeout
     while True:
@@ -404,10 +414,64 @@ class NetworkLease:
     except NetworkError as error:
       self.log("wifi_autoconnect_pause_failed", error=str(error))
 
+  def _reusable(self, credentials: WifiCredentials) -> bool:
+    """The adapter restarted the handshake with the same network while our join of it is still up or coming up.
+
+    2026-10-29 OTTOCAST: DHCP finished 11.4 s into the join, the adapter restarted at 12 s, and deleting the profile then
+    threw away a working connection and cost two more joins. Keep it; a dead one still fails the wait below.
+    """
+    if not self.active_path or credentials != self.joined:
+      return False
+    try:
+      state = self._get(self.active_path, NM_ACTIVE_IFACE, "State")
+    except NetworkError:
+      return False
+    if state not in (ACTIVE_STATE_ACTIVATING, ACTIVE_STATE_ACTIVATED):
+      return False
+    self.log("wifi_join_reused", interface=self.interface, state=int(state))
+    return True
+
+  def _pause_home_wifi(self, frequency: int) -> None:
+    """Dedicated mode: take wlan0 off home Wi-Fi for the session; release(restore=True) lets it rejoin.
+
+    The radio is single-channel at a time (no DBS), so wlan0 on another channel halves the car's airtime. 2026-10-29
+    driveway (home 2.4 GHz ch 11 at -68 dBm, car ch 36): DHCP on aa0 took 11 s instead of 1-3 s, video fell from 12 to
+    6 fps, and home Wi-Fi's beacon loss when pulling away stalled video acks past 2.5 s and ended projection.
+    """
+    if self.home_path:
+      return
+    try:
+      for path, name in self._wifi_devices():
+        if name != "wlan0" or name == self.interface or self._get(path, NM_DEVICE_IFACE, "State") != DEVICE_STATE_ACTIVATED:
+          continue
+        home_freq = self._frequency(path)
+        if frequency and home_freq == frequency:
+          continue  # same channel: no airtime to win back
+        if not self._write_marker_for(name):
+          return
+        self.home_path = path  # before the calls, so release() undoes a half-done pause
+        self._set(path, NM_DEVICE_IFACE, "Autoconnect", "b", False)
+        self._call(path, NM_DEVICE_IFACE, "Disconnect")
+        self.log("wifi_home_paused", interface=name, freq=home_freq)
+    except NetworkError as error:
+      self.log("wifi_home_pause_failed", error=str(error))
+
+  def _restore_home_wifi(self) -> None:
+    try:
+      self._set(self.home_path, NM_DEVICE_IFACE, "Autoconnect", "b", True)  # NetworkManager rejoins a saved network in range
+      self.marker.unlink(missing_ok=True)
+      self.log("wifi_home_restored")
+    except (NetworkError, OSError) as error:
+      self.log("wifi_home_restore_failed", error=str(error))
+    self.home_path = ""
+
   def _write_marker(self) -> bool:
+    return self._write_marker_for(self.interface)
+
+  def _write_marker_for(self, interface: str) -> bool:
     try:
       self.marker.parent.mkdir(parents=True, exist_ok=True)
-      self.marker.write_text(json.dumps({"interface": self.interface, "boot": _boot_id()}))
+      self.marker.write_text(json.dumps({"interface": interface, "boot": _boot_id()}))
       return True
     except OSError as error:
       self.log("wifi_autoconnect_marker_failed", error=str(error))
@@ -478,7 +542,7 @@ class NetworkLease:
     reactivated only when the session finally stops, avoiding churn between attempts.
     """
     with self._lock:
-      if self.router is None and not (restore and (self.previous_connection or self.autoconnect_paused)):
+      if self.router is None and not (restore and (self.previous_connection or self.autoconnect_paused or self.home_path)):
         return
       ours_active = False
       try:
@@ -504,6 +568,8 @@ class NetworkLease:
         except (NetworkError, OSError) as error:
           self.log("wifi_autoconnect_restore_failed", error=str(error))
         self.autoconnect_paused = False
+      if restore and self.home_path:
+        self._restore_home_wifi()
       if restore and ours_active and self.previous_connection and self.device_path:
         try:
           self._call(NM_PATH, NM_IFACE, "ActivateConnection", "ooo", (self.previous_connection, self.device_path, "/"))
@@ -511,6 +577,7 @@ class NetworkLease:
         except NetworkError as error:
           self.log("wifi_restore_failed", error=str(error))
       self.connection_path = self.active_path = self.local_ip = ""
+      self.joined = None
       if restore:
         self.previous_connection = ""
       try:

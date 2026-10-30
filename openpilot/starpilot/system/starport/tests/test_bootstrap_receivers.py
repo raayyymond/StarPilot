@@ -141,3 +141,17 @@ def test_an_adapter_that_keeps_restarting_fails_the_attempt():
 
   with pytest.raises(bs.BootstrapError, match="kept restarting"):
     boot.run(join)
+
+
+def test_keepalive_reports_the_head_unit_closing_rfcomm():
+  boot, _ = scripted([ConnectionResetError(104, "Connection reset by peer")])
+  boot.keepalive(threading.Event())
+  assert boot.link_closed.is_set()
+
+
+def test_keepalive_stopped_by_the_session_is_not_a_closed_link():
+  boot, _ = scripted([])
+  stop = threading.Event()
+  stop.set()
+  boot.keepalive(stop)
+  assert not boot.link_closed.is_set()
