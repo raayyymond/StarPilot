@@ -182,8 +182,12 @@ def project(sm, cp, *, now_ns, drive_id, stop_plan, acceleration_max, mpc_accel,
                    any(radar.radar and radar.distance <= 18 and abs(radar.lateral) >= 1.5 and
                        abs(radar.distance - float(lead.x[0])) <= 4. for radar in leads)
                    for lead in model.leadsV3)
+    # vEgo jitters a hair below zero at standstill (-0.0002 on the Accord); step() rejects a negative speed and
+    # resets its confirmation timers, so an unclamped stop could never hold a release.
+    speed = float(car.vEgo)
+    speed = max(speed, 0.) if speed > -.05 else speed
     return Frame(now_ns, int(sm.logMonoTime['modelV2']), drive_id, bool(eligible), bool(car.standstill),
-                 float(car.vEgo), float(model.action.desiredAcceleration), float(mpc_accel), float(acceleration_max),
+                 speed, float(model.action.desiredAcceleration), float(mpc_accel), float(acceleration_max),
                  float(follow_seconds), leads, bool(blocked or not light_current or stop_plan.takeoff_light or
                                                   stop_plan.forcing or stop_plan.should_stop or conflict))
   except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError, RuntimeError):

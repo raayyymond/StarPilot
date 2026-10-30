@@ -181,6 +181,26 @@ def test_projection_red_light_missing_observation_and_offcenter_conflict_veto():
     assert observed is None or observed.blocked
 
 
+@pytest.mark.parametrize('v_ego, expected', [(-.0002, 0.), (-0., 0.), (.01, .01), (-1., -1.)])
+def test_projection_clamps_standstill_speed_jitter_only(v_ego, expected):
+  # Route 00000008--30ceb9ab86: vEgo read -0.0000 on alternate frames at a stop, each one reset the takeoff
+  from openpilot.starpilot.longitudinal.tests.test_conditional_handoff import Frame as NativeFrame
+  sm = NativeFrame()
+  sm.recv_time = dict.fromkeys(sm, (NOW-5_000_000)/1e9)
+  sm['carState'].vEgo, sm['carState'].standstill = v_ego, True
+  cp = NS(openpilotLongitudinalControl=True, passive=False, dashcamOnly=False, notCar=False)
+  observed = project(sm, cp, now_ns=NOW, drive_id=DRIVE, stop_plan=StopPlan(), acceleration_max=1., mpc_accel=0.,
+                     follow_seconds=1.45)
+  assert observed is not None and observed.speed == pytest.approx(expected, abs=1e-6)
+
+
+def test_standstill_jitter_no_longer_breaks_confirmation():
+  policy = LeadTakeoff()
+  results = [policy.step(True, frame(tick, speed=0.), 0., True) for tick in range(8)]
+  assert results[-1] == (.35, False)
+  assert LeadTakeoff().step(True, frame(speed=-.0002), 0., True) == (0., True)  # step itself still rejects negatives
+
+
 @pytest.mark.parametrize('raw', [None, b'0', b'1', b'2', b'true', b'1\n', b'1'*17])
 def test_saved_takeoff_default_off_corruption_and_safe_mode_never_rewrite(tmp_path, raw):
   from openpilot.starpilot.longitudinal.lead_takeoff_preferences import TakeoffPreferences
