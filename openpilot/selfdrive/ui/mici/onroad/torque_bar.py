@@ -6,13 +6,13 @@ from collections import OrderedDict
 import numpy as np
 import pyray as rl
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
-from opendbc.car.honda.values import CarControllerParams as HondaParams, HondaFlags
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.starpilot.ui.torque_feedback import accord_angle_error_bar, accord_angle_error_fraction
 
 # TODO: arc_bar_pts doesn't consider rounded end caps part of the angle span
 TORQUE_ANGLE_SPAN = 12.7  # degrees on the default 476 px camera view; narrower views beside the navigation panel scale down
@@ -146,19 +146,6 @@ def arc_bar_pts(r_mid: float, thickness: float,
 
 
 DEFAULT_MAX_LAT_ACCEL = 3.0  # m/s^2
-
-
-def accord_angle_error_bar(CP) -> bool:
-  return bool(CP) and CP.brand == "honda" and bool(CP.flags & HondaFlags.EPS_ANGLE_LOOP_FW)
-
-
-def accord_angle_error_fraction(setpoint_deg: float, angle_deg: float, v_ego: float) -> float:
-  """(setpoint - wheel) over the Accord error clip at this speed, clipped to +-1.
-
-  Negated like the torque branch: openpilot angles are left-positive and the bar draws +x to the
-  right, so the bar must point the way the EPS is pulling the wheel (left pull = bar left)."""
-  error_max = float(np.interp(v_ego, HondaParams.ANGLE_ERROR_MAX_BP, HondaParams.ANGLE_ERROR_MAX_V))
-  return float(np.clip(-(setpoint_deg - angle_deg) / error_max, -1.0, 1.0))
 
 
 class TorqueBar(Widget):
