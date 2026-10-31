@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.ford.interface import CarInterface
+from opendbc.car.ford.aol import BP_LATERAL
 from opendbc.car.ford.values import CAR
 from openpilot.cereal import log, messaging
 from openpilot.common.prefix import OpenpilotPrefix
@@ -15,21 +16,19 @@ SOURCE=10_020_000_000
 PUBLISHED_OFFSET=5_920_000
 SOURCE_AGE=33_452_000
 
-def profile(angle=False, pinion=False):
+def profile(bluepilot=False):
   fingerprint = gen_empty_fingerprint()
   fingerprint[0].update({0x5A: 8, 0x3A6: 8, 0x3A7: 8})
   fingerprint[2].update({0x3D6: 8, 0x186: 8})
   cp = CarInterface.get_params(CAR.FORD_MUSTANG_MACH_E_MK1, fingerprint, [], True, False, False)
   cp.alternativeExperience = 32
-  assert cp.flags == 3 and cp.safetyConfigs[0].safetyParam == 19
-  cp.safetyConfigs[0].safetyParam |= 128 if angle else 0
-  if pinion:
-    from opendbc.car.ford.pinion import select
-    assert select(cp, True)
+  assert cp.flags == 3 and cp.safetyConfigs[0].safetyParam == 3
+  if bluepilot:
+    cp.safetyConfigs[0].safetyParam |= BP_LATERAL
   return cp
 
-def callers(case, angle=False, pinion=False):
-  sd, controls, drive = case._authority_callers(False, cp=profile(angle, pinion), genuine_events=True)
+def callers(case):
+  sd, controls, drive = case._authority_callers(False, cp=profile(), genuine_events=True)
   def stationary(tick, **kwargs):
     state = kwargs.get('observed_state')
     if state is None:
@@ -41,15 +40,14 @@ def callers(case, angle=False, pinion=False):
   return sd, controls, stationary
 
 @pytest.mark.parametrize('pedal', ['brake', 'gas'])
-@pytest.mark.parametrize('angle,pinion', [(False, False), (True, False), (False, True), (True, True)])
 @pytest.mark.parametrize('socket_timeout', [False, True])
 @pytest.mark.parametrize('published_offset,source_age', [(PUBLISHED_OFFSET, SOURCE_AGE)])
-def test_ford_held_brake_keeps_only_the_recorded_unexpired_proof(socket_timeout, published_offset, source_age, angle, pinion, pedal):
+def test_ford_held_brake_keeps_only_the_recorded_unexpired_proof(socket_timeout, published_offset, source_age, pedal):
   case = fixture.IoniqAvailabilityTests(methodName='runTest')
   with ExitStack() as cleanup:
     cleanup.callback(case.doCleanups)
     cleanup.enter_context(OpenpilotPrefix())
-    sd, controls, drive = callers(case, angle, pinion)
+    sd, controls, drive = callers(case)
     for tick in (0, 1):
       stamp = 10_000_000_000 + tick * 10_000_000
       drive(tick, brake=pedal == 'brake', gas=pedal == 'gas', long_allowed=False, **settings('lateral_only', stamp, tick + 1))
@@ -246,3 +244,54 @@ def test_fresh_successor_cannot_reuse_a_held_brake_proof_across_new_edges(edge, 
       assert axis.sourceCarStateMonoTime == fresh
       assert axis.validUntilMonoTime != old_deadline
     assert old.validUntilMonoTime == old_deadline < fresh
+
+
+@pytest.mark.parametrize('socket_timeout,fault', [(timeout, fault)
+  for fault in ('none', 'lat_denied', 'rx', 'relay', 'brake', 'gas_release', 'button', 'expired')
+  for timeout in ((False,) if fault in ('brake', 'gas_release', 'button') else (False, True))])
+@pytest.mark.parametrize('bluepilot', [False, True])
+def test_combined_gas_override_keeps_only_its_original_lateral_proof(bluepilot, socket_timeout, fault):
+  case = fixture.IoniqAvailabilityTests(methodName='runTest')
+  with ExitStack() as cleanup:
+    cleanup.callback(case.doCleanups)
+    cleanup.enter_context(OpenpilotPrefix())
+    sd, controls, drive = case._authority_callers(True, cp=profile(bluepilot), genuine_events=True)
+    cs = fixture.car_state()
+    cs.cruiseState.enabled = True
+    for tick in range(3):
+      stamp = 10_000_000_000 + tick * 10_000_000
+      old, state, command = drive(tick, observed_state=cs, gas=True, state_stamp=stamp,
+        offset_ns=PUBLISHED_OFFSET if tick == 2 else 0, long_allowed=False, **settings('combined', stamp, tick+1))
+    assert state.enabled and old.lateralActive and old.desiredLongitudinal and not old.longitudinalActive
+    assert command.latActive and not command.longActive
+    previous = old.to_dict()
+    sd.car_state_poller = mock.Mock()
+    sd.car_state_poller.poll.return_value = []
+    changes = settings('combined', SOURCE, 3)
+    if fault == 'lat_denied':
+      changes['allowed'] = False
+    elif fault == 'rx':
+      changes['panda_fault'] = True
+    elif fault == 'relay':
+      changes['relay_fault'] = True
+    elif fault == 'brake':
+      cs.brakePressed = True
+    elif fault == 'button':
+      cs.buttonEvents = [{'type': 'cancel', 'pressed': True}]
+    held, state, command = drive(6 if fault == 'expired' else 5, timeout=socket_timeout, observed_state=cs,
+      gas=fault != 'gas_release', state_stamp=SOURCE, offset_ns=SOURCE_AGE-30_000_000,
+      long_allowed=False, **changes)
+    if fault != 'none':
+      assert not sd.aol_axis_publication_deferred
+      assert not command.latActive and not command.longActive
+      return
+    assert sd.aol_axis_publication_deferred
+    assert held.to_dict() == previous and state.enabled and not command.longActive
+    assert log.OnroadEvent.EventName.controlsMismatch not in sd.events.names
+    with mock.patch('openpilot.selfdrive.controls.controlsd.time.monotonic_ns', return_value=old.validUntilMonoTime+1):
+      expired, _ = controls.state_control()
+    assert not expired.latActive and not expired.longActive
+    fresh = SOURCE+40_000_000
+    axis, state, command = drive(6, observed_state=cs, gas=True, state_stamp=fresh,
+      long_allowed=False, **settings('combined', fresh, 4))
+    assert state.enabled and axis.lateralActive and command.latActive and not command.longActive

@@ -304,9 +304,8 @@ class TransportPauseFeedback:
     from opendbc.car import structs
     from opendbc.car.ford.values import CAR
     from opendbc.car.ford.aol import qualified as ford_qualified
-    from openpilot.starpilot.car.ford.aol import early_native_long_withdrawal_supported
-    first_long = early_native_long_withdrawal_supported(cp) or (ford_qualified(cp, marked_only=True) and
-      cp.openpilotLongitudinalControl and cp.carFingerprint == CAR.FORD_MUSTANG_MACH_E_MK1)
+    first_long = (ford_qualified(cp, marked_only=True) and cp.openpilotLongitudinalControl and
+      cp.carFingerprint == CAR.FORD_MUSTANG_MACH_E_MK1)
     pending_ack = str(axis.mode) == 'off' and not axis.lateralActive
     if (not first_long or not latched or self.failed or self.paused or
       self.pending_event or self.retention_started_ns or self.source_retention_started_ns or
@@ -343,20 +342,17 @@ class TransportPauseFeedback:
     from openpilot.starpilot.car.hyundai.aol import qualified_ccnc_long_aol as ev9_qualified
     from opendbc.car import structs
     ev9 = cp.brand == 'hyundai' and ev9_qualified(cp, marked_only=True)
-    from openpilot.starpilot.car.ford.aol import early_native_long_withdrawal_supported as ford_early_long
     from opendbc.car.ford.aol import qualified as ford_qualified
-    from opendbc.car.ford.values import CAR
     # Before 10Hz LONG echo: physical pedal/cancel retains only real independent LAT intent.
     ford_withdrawal = bool(cp.brand == 'ford' and ford_qualified(cp, marked_only=True) and cp.openpilotLongitudinalControl and
       (cs.brakePressed or not cs.cruiseState.enabled or physical_cancel(cs, cp) or
        not axis.desiredLongitudinal and not axis.longitudinalActive) and not (cs.brakePressed and cs.gasPressed) and not cs.regenBraking and
       cs.cruiseState.available and not cs.doorOpen and not cs.seatbeltUnlatched and
       not cs.vehicleSensorsInvalid and cs.gearShifter == structs.CarState.GearShifter.drive)
-    # Mach-E angle/curvature share native independent axes: intent-only 10Hz LONG withdrawal/recovery echo join.
+    # Ford angle/curvature share native independent axes: intent-only 10Hz LONG withdrawal/recovery echo join.
     # Fresh LAT grant; all health/fault checks required.
-    ford_mache_long = bool(ford_qualified(cp, marked_only=True) and cp.openpilotLongitudinalControl and
-      cp.carFingerprint == CAR.FORD_MUSTANG_MACH_E_MK1)
-    early_long = gm or cp.brand == 'hyundai' and early_native_long_withdrawal_supported(cp) or ev9 or ford_early_long(cp) or ford_withdrawal or ford_mache_long
+    ford_long = bool(ford_qualified(cp, marked_only=True) and cp.openpilotLongitudinalControl)
+    early_long = gm or cp.brand == 'hyundai' and early_native_long_withdrawal_supported(cp) or ev9 or ford_withdrawal or ford_long
     from openpilot.starpilot.car.gm.aol import f1_conventional_lateral_owner, gm_physical_pedal_withdrawal
     gm_pedal = gm_physical_pedal_withdrawal(cp, cs) and not f1_conventional_lateral_owner(cp)
     event_ns = int(sm.logMonoTime['onroadEvents'])
@@ -535,11 +531,12 @@ class TransportPauseFeedback:
 
     # PCM-off != AOL toggle: after output withdrawal retain prior intent only for
     # location faults/matched EPS recovery; native/session/source checks remain.
-    stock_angle = cp.brand == 'hyundai' and angle_qualified(cp, marked_only=True)
-    stock_hkg = cp.brand == 'hyundai' and (stock_angle or stock_canfd_qualified(cp, marked_only=True) or
+    recovering_user = bool((location_fault or eps_recovery) and users)
+    stock_angle = recovering_user and cp.brand == 'hyundai' and angle_qualified(cp, marked_only=True)
+    stock_hkg = recovering_user and cp.brand == 'hyundai' and (stock_angle or stock_canfd_qualified(cp, marked_only=True) or
       stock_classic_qualified(cp, marked_only=True))
-    stock_user = stock_lateral_user_event(cp)
-    stock_temporary_user = bool((location_fault or eps_recovery) and (stock_hkg or cp.brand == 'chrysler' and chrysler_qualified(cp, marked_only=True) or
+    stock_user = stock_lateral_user_event(cp) if recovering_user else None
+    stock_temporary_user = bool(recovering_user and (stock_hkg or cp.brand == 'chrysler' and chrysler_qualified(cp, marked_only=True) or
       cp.brand == 'ford' and ford_qualified(cp, marked_only=True) or cp.brand == 'nissan' and nissan_qualified(cp, marked_only=True)
       or cp.brand == 'subaru' and subaru_qualified(cp, marked_only=True)
       or cp.brand == 'mazda' and mazda_qualified(cp, marked_only=True)
@@ -549,7 +546,7 @@ class TransportPauseFeedback:
       cs.cruiseState.available and not cs.cruiseState.enabled and
       cs.gearShifter in (gears.drive, gears.low, gears.sport, gears.brake) and
       not cs.doorOpen and (not cs.seatbeltUnlatched or belt_eps_recovery) and not cs.brakePressed and not cs.regenBraking and
-      (not cs.gasPressed or stock_angle) and
+      (not cs.gasPressed or stock_angle or eps_recovery and stock_canfd_qualified(cp, marked_only=True)) and
       all(event.name == stock_user and not event.softDisable and
           not event.immediateDisable for event in users))
     from openpilot.starpilot.car.ford.aol import temporary_eps_pedal_recovery
@@ -1442,8 +1439,9 @@ class TransportPauseFeedback:
           self.temporary_host_qualified = True
           return False
       if cp.brand == 'ford' and latched:
-        from openpilot.starpilot.car.ford.command_pause import retain_command_pause_intent
-        if retain_command_pause_intent(self, sm, cp, cs, axis, now_ns, latched=latched, producer=intent_producer_session):
+        from openpilot.starpilot.car.ford.command_pause import retain_command_pause_intent, retain_gear_withdrawal_intent
+        if (retain_command_pause_intent(self, sm, cp, cs, axis, now_ns, latched=latched, producer=intent_producer_session) or
+            retain_gear_withdrawal_intent(self, sm, cp, cs, axis, now_ns, latched=latched, producer=intent_producer_session)):
           return False
       if (cp.brand == 'chrysler' and current and continuity and latched and
           not self.failed and not self.ever_lateral_active):

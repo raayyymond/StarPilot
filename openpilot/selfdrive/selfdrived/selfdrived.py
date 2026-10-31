@@ -817,11 +817,11 @@ class SelfdriveD:
     return CS
 
   def ford_source_deadline_supported(self):
-    from opendbc.car.ford.aol import qualified, base_safety_param
+    from opendbc.car.ford.aol import profile_word, qualified
     from opendbc.car.ford.values import CAR
     return (qualified(self.CP, marked_only=True) and
             self.CP.carFingerprint == CAR.FORD_MUSTANG_MACH_E_MK1 and
-            len(self.CP.safetyConfigs) == 1 and base_safety_param(self.CP) == 19)
+            len(self.CP.safetyConfigs) == 1 and profile_word(self.CP.safetyConfigs[0].safetyParam) == 3)
 
   def source_deadline_deferral_supported(self):
     from openpilot.starpilot.car.hyundai.aol import source_deadline_supported
@@ -850,7 +850,8 @@ class SelfdriveD:
       all(valid and sample.brakePressed == previous.brakePressed and sample.regenBraking == previous.regenBraking
           and not sample.gasPressed and not sample.buttonEvents for sample, valid in samples))
     ford_lateral_gas = bool(self.ford_source_deadline_supported() and proof[8] and not proof[9] and
-      not self.enabled and not self.active and not CS.cruiseState.enabled)
+      (not self.enabled and not self.active and not CS.cruiseState.enabled or
+       self.enabled and self.active and CS.cruiseState.enabled and proof[7]))
     held_gas = bool((proof[9] and self.enabled and self.active or ford_lateral_gas) and previous.gasPressed and
       self.events.contains(ET.OVERRIDE_LONGITUDINAL) and
       all(valid and sample.gasPressed and not sample.brakePressed and not sample.regenBraking
@@ -946,7 +947,11 @@ class SelfdriveD:
            for sample, valid in samples):
       return 0
     native = current_native(self.sm, self.CP, now_ns=now_ns, axis_session_id=session)
-    if (native is None or not healthy_transport(self.sm, self.CP, CS, session, now_ns, native) or
+    transport_current = healthy_transport(self.sm, self.CP, CS, session, now_ns, native)
+    if not transport_current and held_gas and self.ford_source_deadline_supported() and not active_longitudinal:
+      from openpilot.starpilot.aol.transport_pause import independent_lateral_health
+      transport_current = native is not None and independent_lateral_health(self.sm, self.CP, CS, session, now_ns) == native
+    if (native is None or not transport_current or
         native.pandaSerial != previous_native.pandaSerial or native.pandaInventory != previous_native.pandaInventory or
         native.observedMonoTime < previous_native.observedMonoTime or
         bool(native.requestedLateral) != lateral or bool(native.requestedLongitudinal) != longitudinal):
@@ -1225,7 +1230,7 @@ class SelfdriveD:
         not 0 < intent.carStateLogMonoTime <= now_ns or now_ns - intent.carStateLogMonoTime > INTENT_MAX_AGE_NS or
         intent.carStateLogMonoTime <= anchor[2].carStateLogMonoTime or
         intent.producerSessionId != anchor[0][4] or companion is None or companion.integrity_epoch != anchor[0][5] or
-        (self.events.contains(ET.USER_DISABLE) and not stock_lateral_role(self, CS, native, intent)) or
+        (self.events.contains(ET.USER_DISABLE) and not stock_lateral_role(self, CS, native, intent, allow_independent_gas=True)) or
         self.events.contains(ET.IMMEDIATE_DISABLE) or
         native is None or native is not getattr(self.aol_transport_pause, 'observed_native', None) or
         native.pandaSerial != anchor[1].pandaSerial or native.observedMonoTime < anchor[1].observedMonoTime or
@@ -1779,14 +1784,12 @@ class SelfdriveD:
     mismatch counter retain their original fault ownership.
     """
     from openpilot.starpilot.aol.transport_pause import independent_lateral_health
-    from opendbc.car.ford.values import CAR as FORD_CAR
     from openpilot.starpilot.car.ford.aol import native_accepts_cp as ford_native_accepts_cp
-    # Established ordinary Mach-E cruise does not require an independent AOL latch.
+    # Established ordinary Ford cruise does not require an independent AOL latch.
     # Its native LONG pedal withdrawal may precede Card; the original combined
     # publication, live LAT grant and every health/deadline check below still apply.
-    ordinary_ford = bool(self.CP.carFingerprint == FORD_CAR.FORD_MUSTANG_MACH_E_MK1 and self.CP.safetyConfigs and
-                         ford_native_accepts_cp(self.CP, int(car.CarParams.SafetyModel.ford),
-                            self.CP.safetyConfigs[-1].safetyParam))
+    ordinary_ford = bool(self.CP.brand == 'ford' and self.CP.openpilotLongitudinalControl and self.CP.safetyConfigs and
+      ford_native_accepts_cp(self.CP, int(car.CarParams.SafetyModel.ford), self.CP.safetyConfigs[-1].safetyParam))
     proof = getattr(self, 'aol_published_input_proof', None)
     prior = getattr(self, 'aol_published_input_native', None)
     anchor = getattr(self, 'aol_ordinary_source_anchor', None)
@@ -1834,9 +1837,8 @@ class SelfdriveD:
     # Ioniq6 also checks the physical brake before its separately published host sample.
     # Retain only its already granted LAT; all proof, health and LONG withdrawal gates remain.
     # The exact vehicle policies and all proof/health checks above remain required.
-    from openpilot.starpilot.car.ford.aol import early_native_long_withdrawal_supported as ford_early_long
     return bool(ordinary_ford or gm_native_accepts_cp(self.CP, native.safetyModel, native.safetyParam) or
-                early_native_long_withdrawal_supported(self.CP) or ford_early_long(self.CP) or
+                early_native_long_withdrawal_supported(self.CP) or
                 toyota_aol_qualified(self.CP, marked_only=True) or
                 not native.pandaInventory[owners[0]].controlsAllowed and
                 not self.sm['pandaStates'][owners[0]].controlsAllowed)
