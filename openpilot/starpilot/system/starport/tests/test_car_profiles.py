@@ -49,8 +49,8 @@ def test_ottocast_tuning_applies_only_when_chosen():
   # The operator's experiment set for that dongle: every connection/reconnection fix is off for everyone else.
   chosen = config(car_profile_override="ottocast")
   assert car_profiles.resolve(chosen) == ("ottocast", "override")
-  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0, "native_reconnects": 2,
-                                         "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True}
+  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0, "phone_services": True,
+                                         "native_reconnects": 2, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True}
   assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST"
   for other in (config(), config(car_profile_override="default"), config(car_profile_override="aawireless")):
     tuning = car_profiles.tuning(other)

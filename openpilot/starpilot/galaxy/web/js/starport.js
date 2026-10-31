@@ -566,7 +566,7 @@ export const StarPortPage = {
       const chosen = this.runtime?.car_profile_source === "override"
       return { label: "Adapter", value: !chosen ? "Choose one" : ADAPTER_MODELS[this.runtime.car_profile] ?? ADAPTER_MODELS.default,
         choices: [...(!chosen ? ["Choose one"] : []), ...Object.values(ADAPTER_MODELS)], available: true, action: true,
-        reason: "AAWireless gets video and car-data settings tuned for that dongle. OTTOCAST (Wi-Fi CAR2-xxxx) gets the connection and reconnection tuning worked out for it. Other adapters use the regular pairing." }
+        reason: "AAWireless gets video and car-data settings tuned for that dongle. OTTOCAST (Wi-Fi CAR2-xxxx) gets the car-data channels, pauses and reconnects worked out for it. Other adapters use the regular pairing." }
     },
     appDisabled() {
       return !this.setup?.enabled || !this.setup.parked || !!this.pairing?.active || this.linked

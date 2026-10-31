@@ -19,10 +19,13 @@ RULES: list[dict] = [
    "tuning": {"max_window": 30, "phone_services": True, "phone_frames": True}},
   # OTTOCAST (Wi-Fi "CAR2-xxxx"), 2020 Honda Accord, 2026-10-28..31 over 19 projections: the car granted the screen only
   # when the dongle answered the first Android Auto message at once (5 of 6), never when it answered ~2 s later (0 of 13),
-  # which is every connection made at ignition. Everything below is the operator's experiment set for that dongle and
-  # applies to no other adapter; the standard behaviour stays as it was for AAWireless and "Other".
+  # which is every connection made at ignition. The dongle's own session (its "connect via Bluetooth" screen) and a phone
+  # are always granted; both offer the car-data and Bluetooth channels we leave closed, so open them too (phone_services,
+  # 2026-10-31 experiment). Everything below is the operator's experiment set for that dongle and applies to no other
+  # adapter; the standard behaviour stays as it was for AAWireless and "Other".
   {"id": "ottocast", "label": "OTTOCAST", "match": {},
-   "tuning": {"negotiate_delay_s": 3.0, "native_reconnects": 2, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True}},
+   "tuning": {"negotiate_delay_s": 3.0, "phone_services": True, "native_reconnects": 2, "reuse_wifi_join": True,
+              "tcp_stops_with_rfcomm": True}},
 ]
 
 
