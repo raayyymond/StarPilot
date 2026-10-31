@@ -39,10 +39,17 @@ def config(**values):
 def test_aawireless_tuning_applies_only_when_chosen():
   chosen = config(car_profile_override="aawireless", receiver_name="AAWireless-4F2A")
   assert car_profiles.resolve(chosen) == ("aawireless", "override")
-  assert car_profiles.tuning(chosen) == {"connect_delay_s": 0.0, "max_window": 30, "phone_services": True, "phone_frames": True}
+  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "max_window": 30, "phone_services": True, "phone_frames": True}
   assert car_profiles.summary(chosen)["car_profile_label"] == "AAWireless"
   for other in (config(receiver_name="AAWireless-4F2A"), config(car_profile_override="default")):
     assert car_profiles.tuning(other) == car_profiles.DEFAULTS
+
+
+def test_ottocast_waits_before_negotiating_and_nothing_else():
+  chosen = config(car_profile_override="ottocast")
+  assert car_profiles.resolve(chosen) == ("ottocast", "override")
+  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0}
+  assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST / Carlinkit"
 
 
 def test_leaving_the_adapter_setup_clears_the_adapter_model(sup):
@@ -221,3 +228,59 @@ def test_a_new_adapter_setup_is_not_migrated(tmp_path):
   path = tmp_path / "config.json"
   path.write_text(json.dumps({"config_version": identity_store.CONFIG_VERSION, "car_type": "adapter"}))
   assert identity_store.load_config(path)["car_profile_override"] == ""
+
+
+def test_negotiate_delay_holds_discovery_until_the_car_side_is_up(identity, tmp_path, monkeypatch):
+  # 2026-10-31 OTTOCAST: the dongle answers the version request ~2 s in, and a video setup right after is refused.
+  import socket
+  import time
+  from openpilot.starpilot.system.starport import hw_encoder
+  from openpilot.starpilot.system.starport.tests.fake_head_unit import FakeHeadUnit, rfcomm_head_unit
+
+  class NoEncoder:
+    backend = 'fixture'
+    supports_nv12 = False
+    last_encode_ms = 0.0
+
+    def encode_rgba(self, pixels, *, keyframe=False):
+      raise AssertionError("no frame may be encoded without video focus")
+
+    def close(self): pass
+
+  monkeypatch.setattr(hw_encoder, 'create_encoder', lambda width, height, **_kwargs: (NoEncoder(), 15))
+  monkeypatch.setattr(car_profiles, "RULES", [{"id": "ottocast", "label": "OTTOCAST / Carlinkit", "match": {}, "tuning": {"negotiate_delay_s": 0.4}}])
+  cars = []
+  stopping = threading.Event()
+
+  def rfcomm(address, channel, timeout=15.0):
+    hu = FakeHeadUnit(identity, native_focus=True)
+    cars.append(hu)
+    phone, car = socket.socketpair()
+
+    def car_side():
+      try:
+        with car:
+          rfcomm_head_unit(car, ("127.0.0.1", hu.port), pings=False)
+          stopping.wait(1.0)
+      except Exception:
+        pass
+    threading.Thread(target=car_side, daemon=True).start()
+    return phone
+
+  sup, _ = make_supervisor(identity, tmp_path, monkeypatch, rfcomm)
+  sup.config["car_profile_override"] = "ottocast"
+  sup.start()
+  try:
+    deadline = time.monotonic() + 15
+    while not cars or not cars[0].focus_requests:
+      assert time.monotonic() < deadline, sup.status()
+      time.sleep(0.05)
+  finally:
+    stopping.set()
+    sup.stop()
+    for hu in cars:
+      hu.close()
+  events = [json.loads(line) for path in (tmp_path / "aa" / "logs").glob("session-*.jsonl") for line in path.read_text().splitlines()]
+  by_name = {e["event"]: e for e in events}
+  assert by_name["car_profile_negotiate_delay"]["seconds"] == 0.4
+  assert by_name["discovered"]["mono_s"] - by_name["authenticated"]["mono_s"] >= 0.4

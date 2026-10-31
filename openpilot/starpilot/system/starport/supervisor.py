@@ -1503,6 +1503,9 @@ class Supervisor:
       session.phone_address = self._adapter_address()
     self._stage("authenticating")
     session.authenticate()
+    if delay := tuning["negotiate_delay_s"]:
+      self.log("car_profile_negotiate_delay", seconds=delay)
+      self._wait(delay)
     self._stage("negotiating")
     mode = session.start(config["device_name"], "comma.ai")
     self._set(mode=mode.as_dict(), error="")

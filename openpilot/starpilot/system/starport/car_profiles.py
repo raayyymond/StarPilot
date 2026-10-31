@@ -1,13 +1,19 @@
 """Android Auto tuning selected from the saved head-unit fingerprint or an override."""
 import re
 
-DEFAULTS = {"connect_delay_s": 0.0, "max_window": 2, "phone_services": False, "phone_frames": False}
+DEFAULTS = {"connect_delay_s": 0.0, "negotiate_delay_s": 0.0, "max_window": 2, "phone_services": False, "phone_frames": False}
 
 FINGERPRINT_KEYS = ("head_unit_make", "head_unit_model", "car_make", "car_model", "car_year")
 
 RULES: list[dict] = [
   {"id": "aawireless", "label": "AAWireless", "match": {},
    "tuning": {"max_window": 30, "phone_services": True, "phone_frames": True}},
+  # OTTOCAST / Carlinkit style dongles (Wi-Fi "CAR2-xxxx") bring up their USB link to the car only once the comma connects,
+  # and answer the first Android Auto message ~2 s later. 2026-10-28..31 Honda: every session that then negotiated video at
+  # once was refused the screen (12 of 13); the four that got it had found the dongle's car side already up. A phone's
+  # Android Auto stack takes seconds here on its own; give the car the same room before discovery.
+  {"id": "ottocast", "label": "OTTOCAST / Carlinkit", "match": {},
+   "tuning": {"negotiate_delay_s": 3.0}},
 ]
 
 
