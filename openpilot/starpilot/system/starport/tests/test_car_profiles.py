@@ -45,11 +45,16 @@ def test_aawireless_tuning_applies_only_when_chosen():
     assert car_profiles.tuning(other) == car_profiles.DEFAULTS
 
 
-def test_ottocast_waits_before_negotiating_and_nothing_else():
+def test_ottocast_tuning_applies_only_when_chosen():
+  # The operator's experiment set for that dongle: every connection/reconnection fix is off for everyone else.
   chosen = config(car_profile_override="ottocast")
   assert car_profiles.resolve(chosen) == ("ottocast", "override")
-  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0}
-  assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST / Carlinkit"
+  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0, "native_reconnects": 2,
+                                         "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True}
+  assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST"
+  for other in (config(), config(car_profile_override="default"), config(car_profile_override="aawireless")):
+    tuning = car_profiles.tuning(other)
+    assert (tuning["negotiate_delay_s"], tuning["native_reconnects"], tuning["reuse_wifi_join"], tuning["tcp_stops_with_rfcomm"]) == (0.0, 0, False, False)
 
 
 def test_leaving_the_adapter_setup_clears_the_adapter_model(sup):
@@ -248,7 +253,7 @@ def test_negotiate_delay_holds_discovery_until_the_car_side_is_up(identity, tmp_
     def close(self): pass
 
   monkeypatch.setattr(hw_encoder, 'create_encoder', lambda width, height, **_kwargs: (NoEncoder(), 15))
-  monkeypatch.setattr(car_profiles, "RULES", [{"id": "ottocast", "label": "OTTOCAST / Carlinkit", "match": {}, "tuning": {"negotiate_delay_s": 0.4}}])
+  monkeypatch.setattr(car_profiles, "RULES", [{"id": "ottocast", "label": "OTTOCAST", "match": {}, "tuning": {"negotiate_delay_s": 0.4}}])
   cars = []
   stopping = threading.Event()
 

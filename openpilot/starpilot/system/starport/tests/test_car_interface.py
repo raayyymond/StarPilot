@@ -522,6 +522,7 @@ def test_handshake_restart_keeps_the_join_in_progress(tmp_path, monkeypatch):
   nm = JoinNM()
   lease = nm_lease(nm)
   lease.marker = tmp_path / "paused.json"
+  lease.reuse_join = True  # OTTOCAST profile
   lease.acquire(credentials(), timeout=2.0)
   nm.active_state = 1  # still getting its address when the adapter asks again
   monkeypatch.setattr(network.time, "sleep", lambda _: setattr(nm, "active_state", 2))
@@ -529,16 +530,19 @@ def test_handshake_restart_keeps_the_join_in_progress(tmp_path, monkeypatch):
   assert nm.calls.count("AddAndActivateConnection2") == 1 and "wifi_join_reused" in lease.log.names()
 
 
-@pytest.mark.parametrize("change", ["credentials", "deactivated"])
+@pytest.mark.parametrize("change", ["credentials", "deactivated", "standard profile"])
 def test_a_different_or_dead_join_is_replaced(tmp_path, change):
   nm = JoinNM()
   lease = nm_lease(nm)
   lease.marker = tmp_path / "paused.json"
+  lease.reuse_join = change != "standard profile"
   lease.acquire(credentials(), timeout=2.0)
   again = credentials()
   if change == "credentials":
     again = WifiCredentials(ssid="Car-4E91", key="new-key", bssid="C6:B7:57:F7:4E:91", security=8, ap_type=0)
-  else:
+  elif change == "deactivated":
     nm.active_state = 4  # the adapter's access point restarted and dropped us
+  else:
+    nm.active_state = 1  # same restart as the OTTOCAST case, but no profile asked to keep the join
   lease.acquire(again, timeout=2.0)
   assert nm.calls.count("AddAndActivateConnection2") == 2 and "wifi_join_reused" not in lease.log.names()

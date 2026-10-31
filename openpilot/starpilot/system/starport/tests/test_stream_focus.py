@@ -73,7 +73,7 @@ def stream(monkeypatch, session, seconds=0.4, during=None, reconnects_left=0):
   sup._stop, sup._status = threading.Event(), {"state": ""}
   sup._stage = lambda *a, **k: None
   sup._set = lambda **values: sup._status.update(values)
-  sup._native_reconnects = supervisor.NATIVE_RECONNECTS - reconnects_left
+  sup._native_reconnects, sup._native_reconnect_limit = 0, reconnects_left  # the limit comes from the car profile
   timer = threading.Timer(seconds, sup._stop.set)
   timer.start()
   if during is not None:

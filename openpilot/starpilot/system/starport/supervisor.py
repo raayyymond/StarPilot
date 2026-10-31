@@ -72,11 +72,11 @@ STREAM_STALL_LOG = 1.0       # a streaming loop pass slower than this is logged
 FOCUS_RETRY_FIRST = 3.0
 FOCUS_RETRY_INTERVAL = 10.0
 FOCUS_RETRIES = 5
-# Wireless only: a car that still holds its own screen this long into streaming (two re-requests in) is sent a clean
-# ShutdownRequest and the session reconnects, at most NATIVE_RECONNECTS times per session. 2026-10-28..30 Honda/OTTOCAST:
-# 9 of 12 projections were refused for the whole drive, and reconnecting was the only thing that ever got video.
+# Wireless only, and only for a car profile with "native_reconnects": a car that still holds its own screen this long into
+# streaming (two re-requests in) is sent a clean ShutdownRequest and the session reconnects, at most that many times per
+# session. 2026-10-28..30 Honda/OTTOCAST: 9 of 12 projections were refused for the whole drive, and reconnecting was the
+# only thing that ever got video.
 NATIVE_FOCUS_GIVE_UP_S = 15.0
-NATIVE_RECONNECTS = 2
 REPORTED_SETTINGS = ("connection", "usb_mode", "view", "encoder", "fps", "bitrate_kbps", "rate_control", "gpu_nv12",
                      "async_readback", "wifi_interface", "dedicated_wifi_interface", "verify_head_unit", "version_status",
                      "rfcomm_channel", "phone_class", "auto_connect")
@@ -352,7 +352,8 @@ class Supervisor:
     self._projection_enabled = projection_enabled
     self._lease_factory = lease_factory
     self._dedicated_strikes: dict[str, int] = {}
-    self._native_reconnects = NATIVE_RECONNECTS  # per session: how often a car that never granted focus was reconnected
+    self._native_reconnects = 0  # per session: how often a car that never granted focus was reconnected
+    self._native_reconnect_limit = 0  # from the car profile, wireless sessions only
     self._wifi_recover_at = 0.0
     self._bt_client = bluetooth_client
     self._frame_path = frame_path
@@ -446,7 +447,7 @@ class Supervisor:
       if not self._projection_enabled():
         raise RuntimeError("Android Auto is disabled")
       if self._adapter_choice_needed():
-        raise RuntimeError("Choose your adapter model (AAWireless or Other) in Galaxy first")
+        raise RuntimeError("Choose your adapter model (AAWireless, OTTOCAST or Other) in Galaxy first")
       if self.config["connection"] == "wired" and (reason := wired_blocker()):
         raise RuntimeError(reason)
       if self._thread is not None and self._thread.is_alive():
@@ -597,7 +598,7 @@ class Supervisor:
   def prepare_pairing(self, seconds: float = 180.0) -> None:
     """Present as a phone (HFP gateway, smartphone class) while the car pairs."""
     if self._adapter_choice_needed():
-      raise RuntimeError("Choose your adapter model (AAWireless or Other) in Galaxy first")
+      raise RuntimeError("Choose your adapter model (AAWireless, OTTOCAST or Other) in Galaxy first")
     if self._bluez_factory is None and (self._source_session is None or self._shared_bluetooth_owner is None or
                                         not self._shared_bluetooth_owner.session_valid(self._source_session)):
       raise RuntimeError('Current Galaxy pairing authorization required')
@@ -1019,15 +1020,19 @@ class Supervisor:
     if factory is None:
       from openpilot.starpilot.system.starport.network import NetworkLease
       factory = NetworkLease
+    reuse_join = car_profiles.tuning(self.config)["reuse_wifi_join"]
     if self.config["dedicated_wifi_interface"]:
       from openpilot.starpilot.system.starport.car_interface import DedicatedLease
       strikes = self._dedicated_strikes.get(self.config["receiver_address"], 0)
       if strikes >= DEDICATED_STRIKES:
         self.log("wifi_dedicated_skipped", strikes=strikes)
       lease = DedicatedLease(self.log, self.config["wifi_interface"], factory, enabled=strikes < DEDICATED_STRIKES)
+      lease.reuse_join = reuse_join
       lease.prepare()
       return lease
-    return factory(self.log, self.config["wifi_interface"])
+    lease = factory(self.log, self.config["wifi_interface"])
+    lease.reuse_join = reuse_join
+    return lease
 
   def _count_dedicated(self, lease) -> None:
     """A car whose network keeps failing on aa0 but joining on wlan0 stays on wlan0 until the daemon restarts."""
@@ -1137,7 +1142,8 @@ class Supervisor:
     lease = self._lease() if wireless else NoLease()
     attempt = 0
     car_first = trigger == "onroad" and wireless
-    self._native_reconnects = 0 if wireless else NATIVE_RECONNECTS
+    self._native_reconnects = 0
+    self._native_reconnect_limit = car_profiles.tuning(self.config)["native_reconnects"] if wireless else 0
     try:
       while not self._stop.is_set():
         started = time.monotonic()
@@ -1236,7 +1242,8 @@ class Supervisor:
       self.log('companion_car_connected', address=companion)
     elif device.get('starport') and '0000111e-0000-1000-8000-00805f9b34fb' not in device.get('uuids', []):
       raise RuntimeError('Connect your paired car in Galaxy Bluetooth first to select it for this Android Auto adapter')
-    if delay := car_profiles.tuning(config)["connect_delay_s"]:
+    tuning = car_profiles.tuning(config)
+    if delay := tuning["connect_delay_s"]:
       self.log("car_profile_connect_delay", seconds=delay)
       self._wait(delay)
     bluez.connect_device(address)
@@ -1274,7 +1281,7 @@ class Supervisor:
     keepalive_stop = threading.Event()
     threading.Thread(target=boot.keepalive, args=(keepalive_stop,), name="aa_rfcomm_keepalive", daemon=True).start()
     try:
-      self._project(result, lease, ident, link_lost=boot.link_closed.is_set)
+      self._project(result, lease, ident, link_lost=boot.link_closed.is_set if tuning["tcp_stops_with_rfcomm"] else lambda: False)
     finally:
       keepalive_stop.set()
 
@@ -1642,7 +1649,7 @@ class Supervisor:
           session.request_native()
       # Only while the car has never granted focus this session: once it has, native focus is the driver's choice.
       if session.focus_epoch == 0 and not session.focused:
-        if self._native_reconnects < NATIVE_RECONNECTS and now - started >= NATIVE_FOCUS_GIVE_UP_S:
+        if self._native_reconnects < self._native_reconnect_limit and now - started >= NATIVE_FOCUS_GIVE_UP_S:
           self.log("projection_native_give_up", after_s=round(now - started, 1), reconnect=self._native_reconnects + 1)
           raise NativeFocusHeld(f"Car kept its own screen for {NATIVE_FOCUS_GIVE_UP_S:.0f} s; reconnecting")
         if focus_retries < FOCUS_RETRIES and now >= next_focus_retry:

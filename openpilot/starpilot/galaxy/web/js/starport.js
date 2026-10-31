@@ -44,7 +44,7 @@ export function uploadPackage(path, options, progress, makeRequest = () => new X
 }
 
 const ADDRESS = /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/
-const ADAPTER_MODELS = { aawireless: "AAWireless", ottocast: "OTTOCAST / Carlinkit", default: "Other" }
+const ADAPTER_MODELS = { aawireless: "AAWireless", ottocast: "OTTOCAST", default: "Other" }
 const HEAD_UNIT_APPS = { headunitpad: "HeadunitPad", openheadunit: "Open Headunit" }
 const HOTSPOT_LINK = `<a class="gx-link" href="#/galaxy">Galaxy Wi-Fi Hotspot</a>`
 const WIRED_STATUS = `<div v-if="wired" class="gx-note">
@@ -566,7 +566,7 @@ export const StarPortPage = {
       const chosen = this.runtime?.car_profile_source === "override"
       return { label: "Adapter", value: !chosen ? "Choose one" : ADAPTER_MODELS[this.runtime.car_profile] ?? ADAPTER_MODELS.default,
         choices: [...(!chosen ? ["Choose one"] : []), ...Object.values(ADAPTER_MODELS)], available: true, action: true,
-        reason: "AAWireless gets video and car-data settings tuned for that dongle. OTTOCAST and Carlinkit dongles (Wi-Fi CAR2-xxxx) get a pause before video so the car is ready to show it. Other adapters use the regular pairing." }
+        reason: "AAWireless gets video and car-data settings tuned for that dongle. OTTOCAST (Wi-Fi CAR2-xxxx) gets the connection and reconnection tuning worked out for it. Other adapters use the regular pairing." }
     },
     appDisabled() {
       return !this.setup?.enabled || !this.setup.parked || !!this.pairing?.active || this.linked

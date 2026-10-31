@@ -1,19 +1,28 @@
 """Android Auto tuning selected from the saved head-unit fingerprint or an override."""
 import re
 
-DEFAULTS = {"connect_delay_s": 0.0, "negotiate_delay_s": 0.0, "max_window": 2, "phone_services": False, "phone_frames": False}
+DEFAULTS = {
+  "connect_delay_s": 0.0,       # wait before paging the car over Bluetooth
+  "negotiate_delay_s": 0.0,     # wait after authentication before service discovery
+  "max_window": 2,
+  "phone_services": False,
+  "phone_frames": False,
+  "native_reconnects": 0,       # a car that never grants the screen: shut down cleanly and reconnect this many times
+  "reuse_wifi_join": False,     # the adapter restarted the handshake with the same network: keep the join in progress
+  "tcp_stops_with_rfcomm": False,  # the adapter closed RFCOMM before accepting TCP: stop retrying, reconnect instead
+}
 
 FINGERPRINT_KEYS = ("head_unit_make", "head_unit_model", "car_make", "car_model", "car_year")
 
 RULES: list[dict] = [
   {"id": "aawireless", "label": "AAWireless", "match": {},
    "tuning": {"max_window": 30, "phone_services": True, "phone_frames": True}},
-  # OTTOCAST / Carlinkit style dongles (Wi-Fi "CAR2-xxxx") bring up their USB link to the car only once the comma connects,
-  # and answer the first Android Auto message ~2 s later. 2026-10-28..31 Honda: every session that then negotiated video at
-  # once was refused the screen (12 of 13); the four that got it had found the dongle's car side already up. A phone's
-  # Android Auto stack takes seconds here on its own; give the car the same room before discovery.
-  {"id": "ottocast", "label": "OTTOCAST / Carlinkit", "match": {},
-   "tuning": {"negotiate_delay_s": 3.0}},
+  # OTTOCAST (Wi-Fi "CAR2-xxxx"), 2020 Honda Accord, 2026-10-28..31 over 19 projections: the car granted the screen only
+  # when the dongle answered the first Android Auto message at once (5 of 6), never when it answered ~2 s later (0 of 13),
+  # which is every connection made at ignition. Everything below is the operator's experiment set for that dongle and
+  # applies to no other adapter; the standard behaviour stays as it was for AAWireless and "Other".
+  {"id": "ottocast", "label": "OTTOCAST", "match": {},
+   "tuning": {"negotiate_delay_s": 3.0, "native_reconnects": 2, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True}},
 ]
 
 

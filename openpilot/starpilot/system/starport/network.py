@@ -179,6 +179,7 @@ class NetworkLease:
     self.device_ready = False
     self.autoconnect_paused = False
     self.joined: WifiCredentials | None = None  # what active_path was activated for
+    self.reuse_join = False  # car profile: keep a join in progress when the adapter restarts the handshake
     self.marker = AUTOCONNECT_MARKER
     self.scan_requested_at = -SCAN_REUSE_S
     self._lock = threading.Lock()
@@ -283,7 +284,7 @@ class NetworkLease:
       else:
         self.device_path = self._wifi_device()
         self._pause_autoconnect()
-      if not self._reusable(credentials):
+      if not (self.reuse_join and self._reusable(credentials)):
         active = self._get(self.device_path, NM_DEVICE_IFACE, "ActiveConnection")
         if active and active != "/" and not self.previous_connection and not self.dedicated:
           try:

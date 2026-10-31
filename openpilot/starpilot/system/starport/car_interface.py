@@ -92,6 +92,7 @@ class DedicatedLease:
     self.lease_factory, self.interface_factory = lease_factory, interface_factory or DedicatedInterface
     self.enabled = enabled
     self.lease = None
+    self.reuse_join = False  # copied onto the aa0 lease once it exists
     self.iface = None
     self.legacy = not enabled
     self.timeouts = 0
@@ -122,6 +123,7 @@ class DedicatedLease:
       self.iface = self.interface_factory(self.log)
       self.iface.open()
       lease = self.lease_factory(self.log, INTERFACE, dedicated=True)
+      lease.reuse_join = self.reuse_join
       try:
         lease.prepare_device(self._cancel.is_set)
       except BaseException:
