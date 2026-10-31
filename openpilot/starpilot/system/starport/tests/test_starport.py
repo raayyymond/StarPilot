@@ -1310,3 +1310,70 @@ def test_tcp_retries_stop_once_the_car_closes_rfcomm(identity, tmp_path, monkeyp
     assert len(tries) == supervisor_module.TCP_ATTEMPTS and "did not accept" in str(failure.value)
   else:
     assert len(tries) == closed_after and "closed the Bluetooth link" in str(failure.value)
+
+
+def test_supervisor_reconnects_when_the_car_keeps_its_own_screen(identity, tmp_path, monkeypatch):
+  # 2026-10-30 Honda/OTTOCAST: "native" to every VideoFocusRequest, then 13 idle minutes. Leave cleanly and try
+  # again, twice; the third session is asked again and otherwise left for the driver.
+  from openpilot.starpilot.system.starport import hw_encoder, supervisor as supervisor_module
+
+  class NoEncoder:
+    backend = 'fixture'
+    supports_nv12 = False
+    last_encode_ms = 0.0
+
+    def encode_rgba(self, pixels, *, keyframe=False):
+      raise AssertionError("no frame may be encoded without video focus")
+
+    def close(self): pass
+
+  monkeypatch.setattr(hw_encoder, 'create_encoder', lambda width, height, **_kwargs: (NoEncoder(), 15))
+  cars, threads, failures = [], [], []
+  stopping = threading.Event()
+
+  def rfcomm(address, channel, timeout=15.0):
+    hu = FakeHeadUnit(identity, native_focus=True)
+    cars.append(hu)
+    phone, car = socket.socketpair()
+    def car_side():
+      try:
+        with car:
+          rfcomm_head_unit(car, ("127.0.0.1", hu.port), pings=False)
+          stopping.wait(1.0)
+      except EOFError as error:
+        if not stopping.is_set():
+          failures.append(error)
+      except Exception as error:
+        failures.append(error)
+    thread = threading.Thread(target=car_side, daemon=True)
+    threads.append(thread)
+    thread.start()
+    return phone
+
+  monkeypatch.setattr(supervisor_module, "NATIVE_FOCUS_GIVE_UP_S", 0.5)
+  monkeypatch.setattr(supervisor_module, "FOCUS_RETRY_FIRST", 0.1)
+  monkeypatch.setattr(supervisor_module, "FOCUS_RETRY_INTERVAL", 0.1)
+  sup, leases = make_supervisor(identity, tmp_path, monkeypatch, rfcomm)
+  sup.start()
+  try:
+    deadline = time.monotonic() + 15
+    while len(cars) < 3 or len(cars[2].focus_requests) < 3:
+      assert time.monotonic() < deadline, (sup.status(), [len(hu.focus_requests) for hu in cars])
+      time.sleep(0.05)
+    time.sleep(2 * 0.5)
+    assert len(cars) == 3, "the third session must not be given up on"
+    assert all(hu.shutdown_received.is_set() for hu in cars[:2]) and not cars[2].shutdown_received.is_set()
+    assert sup.status()["state"] == "suspended"
+  finally:
+    stopping.set()
+    sup.stop()
+    for hu in cars:
+      hu.close()
+  for thread in threads:
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "RFCOMM fixture did not finish after stop"
+  assert not failures, failures
+  events = [json.loads(line) for path in (tmp_path / "aa" / "logs").glob("session-*.jsonl") for line in path.read_text().splitlines()]
+  give_ups = [e for e in events if e["event"] == "projection_native_give_up"]
+  assert [e["reconnect"] for e in give_ups] == [1, 2]
+  assert sum(1 for e in events if e["event"] == "attempt_failed" and e["kind"] == "NativeFocusHeld") == 2

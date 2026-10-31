@@ -72,6 +72,11 @@ STREAM_STALL_LOG = 1.0       # a streaming loop pass slower than this is logged
 FOCUS_RETRY_FIRST = 3.0
 FOCUS_RETRY_INTERVAL = 10.0
 FOCUS_RETRIES = 5
+# Wireless only: a car that still holds its own screen this long into streaming (two re-requests in) is sent a clean
+# ShutdownRequest and the session reconnects, at most NATIVE_RECONNECTS times per session. 2026-10-28..30 Honda/OTTOCAST:
+# 9 of 12 projections were refused for the whole drive, and reconnecting was the only thing that ever got video.
+NATIVE_FOCUS_GIVE_UP_S = 15.0
+NATIVE_RECONNECTS = 2
 REPORTED_SETTINGS = ("connection", "usb_mode", "view", "encoder", "fps", "bitrate_kbps", "rate_control", "gpu_nv12",
                      "async_readback", "wifi_interface", "dedicated_wifi_interface", "verify_head_unit", "version_status",
                      "rfcomm_channel", "phone_class", "auto_connect")
@@ -135,6 +140,10 @@ class Cancelled(Exception):
 
 class StrayLinkError(RuntimeError):
   """The controller holds a link to the car that the kernel lost; every new channel to the car fails with EALREADY."""
+
+
+class NativeFocusHeld(TimeoutError):
+  """The car never granted video focus; the session was shut down cleanly to try a fresh connection."""
 
 
 def _stray_link(error: BaseException) -> bool:
@@ -343,6 +352,7 @@ class Supervisor:
     self._projection_enabled = projection_enabled
     self._lease_factory = lease_factory
     self._dedicated_strikes: dict[str, int] = {}
+    self._native_reconnects = NATIVE_RECONNECTS  # per session: how often a car that never granted focus was reconnected
     self._wifi_recover_at = 0.0
     self._bt_client = bluetooth_client
     self._frame_path = frame_path
@@ -1127,6 +1137,7 @@ class Supervisor:
     lease = self._lease() if wireless else NoLease()
     attempt = 0
     car_first = trigger == "onroad" and wireless
+    self._native_reconnects = 0 if wireless else NATIVE_RECONNECTS
     try:
       while not self._stop.is_set():
         started = time.monotonic()
@@ -1154,6 +1165,8 @@ class Supervisor:
           if isinstance(error, StrayLinkError):
             self._clear_stray_link()
             car_first = True  # the car pages right back once its link drops; let it, rather than crossing it again
+          if isinstance(error, NativeFocusHeld):
+            self._native_reconnects += 1
         finally:
           self._close_sockets()
           try:
@@ -1541,8 +1554,12 @@ class Supervisor:
       session.nav = NavStatus.create(session, self.log)
     except Exception as error:  # turn-by-turn is optional; projection must never depend on it
       self.log("nav_status_unavailable", error=str(error))
+    clean_exit = False
     try:
       self._stream(session, encoder, source, watch, interval)
+    except NativeFocusHeld:
+      clean_exit = True  # tell the car we are leaving, so it does not hold a dead session against the reconnect
+      raise
     finally:
       if session.audio is not None:
         session.audio.close()
@@ -1551,7 +1568,7 @@ class Supervisor:
       watch.stop()
       source.close()
       encoder.close()
-      if self._stop.is_set():
+      if clean_exit or self._stop.is_set():
         try:
           session.shutdown()
         except Exception:
@@ -1621,11 +1638,15 @@ class Supervisor:
         if action == NATIVE_FOCUS:
           session.request_native()
       # Only while the car has never granted focus this session: once it has, native focus is the driver's choice.
-      if session.focus_epoch == 0 and not session.focused and focus_retries < FOCUS_RETRIES and now >= next_focus_retry:
-        focus_retries += 1
-        next_focus_retry = now + FOCUS_RETRY_INTERVAL
-        session.request_projection()
-        self.log("projection_rerequested", attempt=focus_retries, after_s=round(now - started, 1))
+      if session.focus_epoch == 0 and not session.focused:
+        if self._native_reconnects < NATIVE_RECONNECTS and now - started >= NATIVE_FOCUS_GIVE_UP_S:
+          self.log("projection_native_give_up", after_s=round(now - started, 1), reconnect=self._native_reconnects + 1)
+          raise NativeFocusHeld(f"Car kept its own screen for {NATIVE_FOCUS_GIVE_UP_S:.0f} s; reconnecting")
+        if focus_retries < FOCUS_RETRIES and now >= next_focus_retry:
+          focus_retries += 1
+          next_focus_retry = now + FOCUS_RETRY_INTERVAL
+          session.request_projection()
+          self.log("projection_rerequested", attempt=focus_retries, after_s=round(now - started, 1))
       state = "streaming" if session.focused else "suspended"
       if self._status["state"] != state:
         self._set(state=state)
