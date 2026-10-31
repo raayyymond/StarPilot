@@ -30,7 +30,7 @@ from openpilot.starpilot.ui.feature_settings_state import (
   FeatureRow, FeatureSettingsRequest, FEATURE_CONFIRM_ACTIONS, is_long_confirm_action, row_change, row_default,
 )
 from openpilot.starpilot.saved_source import read_saved
-from openpilot.starpilot.galaxy.developer_settings import DRIVER_MONITORING_RESET, DeveloperSettingsOwner
+from openpilot.starpilot.galaxy.developer_settings import CALIBRATION_RESET, DRIVER_MONITORING_RESET, DeveloperSettingsOwner
 from openpilot.starpilot.speed_limits.vision_gate import diagnostic_choice_enabled
 from openpilot.starpilot.parked_evidence import ParkedEvidence, RESUME_SKEW_NS, fresh_offroad, host_parked
 from openpilot.starpilot.ui.pip_owner import EDITOR as PIP_EDITOR, FORMAT_PREFIX as PIP_FORMAT_PREFIX, RESET as PIP_RESET, PiPOwner, validated_editor_draft
@@ -45,7 +45,7 @@ PAGES = frozenset(("hub", "localization", "developer", "vehicle", "slc", "lane",
                    "conditional", "conditional/cem", "conditional/ccm",
                    *(f"{name}/{category}" for name in ("traffic", "aggressive", "standard", "relaxed")
                      for category in ("acceleration", "braking", "following"))))
-CONFIRM_ACTIONS = FEATURE_CONFIRM_ACTIONS | {DRIVER_MONITORING_RESET}
+CONFIRM_ACTIONS = FEATURE_CONFIRM_ACTIONS | {DRIVER_MONITORING_RESET, CALIBRATION_RESET}
 MAX_VIEWS = 64
 MAX_INTENTS = 64
 TTL = 60.0
@@ -148,7 +148,7 @@ def _onroad_preference(page: str, key: str) -> bool:
   # multi-key reset/repair operations need the offroad transaction boundary;
   # their owners independently recheck that requirement at commit time.
   return bool(page not in ("developer", "power") and key and key != SETUP_ACTION and key not in (
-    "IsRhdDetected", "AlphaLongitudinalEnabled", "reset_profiles", "curve_reset", "slc_adopt", "slc_reset",
+    "IsRhdDetected", "AlphaLongitudinalEnabled", "reset_profiles", "curve_reset", "slc_reset",
     "conditional:reset", "conditional:manual_reset",
   ) and not is_long_confirm_action(key) and not key.startswith("torque_repair:"))
 
@@ -431,6 +431,8 @@ def _question(row: FeatureRow, request: FeatureSettingsRequest) -> str:
     return f"Save {row.label.lower()} as {value}?"
   if key == SENTRY_RESET:
     return "Replace invalid saved motion settings with Off and the default sensitivity and warning time?"
+  if key == CALIBRATION_RESET:
+    return "Reset camera and steering calibration? Automatic steering learning will be invalidated and the device will recalibrate on the next drive."
   if key == DRIVER_MONITORING_RESET:
     return "Clear saved driver monitoring wheel-side detection? Automatic detection will run again on the next drive."
   if key.startswith("sentry:"):
@@ -443,8 +445,6 @@ def _question(row: FeatureRow, request: FeatureSettingsRequest) -> str:
     return "Save these source-image crop positions? Confirm alignment on the device before using the preview."
   if key.startswith(PIP_FORMAT_PREFIX):
     return f"{row.label}? This replaces the saved crop; check alignment on the device."
-  if key == "slc_adopt":
-    return "Keep these saved offsets and speed ranges when units change? Prior saved values remain but become inactive."
   if key == "slc_reset":
     return f"Reset speed-limit offsets to zero? {row.value}. Saved control may resume if its switch is on."
   if key == "curve_reset":

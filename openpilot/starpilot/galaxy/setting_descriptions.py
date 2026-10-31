@@ -4,8 +4,11 @@ Rows and their availability still come from the canonical feature owners.
 This presentation catalog supplies the purpose before any genuine prerequisite.
 """
 from openpilot.starpilot.ui.long_profile_feature import CATEGORY_HELP, VALUE_HELP
+from openpilot.starpilot.ui.feature_settings_state import SLC_OFFSET_KEYS
 
 DESCRIPTIONS = {
+  'DisengageOnAccelerator': 'When enabled, pressing the accelerator pedal will disengage openpilot.',
+  'ReduceMotion': 'Reduces interface animations for a steadier display.',
   'IsMetric': 'On displays speed and distance in kilometers; Off uses miles. Saved speed-limit offsets keep their physical values.',
   'IsRhdDetected': 'Sets the initial steering-wheel side used by driver monitoring. Applies next drive; automatic side detection continues.',
   'FordPrefSteerAngleCurvature': 'Uses steering pinion angle instead of yaw rate to estimate Ford steering curvature. Applies at the next vehicle startup.',
@@ -61,9 +64,9 @@ DESCRIPTIONS = {
   'SpeedLimitController': 'Adjusts the set speed to accepted speed limits using your source priority and offsets.',
   'ShowSpeedLimits': 'Shows recognized speed-limit signs on the driving screen.',
   'SLCConfirmation': 'Auto adopts new limits immediately. With Automatic adoption off, + accepts and − declines within 10 seconds.',
+  'SLCAdvanceSeconds': 'Offers mapped limits early using road distance and current speed. Existing adoption and confirmation settings still apply.',
   'SLCPriority1': 'Chooses the first source checked for a fresh speed limit.',
   'SLCPriority2': 'Chooses the source used when the primary source has no fresh speed limit.',
-  'slc_adopt': 'Keeps the current speed-limit offset schedule fixed when display units change.',
   'slc_reset': 'Resets saved speed-limit offsets while retaining valid configured speed ranges.',
   'reset_driver_monitoring': 'Clear saved wheel-side detection. Automatic detection restarts on the next drive.',
   'AlwaysAllowUploads': 'Allows queued full logs and videos to upload over metered networks. This uses mobile data.',
@@ -106,6 +109,9 @@ DESCRIPTIONS = {
   'ScreenTimeoutOnroad': 'Sets the wait after interaction before returning to the driving view or turning off the screen if configured.',
   'KeepScreenOnGpuLoading': 'Keeps the driving screen visible while an eGPU model loads. Manual Screen Off still works.',
   'TurnOffCommaScreen': 'Pauses comma UI rendering to reduce CPU and GPU use. Tap once to wake the screen.',
+  'LoudBlindspotAlert': 'Uses the soft-warning sound when a lane change is blocked by a detected blind-spot vehicle.',
+  'LoudBlindspotAlertWhenDisengaged': ('Warns when signaling toward a detected blind-spot vehicle with steering assistance off or paused. ' +
+                                      'Independent of Loud Blindspot Alert. Hazards do not trigger it.'),
   'SoundPack': 'Chooses the sounds used for driving alerts and chimes.',
   'WarningImmediateVolume': 'Sets the starting volume of immediate warnings. These warnings still ramp to full volume.',
   'WarningSoftVolume': 'Sets the starting volume of soft warnings. Warning volume keeps its required minimum.',
@@ -210,7 +216,7 @@ def purpose(row):
     suffix = next((name for name in VALUE_HELP if key.endswith(name)), None)
     value = VALUE_HELP.get(suffix)
     return value + ' Blends toward Relaxed as speed rises in Traffic mode.' if value and key.startswith('Traffic') else value
-  if key in tuple('Offset'+str(index) for index in range(1, 8)):
+  if key in SLC_OFFSET_KEYS:
     return 'Adds or subtracts this offset from the accepted speed limit within the displayed speed range.'
   if key.startswith('long_repair:'):
     return 'Restores the default value of this invalid longitudinal setting.'
@@ -264,7 +270,7 @@ def description(row):
     suffix = ('Axis-pause and AOL assignments require the next vehicle startup to configure the ' +
       'native button permissions. Other actions refresh during the drive.')
   if row.key == 'GMLongitudinalTune':
-    suffix = 'ACC Tune refreshes during the drive. Volt Tune initializes its stop/start response when driving processes start.'
+    suffix = 'ACC Tune refreshes during the drive.'
   warning = row.reason.strip().removeprefix('Saved for this vehicle. ')
   related = any(word in warning.lower() for word in
     ('temporarily ignored', 'temporarily ignores', 'fixed torque conversion', 'inactive while', 'custom display is off',

@@ -1,4 +1,5 @@
 from opendbc.car.gm.steering_authority import SteeringAuthority
+from opendbc.car.gm.values import is_volt_flashed_profile
 from opendbc.car.gps import CarGpsTracker, get_car_gps_config
 from opendbc.car.gm.values import gm_control_word, is_volt_one_pedal, camera_acc_pedal_profile, BrakeSource, volt_cc_pedal_profile
 from opendbc.car.gm.values import is_volt_longitudinal, is_gm_auto_hold
@@ -69,6 +70,8 @@ class CarState(CarStateBase):
     self.buttons_counter = 0
 
     self.distance_button = 0
+    self.flashed_volt_profile = is_volt_flashed_profile(CP)
+    self.flashed_lkas_button = None
     self.pedal_sensor_healthy = False
     self.pedal_sensor_ts_nanos = 0
     self.bolt_pedal_gear_ts_nanos = 0
@@ -534,6 +537,12 @@ class CarState(CarStateBase):
       # A missing camera can leave the ECU faulted; that is not engaged cruise.
       ret.cruiseState.enabled &= pt_cp.vl["AcceleratorPedal2"]["CruiseState"] != AccState.FAULTED
     ret.cruiseState.standstill = pt_cp.vl["AcceleratorPedal2"]["CruiseState"] == AccState.STANDSTILL
+    if self.flashed_volt_profile:
+      # There is no stock cruise/ACC controller. Preserve the actual EBCM fault.
+      ret.accFaulted = friction_unavailable
+      ret.brakePressed |= bool(pt_cp.vl["ECMEngineStatus"]["BrakePressed"])
+      ret.cruiseState.enabled = False
+      ret.cruiseState.standstill = False
     if (self.CP.carFingerprint in CC_GATEWAY_STOCK_CAR or self.CP.carFingerprint == CAR.CHEVROLET_VOLT_CC):
       # AcceleratorPedal2 CruiseState is an ACC state, not a conventional-cruise fault source.
       ret.accFaulted = False
@@ -677,6 +686,15 @@ class CarState(CarStateBase):
       ret.buttonEvents = [event for old, new in edges for event in
                           create_button_events(new, old, BUTTONS_DICT, unpressed_btn=CruiseButtons.UNPRESS)] + create_button_events(
                             self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise})
+    if self.flashed_volt_profile:
+      lkas_events = []
+      for pressed in pt_cp.vl_all["ASCMSteeringButton"]["LKAButton"]:
+        if self.flashed_lkas_button is not None:
+          lkas_events.extend(create_button_events(pressed, self.flashed_lkas_button, {1: ButtonType.lkas}))
+        self.flashed_lkas_button = pressed
+      if lkas_events:
+        ret.buttonEvents = [event.to_dict() for event in ret.buttonEvents] + lkas_events
+
     if ret.vEgo < self.CP.minSteerSpeed:
       ret.lowSpeedAlert = True
 
@@ -708,7 +726,8 @@ class CarState(CarStateBase):
   def get_can_parsers(CP):
     bolt_pedal_profile = is_bolt_pedal_profile(CP) or is_bolt_pedal_profile(CP, stock_only=True)
     pt_messages = []
-    if (is_volt_gateway_profile(CP) and not CP.openpilotLongitudinalControl and
+    flashed_volt = is_volt_flashed_profile(CP)
+    if (not flashed_volt and is_volt_gateway_profile(CP) and not CP.openpilotLongitudinalControl and
         camera_acc_pedal_profile(CP) is None):
       pt_messages += [("PSCMStatus", 10), ("EBCMWheelSpdRear", 10), ("ASCMSteeringButton", 10),
                       ("AcceleratorPedal2", 10), ("ECMEngineStatus", 10), ("EBCMRegenPaddle", 40)]
@@ -718,6 +737,12 @@ class CarState(CarStateBase):
       pt_messages.append(("EBCMBrakePedalPosition", 100))
     if is_volt_one_pedal(CP):
       pt_messages.append(("EVDriveMode", float('nan')))
+    if flashed_volt:
+      pt_messages += [("PSCMStatus", 10), ("ESPStatus", 10), ("EBCMWheelSpdFront", 20),
+                      ("EBCMWheelSpdRear", 20), ("EBCMFrictionBrakeStatus", 20), ("PSCMSteeringAngle", 100),
+                      ("ECMPRDNL2", 10), ("AcceleratorPedal2", 33), ("ECMEngineStatus", 100),
+                      ("BCMTurnSignals", 1), ("BCMDoorBeltStatus", 10), ("BCMGeneralPlatformStatus", 10),
+                      ("ASCMSteeringButton", 33), ("EBCMRegenPaddle", 40)]
     if CP.carFingerprint in VOLT_BSM_CAR and CP.flags & GMFlags.HAS_BSM.value:
       pt_messages.append(("BCMBlindSpotMonitor", float('nan')))
     if CP.flags & GMFlags.PEDAL_LONG.value and not is_bolt_pedal_removed_profile(CP, stock_only=True):

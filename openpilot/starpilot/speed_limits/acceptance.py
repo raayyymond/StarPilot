@@ -330,7 +330,8 @@ def _reject(state: State, candidate: Candidate) -> State:
 
 
 def step(state: State, observation: Observation, authority: Authority, policy: Policy, *, now_ns: int,
-         action: DriverAction | None = None, adopt: AdoptRequest | None = None, set_speed_matches: bool = False) -> Decision:
+         action: DriverAction | None = None, adopt: AdoptRequest | None = None, set_speed_matches: bool = False,
+         confirmation_started_ns: int | None = None) -> Decision:
   """Return a decision, never a cruise command. Invalid input produces no control target."""
   state_errors = _state_errors(state)
   if state_errors:
@@ -351,6 +352,8 @@ def step(state: State, observation: Observation, authority: Authority, policy: P
     errors.append("ambiguous action and adopt request")
   if type(set_speed_matches) is not bool:
     errors.append("invalid SET alignment")
+  if confirmation_started_ns is not None and (not _integer(confirmation_started_ns) or not _integer(now_ns) or confirmation_started_ns > now_ns):
+    errors.append('invalid confirmation start')
   if errors:
     # Do not defer a stale prompt or credit the invalid interval on recovery.
     invalid = replace(state, observation=Observation(ObservationKind.UNKNOWN), pending=None, timer_running=False, presentation=None)
@@ -421,6 +424,9 @@ def step(state: State, observation: Observation, authority: Authority, policy: P
     return finish("accepted", target=previous_target())
   confirmation = policy.confirm_higher if previous_speed is None or candidate.speed_mps > previous_speed else (
     policy.confirm_lower if candidate.speed_mps < previous_speed else policy.confirm_lower or policy.confirm_higher)
+  if confirmation and not authority.can_control:
+    state = replace(state, pending=None, timer_running=False)
+    return finish("inactive")
   if not new_limit and old.pending is not None and old.pending.automatic == (not confirmation):
     pending = replace(old.pending, candidate=candidate)
     if old.timer_running:
@@ -429,6 +435,8 @@ def step(state: State, observation: Observation, authority: Authority, policy: P
   else:
     pending = PendingDecision(candidate, state.next_decision_id, automatic=not confirmation)
     state = replace(state, next_decision_id=state.next_decision_id + 1)
+  if confirmation_started_ns is not None:
+    pending = replace(pending, active_elapsed_ns=max(pending.active_elapsed_ns, now_ns - confirmation_started_ns))
   state = replace(state, pending=pending, timer_running=True)
 
   if pending.automatic:
@@ -447,9 +455,6 @@ def step(state: State, observation: Observation, authority: Authority, policy: P
     elif old.presentation is None or old.presentation.candidate != candidate:
       receipt = replace(receipt, status="different_presentation")
     else:
-      # The driver is always asked, even with only lateral or stock ACC active; the
-      # choice is recorded as accepted history and only commands a target when
-      # this system owns longitudinal control.
       receipt = replace(receipt, consumed=True, status=action.kind.value)
       if action.kind is ActionKind.ACCEPT:
         state, history = _accept(state, candidate, now_ns)

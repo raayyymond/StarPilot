@@ -4,7 +4,7 @@ The producer owns freshness and units. A missing observation is never inferred
 from a zero-valued speed or a default-initialized message.
 """
 
-from openpilot.starpilot.ui.onroad_customization import default_document, offset, placement, widget_size
+from openpilot.starpilot.ui.onroad_customization import PROFILES, default_document, offset, placement, widget_size
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -189,6 +189,9 @@ class OnroadState:
   experimental_enabled: bool = False
   torque_utilization: float = 0.0
   personality: int = 1
+  lead_detected: bool = False
+  gas_pressed_override: bool = False
+  right_hand_drive: bool = False
   switchback_mode: bool = False
   traffic_mode: bool = False
   traffic_display: TrafficDisplay | None = None
@@ -226,6 +229,7 @@ class OnroadState:
   viewport_width: float = 2160.0
   developer_metrics: tuple[DeveloperMetric, ...] = ()
   slc_prompt_open: bool = False
+  quick_select_open: bool = False
   slc_wheel_confirmation_available: bool = False
   toyota_cruise_status: str = ''
   toyota_cruise_target_kph: float | None = None
@@ -260,7 +264,8 @@ class OnroadRequest:
 def manual_slc_confirmation(profile: Profile, state: OnroadState) -> bool:
   obs = state.speed_limit
   widget = 'speed_limit' if profile == Profile.COMPACT else 'cruise_limits'
-  return bool(state.alert.size == AlertSize.NONE and state.toyota_cruise_status not in TOYOTA_NOTICE_STATUSES and
+  return bool((state.longitudinal_active or state.longitudinal_overridden) and
+              state.alert.size == AlertSize.NONE and state.toyota_cruise_status not in TOYOTA_NOTICE_STATUSES and
               (profile != Profile.COMPACT or not state.reverse_driver_camera and state.appearance.camera_view != CameraViewChoice.DRIVER) and
               obs.kind == ObservationKind.VALID and obs.action_enabled and not obs.automatic_adoption_pending and
               obs.pending_speed_limit_mps is not None and obs.pending_speed_limit_mps > 0 and
@@ -327,6 +332,23 @@ def speed_limit_bounds(profile: Profile, state: OnroadState) -> tuple[float, flo
   return x + dx - 12, y + dy - 12, x + dx + width + 12, y + dy + height + 8
 
 
+def personality_bounds(profile: Profile, state: OnroadState) -> tuple[float, float, float, float] | None:
+  position = placement(state.customization, profile, 'following_distance')
+  if not position['enabled'] or state.appearance.camera_view == CameraViewChoice.DRIVER or state.reverse_driver_camera:
+    return None
+  width, height = widget_size(state.customization, profile, 'following_distance')
+  x, y = position['x'], position['y']
+  if profile == Profile.LARGE and state.right_hand_drive:
+    widgets = PROFILES['large']['widgets']
+    monitor = placement(state.customization, profile, 'driver_monitor')
+    if all(position[axis] == widgets['following_distance']['default'][axis] and
+           monitor[axis] == widgets['driver_monitor']['default'][axis] for axis in ('x', 'y')):
+      bounds = PROFILES['large']['bounds']
+      monitor_width, _ = widget_size(state.customization, profile, 'driver_monitor')
+      x = 2 * bounds['x'] + bounds['width'] - monitor['x'] - monitor_width - 32 - width
+  return x, y, x + width, y + height
+
+
 class OnroadInput:
   """The onroad wheel emits intent only; the supplied state must be refreshed."""
 
@@ -337,6 +359,7 @@ class OnroadInput:
     self._press: tuple[float, float, bool, str] | None = None
     self._slc_press: SlcControl | None = None
     self._sign_press: tuple[tuple, tuple] | None = None
+    self._personality_press: tuple[float, float, int | None, tuple] | None = None
     self._prompt: tuple | None = None
 
   def _pending_context(self, state: OnroadState) -> tuple | None:
@@ -344,6 +367,13 @@ class OnroadInput:
     if manual_slc_confirmation(self.profile, state):
       return obs.session_id, obs.decision_id, obs.presentation_id, obs.pending_speed_limit_mps
     return None
+
+  def _personality_target(self, state: OnroadState) -> tuple | None:
+    if (not state.camera_available or state.quick_select_open or
+        state.alert.size != AlertSize.NONE and not is_personality_notice(state.alert) or
+        self.profile == Profile.COMPACT and state.reversing and state.appearance.camera_view != CameraViewChoice.NONE):
+      return None
+    return personality_bounds(self.profile, state)
 
   def present(self, state: OnroadState) -> OnroadState:
     if self._prompt != self._pending_context(state):
@@ -356,7 +386,7 @@ class OnroadInput:
 
   @property
   def claimed(self) -> bool:
-    return self._press is not None or self._slc_press is not None or self._sign_press is not None
+    return self._press is not None or self._slc_press is not None or self._sign_press is not None or self._personality_press is not None
 
   def press(self, x: float, y: float, state: OnroadState) -> None:
     self.cancel()
@@ -371,6 +401,10 @@ class OnroadInput:
     if bounds is not None and context is not None and bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]:
       self._sign_press = context, bounds
       return
+    bounds = self._personality_target(state)
+    if bounds is not None and bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]:
+      self._personality_press = x, y, state.drive_frame, bounds
+      return
     # Only the large-profile wheel is an experimental-mode touch target.
     if self.profile != Profile.LARGE:
       self.cancel()
@@ -380,6 +414,13 @@ class OnroadInput:
 
   def move(self, x: float, y: float, state: OnroadState) -> None:
     state = self.present(state)
+    if self._personality_press:
+      px, py, drive_frame, original_bounds = self._personality_press
+      bounds = self._personality_target(state)
+      if (abs(x - px) > self.slop or abs(y - py) > self.slop or drive_frame != state.drive_frame or bounds != original_bounds or
+          bounds is None or not (bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3])):
+        self.cancel()
+      return
     if self._sign_press:
       context, original_bounds = self._sign_press
       bounds = speed_limit_bounds(self.profile, state)
@@ -406,6 +447,8 @@ class OnroadInput:
       self._prompt = None
     if self._sign_press:
       self._prompt = self._sign_press[0]
+    if self._personality_press:
+      self.emit(OnroadRequest('cycle_personality'))
     if self._press:
       self.emit(OnroadRequest("set_experimental", not self._press[2], self._press[3]))
     self.cancel()
@@ -414,6 +457,7 @@ class OnroadInput:
     self._press = None
     self._slc_press = None
     self._sign_press = None
+    self._personality_press = None
     if close_prompt:
       self._prompt = None
 

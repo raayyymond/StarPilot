@@ -808,6 +808,9 @@ class GuiApplication:
                                rl.ffi.cast("int *", codepoint_buffer), len(codepoints))
       rl.gen_texture_mipmaps(font.texture)
       rl.set_texture_filter(font.texture, rl.TextureFilter.TEXTURE_FILTER_TRILINEAR)
+      for previous in self._fallback_fonts.values():
+        rl.unload_font(previous)
+      self._fallback_fonts.clear()
       self._fallback_fonts[language] = font
     return self._fallback_fonts[language]
 
