@@ -54,9 +54,9 @@ the old-commit rollback contract (restart music/openpilot or reboot after checko
 Phone audio exists only while the car is on. About a minute after ignition off the supervisor
 drops the phone's audio profile (its other links to the comma stay), stops paging it and stops
 advertising the comma as a speaker, so a phone near a parked car no longer attaches its audio
-to it; a shorter stop keeps the music. After ignition on it waits 30 seconds, leaving Bluetooth
-to Android Auto's own connection, then advertises and pages the phone again. The pairing
-window advertises the receiver regardless. The Galaxy page shows the reason while parked.
+to it; a shorter stop keeps the music. As soon as ignition is on again it advertises and pages the
+phone. The pairing window advertises the receiver regardless. The Galaxy page shows the reason
+while parked.
 
 Only the selected paired phone is captured. The existing trusted pairing policy
 still determines which phones may establish Bluetooth connections; this feature

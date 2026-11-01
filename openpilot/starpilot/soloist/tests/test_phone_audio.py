@@ -376,21 +376,17 @@ def test_pairing_window_advertises_the_receiver_then_releases_it_unless_phone_is
   assert profiles[-1] == 'acquire' and sup.phone_profile
 
 
-def test_phone_audio_waits_for_ignition_then_pages_after_a_settle_delay(music):
+def test_phone_audio_waits_for_ignition_then_pages_at_once(music):
   sup, now, processes, profiles, _ = music
   car_off = [True]
   sup.parked = lambda: car_off[0]
-  sup.car_on_since = None
-  sup.tick()
+  for _ in range(5):  # started while parked: no grace, nothing advertised or paged
+    sup.tick()
+    now[0] += 60
   assert sup.state == 'parked' and 'resumes when the car is on' in sup.message
   assert profiles == [] and processes == [] and sup.phone.pages == 0
   car_off[0] = False
-  for _ in range(int(supervisor.PHONE_IGNITION_DELAY_SECONDS)):  # the delay counts from the first tick that sees ignition
-    now[0] += 1
-    sup.tick()
-  assert sup.state == 'parked' and 'shortly after the car turns on' in sup.message and sup.phone.pages == 0 and profiles == []
-  sup.phone.connected = True  # the phone answers the page once it comes
-  now[0] += 1
+  sup.phone.connected = True  # the phone answers the page
   sup.tick()
   assert sup.state == 'phone_ready' and profiles == ['acquire'] and len(processes) == 2
 
@@ -416,17 +412,14 @@ def test_ignition_off_keeps_audio_through_the_grace_then_drops_the_phone_once(mu
     now[0] += 60
     sup.tick()
   assert sup.phone.disconnects == [PHONE] and sup.phone.pages == pages and profiles == ['acquire', 'release']
-  # Ignition on again: the sink is advertised and the phone paged only after the settle delay.
+  # Ignition on again: the sink is advertised and the phone paged on the very next tick.
   car_off[0] = False
   sup.phone.connected = True
-  sup.tick()
-  assert sup.state == 'parked' and profiles == ['acquire', 'release']
-  now[0] += supervisor.PHONE_IGNITION_DELAY_SECONDS
   sup.tick()
   assert sup.state == 'phone_ready' and profiles == ['acquire', 'release', 'acquire'] and len(processes) == 4
 
 
-def test_a_short_stop_keeps_the_phone_audio_without_a_settle_delay(music):
+def test_a_short_stop_keeps_the_phone_audio(music):
   sup, now, _, profiles, stopped = music
   car_off = [False]
   sup.parked = lambda: car_off[0]
@@ -443,7 +436,6 @@ def test_a_short_stop_keeps_the_phone_audio_without_a_settle_delay(music):
 def test_parked_phone_keeps_the_receiver_advertised_during_a_pairing_window(music):
   sup, now, _, profiles, _ = music
   sup.parked = lambda: True
-  sup.car_on_since = None
   sup.tick()
   assert profiles == []
   assert sup.handle({'command': 'prepare_phone_pairing'}) == {'ok': True}

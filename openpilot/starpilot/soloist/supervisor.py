@@ -32,8 +32,7 @@ OUTPUT_RETRY_SECONDS = 20.0
 PAIRING_PROFILE_SECONDS = 180.0  # the pairing window plus time for the phone to save the comma's services
 # Phone audio exists only while the car is on. Otherwise the parked comma pages the phone for A2DP every 20 s and
 # advertises itself as a speaker, so a phone in the apartment keeps attaching its audio to an empty car.
-PHONE_PARKED_GRACE_SECONDS = 60.0    # ignition off: keep the phone's audio this long, so a short stop keeps the music
-PHONE_IGNITION_DELAY_SECONDS = 30.0  # ignition on: leave Bluetooth to Android Auto's own connection first
+PHONE_PARKED_GRACE_SECONDS = 60.0  # ignition off: keep the phone's audio this long, so a short stop keeps the music
 MAX_FAST_FAILURES = 5
 UNRESPONSIVE_SECONDS = 120.0
 PLAYING_GRACE_SECONDS = 600.0
@@ -153,7 +152,7 @@ class Supervisor:
     self.output = output or BluetoothOutput()
     self.spawn, self.clock, self.network, self.parked = spawn, clock, network, parked
     self.car_off_since: float | None = None
-    self.car_on_since: float | None = None
+    self.car_was_on = False
     self.phone_parked = False
     self.make_client = make_client or (lambda data: PlayerClient(data))
     self.server: subprocess.Popen | None = None
@@ -298,22 +297,17 @@ class Supervisor:
       phone_audio.profile('release')
       self.phone_profile = False
 
-  def _phone_allowed(self, now: float) -> str:
-    """'on' while the phone may be paged for audio; otherwise why not: 'off' (parked past the grace) or 'starting'."""
-    if self.parked():
-      if self.car_off_since is None:
-        # Started while parked: nothing was streaming through us, so no grace either.
-        self.car_off_since = now if self.car_on_since is not None else now - PHONE_PARKED_GRACE_SECONDS
-      self.car_on_since = None
-      return 'on' if now - self.car_off_since < PHONE_PARKED_GRACE_SECONDS else 'off'
-    if self.car_on_since is None:
-      # Off and on again within the grace: the phone never left, so no settle delay either.
-      kept = self.car_off_since is not None and now - self.car_off_since < PHONE_PARKED_GRACE_SECONDS
-      self.car_on_since = now - PHONE_IGNITION_DELAY_SECONDS if kept else now
-    self.car_off_since = None
-    return 'on' if now - self.car_on_since >= PHONE_IGNITION_DELAY_SECONDS else 'starting'
+  def _phone_allowed(self, now: float) -> bool:
+    """True while the phone may be paged for audio: the car is on, or has been off for less than the grace."""
+    if not self.parked():
+      self.car_was_on, self.car_off_since = True, None
+      return True
+    if self.car_off_since is None:
+      # Started while parked: nothing was streaming through us, so no grace either.
+      self.car_off_since = now if self.car_was_on else now - PHONE_PARKED_GRACE_SECONDS
+    return now - self.car_off_since < PHONE_PARKED_GRACE_SECONDS
 
-  def _park_phone(self, prefs: preferences.Preferences, now: float, why: str) -> None:
+  def _park_phone(self, prefs: preferences.Preferences, now: float) -> None:
     """Car off: drop the phone's audio once, stop paging it and stop advertising the comma as a speaker."""
     if not self.phone_parked:
       self.phone_parked = True
@@ -325,7 +319,7 @@ class Supervisor:
       self.retry_at = 0
     if now >= self.pairing_profile_until:
       self._release_profile()  # also once a pairing window opened while parked has passed
-    self._set('parked', 'Phone audio resumes when the car is on.' if why == 'off' else 'Phone audio starts shortly after the car turns on.')
+    self._set('parked', 'Phone audio resumes when the car is on.')
 
   def tick_phone(self, prefs: preferences.Preferences) -> None:
     now = self.clock()
@@ -339,9 +333,8 @@ class Supervisor:
     if prefs.output == 'bluetooth' and not prefs.output_address:
       self._set('no_output', 'Choose where music plays.')
       return
-    allowed = self._phone_allowed(now)
-    if allowed != 'on':
-      self._park_phone(prefs, now, allowed)
+    if not self._phone_allowed(now):
+      self._park_phone(prefs, now)
       return
     self.phone_parked = False
     if now < self.retry_at:
