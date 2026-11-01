@@ -186,7 +186,9 @@ def make_supervisor(layout, spawned, logged_in=True):
     return process
   now = [100.0]
   make_client = type('Client', (FakeClient,), {'logged_in': logged_in})
-  sup = supervisor.Supervisor(layout, spawn=spawn, clock=lambda: now[0], make_client=make_client, network=lambda: True)  # ty: ignore[invalid-argument-type]
+  sup = supervisor.Supervisor(layout, spawn=spawn, clock=lambda: now[0], make_client=make_client, network=lambda: True,  # ty: ignore[invalid-argument-type]
+                              parked=lambda: False)
+  sup.car_on_since = now[0] - supervisor.PHONE_IGNITION_DELAY_SECONDS  # the car has been on a while
   sup.run_async = lambda fn: fn()
   return sup, now
 

@@ -30,6 +30,10 @@ EXIT_EXPIRED = 10
 STOP_SECONDS = 5.0
 OUTPUT_RETRY_SECONDS = 20.0
 PAIRING_PROFILE_SECONDS = 180.0  # the pairing window plus time for the phone to save the comma's services
+# Phone audio exists only while the car is on. Otherwise the parked comma pages the phone for A2DP every 20 s and
+# advertises itself as a speaker, so a phone in the apartment keeps attaching its audio to an empty car.
+PHONE_PARKED_GRACE_SECONDS = 60.0    # ignition off: keep the phone's audio this long, so a short stop keeps the music
+PHONE_IGNITION_DELAY_SECONDS = 30.0  # ignition on: leave Bluetooth to Android Auto's own connection first
 MAX_FAST_FAILURES = 5
 UNRESPONSIVE_SECONDS = 120.0
 PLAYING_GRACE_SECONDS = 600.0
@@ -58,6 +62,20 @@ def network_ready() -> bool:
 
 
 EXPIRES_IN = re.compile(r'client expires in (\d+) days?')
+
+_params = None
+
+
+def parked() -> bool:
+  """Ignition off as openpilot sees it. Any failure reads as "car on", which keeps the old always-on behaviour."""
+  global _params
+  try:
+    if _params is None:
+      from openpilot.common.params import Params
+      _params = Params()
+    return _params.get_bool('IsOffroad')
+  except Exception:
+    return False
 
 
 def _kill_group(process: subprocess.Popen | None) -> None:
@@ -130,10 +148,13 @@ class Supervisor:
   def __init__(self, layout: Layout | None = None, *, output: BluetoothOutput | None = None,
                spawn: Callable[..., subprocess.Popen] = subprocess.Popen, clock: Callable[[], float] = time.monotonic,
                make_client: Callable[[Path], PlayerClient] | None = None,
-               network: Callable[[], bool] = network_ready):
+               network: Callable[[], bool] = network_ready, parked: Callable[[], bool] = parked):
     self.layout = layout or Layout.default()
     self.output = output or BluetoothOutput()
-    self.spawn, self.clock, self.network = spawn, clock, network
+    self.spawn, self.clock, self.network, self.parked = spawn, clock, network, parked
+    self.car_off_since: float | None = None
+    self.car_on_since: float | None = None
+    self.phone_parked = False
     self.make_client = make_client or (lambda data: PlayerClient(data))
     self.server: subprocess.Popen | None = None
     self.player: subprocess.Popen | None = None
@@ -277,6 +298,35 @@ class Supervisor:
       phone_audio.profile('release')
       self.phone_profile = False
 
+  def _phone_allowed(self, now: float) -> str:
+    """'on' while the phone may be paged for audio; otherwise why not: 'off' (parked past the grace) or 'starting'."""
+    if self.parked():
+      if self.car_off_since is None:
+        # Started while parked: nothing was streaming through us, so no grace either.
+        self.car_off_since = now if self.car_on_since is not None else now - PHONE_PARKED_GRACE_SECONDS
+      self.car_on_since = None
+      return 'on' if now - self.car_off_since < PHONE_PARKED_GRACE_SECONDS else 'off'
+    if self.car_on_since is None:
+      # Off and on again within the grace: the phone never left, so no settle delay either.
+      kept = self.car_off_since is not None and now - self.car_off_since < PHONE_PARKED_GRACE_SECONDS
+      self.car_on_since = now - PHONE_IGNITION_DELAY_SECONDS if kept else now
+    self.car_off_since = None
+    return 'on' if now - self.car_on_since >= PHONE_IGNITION_DELAY_SECONDS else 'starting'
+
+  def _park_phone(self, prefs: preferences.Preferences, now: float, why: str) -> None:
+    """Car off: drop the phone's audio once, stop paging it and stop advertising the comma as a speaker."""
+    if not self.phone_parked:
+      self.phone_parked = True
+      self.stop_children(release_phone=False)
+      if self.phone.disconnect(prefs.phone_address):
+        with self.log_lock:
+          self.log.append(f'phone: disconnected {prefs.phone_name or prefs.phone_address} audio, car off')
+      self.phone.close()
+      self.retry_at = 0
+    if now >= self.pairing_profile_until:
+      self._release_profile()  # also once a pairing window opened while parked has passed
+    self._set('parked', 'Phone audio resumes when the car is on.' if why == 'off' else 'Phone audio starts shortly after the car turns on.')
+
   def tick_phone(self, prefs: preferences.Preferences) -> None:
     now = self.clock()
     if prefs != self.phone_prefs:
@@ -289,6 +339,11 @@ class Supervisor:
     if prefs.output == 'bluetooth' and not prefs.output_address:
       self._set('no_output', 'Choose where music plays.')
       return
+    allowed = self._phone_allowed(now)
+    if allowed != 'on':
+      self._park_phone(prefs, now, allowed)
+      return
+    self.phone_parked = False
     if now < self.retry_at:
       return
     try:
@@ -566,14 +621,6 @@ def serve(supervisor: Supervisor, path: str = CONTROL_SOCKET, stop: threading.Ev
         connection.sendall(json.dumps(result).encode() + b'\n')
       except OSError:
         pass
-
-
-def parked() -> bool:
-  try:
-    from openpilot.common.params import Params
-    return Params().get_bool('IsOffroad')
-  except Exception:
-    return False
 
 
 def main() -> None:
