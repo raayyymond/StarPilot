@@ -289,3 +289,24 @@ def test_negotiate_delay_holds_discovery_until_the_car_side_is_up(identity, tmp_
   by_name = {e["event"]: e for e in events}
   assert by_name["car_profile_negotiate_delay"]["seconds"] == 0.4
   assert by_name["discovered"]["mono_s"] - by_name["authenticated"]["mono_s"] >= 0.4
+
+
+def test_pairing_request_address_comes_from_the_wrapped_bluez_phone():
+  # 2026-10-31 Honda: bluetooth_opened logged phone_address "" because LeaseAwarePhone has no adapter(); the car was
+  # never asked to pair with the comma. The wrapped BlueZ phone owns that call.
+  class Phone:
+    def adapter(self):
+      return "/org/bluez/hci0", {"Address": "aa:bb:cc:dd:ee:ff"}
+
+  class Wrapped:
+    phone = Phone()
+
+  sup = Supervisor.__new__(Supervisor)
+  sup._bluez = Wrapped()
+  assert sup._adapter_address() == "AA:BB:CC:DD:EE:FF"
+  sup._bluez = Phone()
+  assert sup._adapter_address() == "AA:BB:CC:DD:EE:FF"
+  sup._bluez = object()
+  assert sup._adapter_address() == ""
+  sup._bluez = None
+  assert sup._adapter_address() == ""

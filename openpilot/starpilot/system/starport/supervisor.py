@@ -1490,8 +1490,12 @@ class Supervisor:
 
   def _adapter_address(self) -> str:
     """This comma's Bluetooth address for the head unit's pairing request; empty when BlueZ is not up."""
+    bluez = self._bluez
+    if bluez is None:
+      return ""
+    phone = getattr(bluez, "phone", bluez)  # in production LeaseAwarePhone wraps the BlueZ phone, which owns adapter()
     try:
-      return str(self._bluez.adapter()[1].get("Address", "")).upper() if self._bluez is not None else ""
+      return str(phone.adapter()[1].get("Address", "")).upper()
     except Exception:  # DBus errors vary; the pairing request is optional
       return ""
 
