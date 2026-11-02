@@ -185,6 +185,8 @@ class StarShellSession:
                             camera_layer=camera_layer,
                             pip_layer=self._render_pip)
       self.view.onroad.driver_monitor_layer = self._render_driver_monitor
+      from openpilot.starpilot.system.starport.projection_stream_lease import StreamLeaseReader
+      self.view.onroad.streaming_blackout = StreamLeaseReader()
       self._driver_monitor_layer = None
       if profile == Profile.COMPACT:
         self.view.onroad.stock_confidence_layer = lambda rect, state: render_stock_confidence(camera_owner, rect, state)
@@ -345,6 +347,11 @@ class StarShellSession:
     self._driver_monitor_layer.render(state, monitor=monitor, driver=driver,
                                       fresh=monitor is not None and driver is not None,
                                       onroad=ui_state.is_onroad(), top_icons=top_icons)
+
+  def _streaming_blackout(self) -> bool:
+    """Android Auto is streaming the car view: the onroad view draws alerts only, so PiP cameras stay closed too."""
+    blackout = getattr(getattr(self.view, "onroad", None), "streaming_blackout", None)
+    return bool(blackout is not None and blackout())
 
   def _favorite_actions(self):
     return self._resolve_favorite_actions()
@@ -1408,7 +1415,7 @@ class StarShellSession:
         snapshot = replace(snapshot, onroad=self.favorites.present(snapshot.onroad))
     else:
       self.favorites.cancel()
-    if mode != ShellMode.ONROAD or not snapshot.onroad.camera_available:
+    if mode != ShellMode.ONROAD or not snapshot.onroad.camera_available or self._streaming_blackout():
       self.pip_warning.close()
       self._pip_signals_cache = None
       self._pip_saved = None

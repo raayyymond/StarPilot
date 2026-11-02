@@ -148,16 +148,47 @@ def ribbon(centre: np.ndarray, half_widths) -> np.ndarray:
 
 def valid_runs(mask: np.ndarray) -> list[tuple[int, int]]:
   """[start, end) index runs where mask is true."""
-  runs, start = [], None
-  for index, value in enumerate(mask.tolist()):
-    if value and start is None:
-      start = index
-    elif not value and start is not None:
-      runs.append((start, index))
-      start = None
-  if start is not None:
-    runs.append((start, len(mask)))
-  return runs
+  edges = np.flatnonzero(np.diff(np.concatenate(([0], np.asarray(mask, dtype=np.int8).ravel(), [0]))))
+  return list(zip(edges[::2].tolist(), edges[1::2].tolist(), strict=True))
+
+
+def ribbon_sides(centre: np.ndarray, half_widths, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+  """Left and right edges of (..., N, 2) pixel centrelines, one ribbon per leading index.
+
+  Batched form of ribbon(): each row's tangent matches np.gradient over the valid run the row belongs
+  to (central inside a run, one-sided at its ends), so lines split by gaps need no per-run loop."""
+  c = np.asarray(centre, dtype=np.float64)
+  ok = np.asarray(valid, dtype=bool)
+  fwd = np.zeros_like(c)
+  fwd[..., :-1, :] = c[..., 1:, :] - c[..., :-1, :]
+  has_fwd = np.zeros_like(ok)
+  has_fwd[..., :-1] = ok[..., 1:] & ok[..., :-1]
+  bwd = np.zeros_like(c)
+  bwd[..., 1:, :] = fwd[..., :-1, :]
+  has_bwd = np.zeros_like(ok)
+  has_bwd[..., 1:] = has_fwd[..., :-1]
+  tangent = np.where((has_fwd & has_bwd)[..., None], (fwd + bwd) / 2, np.where(has_fwd[..., None], fwd, bwd))
+  norm = np.sqrt(tangent[..., 0] ** 2 + tangent[..., 1] ** 2)
+  norm[norm < 1e-6] = 1.0
+  half = np.broadcast_to(np.asarray(half_widths, dtype=np.float64), ok.shape) / norm
+  normal = np.stack((tangent[..., 1] * half, -tangent[..., 0] * half), axis=-1)
+  return c + normal, c - normal
+
+
+def hls_to_rgb(hue, light, sat) -> np.ndarray:
+  """Vectorized colorsys.hls_to_rgb: (..., 3) RGB in 0..1."""
+  hue, light, sat = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (hue, light, sat)))
+  m2 = np.where(light <= 0.5, light * (1.0 + sat), light + sat - light * sat)
+  m1 = 2.0 * light - m2
+
+  def channel(h):
+    h = np.mod(h, 1.0)
+    rise = m1 + (m2 - m1) * h * 6.0
+    fall = m1 + (m2 - m1) * (2.0 / 3.0 - h) * 6.0
+    return np.select([h < 1 / 6, h < 0.5, h < 2 / 3], [rise, m2, fall], m1)
+
+  rgb = np.stack((channel(hue + 1 / 3), channel(hue), channel(hue - 1 / 3)), axis=-1)
+  return np.where((sat == 0.0)[..., None], light[..., None], rgb)
 
 
 def heading_at(grid: np.ndarray, ys: np.ndarray, x: float) -> float:

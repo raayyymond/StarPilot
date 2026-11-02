@@ -135,6 +135,8 @@ class OnroadView:
     self.map_layer: OverlayLayer | None = None  # Android Auto map overlay, under the HUD widgets
     self.birds_eye_layer: OverlayLayer | None = None  # Android Auto birds-eye panel, under the HUD widgets
     self.projection_exit_layer: ProjectionControlLayer | None = None
+    # The native screen sets this while Android Auto streams the car view: draw black + alerts only.
+    self.streaming_blackout: Callable[[], bool] | None = None
     self.pip_layer = pip_layer
     self.stock_confidence_layer: OverlayLayer | None = None
     self.stock_confidence_reset: Callable[[], None] | None = None
@@ -170,10 +172,33 @@ class OnroadView:
   def render(self, state: OnroadState) -> None:
     if state.camera_available and self.camera_layer is None:
       raise ValueError("Camera observation requires a camera renderer")
-    if self.fonts.profile == Profile.LARGE:
+    if (blackout := getattr(self, "streaming_blackout", None)) is not None and blackout():
+      self._alerts_only(state)
+    elif self.fonts.profile == Profile.LARGE:
       self._large(state)
     else:
       self._compact(state)
+
+  def _alerts_only(self, state: OnroadState) -> None:
+    """Black screen with only the alert layer: no camera receive/upload, model, HUD, map or PiP work."""
+    if self.fonts.profile == Profile.LARGE:
+      width, height = self.projection_viewport or (state.viewport_width, 1080)
+      rl.draw_rectangle_rec(rl.Rectangle(0, 0, width, height), rl.BLACK)
+      content = rl.Rectangle(30, 30, width - 60, height - 60)
+      clip.begin_scissor_mode(30, 30, int(content.width), int(content.height))
+      try:
+        self.alert.render(content, state.alert)
+      finally:
+        clip.end_scissor_mode()
+      return
+    rl.draw_rectangle(0, 0, 536, 240, rl.BLACK)
+    clip.begin_scissor_mode(0, 0, 476, 240)
+    try:
+      signals = state.border_signals
+      direction = (-1 if signals.left_blinker else 1 if signals.right_blinker else 0) if signals else 0
+      self.alert.render(rl.Rectangle(0, 0, 476, 240), state.alert, signal_direction=direction)
+    finally:
+      clip.end_scissor_mode()
 
   def _slc_actions(self, state: OnroadState) -> None:
     from openpilot.starpilot.ui.onroad_state import slc_action_bounds

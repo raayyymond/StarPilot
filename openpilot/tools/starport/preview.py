@@ -13,6 +13,7 @@ in a window scaled to fit. The title shows WxH@fps and the measured rates.
   ./aapreview --encode --mp4 out.mp4     also record the encoded stream
   ./aapreview --headless --frames 30 --out /tmp/aa   PNGs, no window
   ./aapreview --fake-head-unit           full TLS session/negotiation over localhost
+  ./aapreview --stream-content full      the camera composition instead of the birds-eye-only view
 
 Data: the renderer reads whatever cereal services are published in this
 process's OPENPILOT_PREFIX. ``./dev`` gives every host command one shared
@@ -64,6 +65,8 @@ def parse_args(argv=None) -> argparse.Namespace:
   parser.add_argument("--every", type=int, default=1, help="headless: save every Nth frame")
   parser.add_argument("--prefix", help="OPENPILOT_PREFIX to read cereal data from (e.g. replay-NAME)")
   parser.add_argument("--params-root", help="PARAMS_ROOT for the renderer")
+  parser.add_argument("--stream-content", choices=("birds_eye", "full"),
+                      help="what the car view draws while driving (default: starport config stream_content, birds_eye)")
   parser.add_argument("--fake-head-unit", action="store_true",
                       help="negotiate and stream through a real ProjectionSession to a localhost FakeHeadUnit")
   parser.add_argument("--resolution", choices=("auto", "480p", "720p", "1080p"), default="auto",
@@ -292,9 +295,10 @@ def configure_environment(args) -> None:
   os.environ.setdefault("STARPILOT_PROJECTION_READ_ONLY", "1")
 
 
-def renderer_command(frames: str, touch: str, control: str) -> list[str]:
+def renderer_command(frames: str, touch: str, control: str, stream_content: str | None = None) -> list[str]:
   return [sys.executable, "-m", "openpilot.starpilot.system.starport.current_car_ui",
-          "--frames", frames, "--touch", touch, "--control", control]
+          "--frames", frames, "--touch", touch, "--control", control,
+          *(["--stream-content", stream_content] if stream_content else [])]
 
 
 def print_tail(path: Path, lines: int = 40) -> None:
@@ -339,9 +343,10 @@ def run(args) -> int:
   stream = EncodedStream(args.width, args.height, fps, args.bitrate, args.mp4) if args.encode else None
   window = None if args.headless else Window(args.width, args.height, args.scale)
   source = ViewSource("car", request, log, car_path=frames_path, touch_path=touch_path, control_path=control_path,
-                      renderer_command=renderer_command(frames_path, touch_path, control_path), renderer_log=log_path)
+                      renderer_command=renderer_command(frames_path, touch_path, control_path, args.stream_content), renderer_log=log_path)
   pipeline = f"{args.pixel_format}{' -> libx264' if stream else ''}"
   print(f"preview {args.width}x{args.height}@{fps} margins {args.margin_w}x{args.margin_h} {pipeline}; " +
+        f"content {args.stream_content or 'from config'}; " +
         f"prefix {os.environ.get('OPENPILOT_PREFIX', '(none)')}; renderer log {log_path}", flush=True)
   received = shown = 0
   render_rate, encode_rate = Rate(), Rate()

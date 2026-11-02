@@ -41,6 +41,7 @@ from openpilot.starpilot.system.starport.frame_source import (DEFAULT_PATH as DE
                                                                   FORMAT_NV12, FrameRequest)
 from openpilot.starpilot.system.starport.projection_control import DEFAULT_CONTROL_SOCKET, NATIVE_FOCUS
 from openpilot.starpilot.system.starport.touch import DEFAULT_TOUCH_SOCKET
+from openpilot.starpilot.system.starport.projection_stream_lease import StreamLeaseWriter
 from openpilot.starpilot.system.starport.view import CAR_FRAME_PATH, ViewSource, renderer_available
 from openpilot.starpilot.system.starport.session import AuthenticationRejected, PeerRequestedStop, ProjectionSession
 
@@ -1573,12 +1574,17 @@ class Supervisor:
     except Exception as error:  # turn-by-turn is optional; projection must never depend on it
       self.log("nav_status_unavailable", error=str(error))
     clean_exit = False
+    # The comma's own screen goes black (alerts only) while the car view really reaches the car.
+    self._stream_lease = StreamLeaseWriter() if config.get("comma_screen_while_streaming", "black") == "black" else None
     try:
       self._stream(session, encoder, source, watch, interval)
     except NativeFocusHeld:
       clean_exit = True  # tell the car we are leaving, so it does not hold a dead session against the reconnect
       raise
     finally:
+      if self._stream_lease is not None:
+        self._stream_lease.release()
+        self._stream_lease = None
       if session.audio is not None:
         session.audio.close()
       if getattr(session, "nav", None) is not None:
@@ -1608,6 +1614,7 @@ class Supervisor:
     wait_for_frame = False
     audio = getattr(session, "audio", None)
     nav = getattr(session, "nav", None)
+    stream_lease = getattr(self, "_stream_lease", None)
     focus_retries = 0
     next_focus_retry = started + FOCUS_RETRY_FIRST
     self._stage("streaming")
@@ -1680,6 +1687,8 @@ class Supervisor:
             session.send_frame(data, frame.captured_ns // 1000, keyframe=keyframe)
             if source.view == "car":
               source.source.mark_sent(frame.captured_ns)
+              if stream_lease is not None and session.focused:
+                stream_lease.touch()  # throttled to one utime per second
             sent_at = time.monotonic()
             ages.append(sent_at - frame.captured_ns / 1e9)
             sent_times.append(sent_at)

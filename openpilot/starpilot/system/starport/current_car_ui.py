@@ -2,7 +2,8 @@
 
 Frames are rendered only while requested. Touch input controls navigation favorites and drive bookmarks.
 Onroad, each new camera frame is drawn exactly once, as soon as it lands (see
-CameraPacer). When the encoder takes NV12, the frame is converted on the GPU,
+CameraPacer). With stream_content "birds_eye" (the default) no camera is drawn,
+so frames follow the encoder interval. When the encoder takes NV12, the frame is converted on the GPU,
 and it can be read back without stalling the renderer.
 """
 
@@ -141,7 +142,8 @@ def wait_for_request(producer: FrameProducer) -> FrameRequest:
   raise TimeoutError("Android Auto did not request current UI frames")
 
 
-def run(frames_path: str, touch_path: str | None = None, control_path: str | None = None) -> int:
+def run(frames_path: str, touch_path: str | None = None, control_path: str | None = None,
+        stream_content: str | None = None) -> int:
   if os.geteuid() == 0:
     raise RuntimeError("Car display must run as the comma user")
   parent = os.getppid()
@@ -193,10 +195,14 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
     gui_app._render_texture = None
     from openpilot.starpilot.system.starport.identity import certificate_days_left
     from openpilot.starpilot.system.starport.projection_layout_runtime import ProjectionLayoutWatcher, comma_display_seed
+    from openpilot.starpilot.system.starport import identity as identity_store
+    config = identity_store.load_config()
+    # A preview (./aapreview --stream-content) may override the saved choice; starportd never passes it.
+    stream_content = stream_content or config["stream_content"]
     viewport = (geometry.logical_width, geometry.logical_height)
     watcher = ProjectionLayoutWatcher(viewport, display_seed=comma_display_seed)
     layout = ProjectionOnroad(viewport=viewport, customization=watcher.load(),
-                              certificate_days=certificate_days_left(), layout_watcher=watcher)
+                              certificate_days=certificate_days_left(), layout_watcher=watcher, content=stream_content)
     resources.callback(layout.close)
     watcher.start()
     resources.callback(watcher.close)
@@ -253,17 +259,18 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
     pixel_format_name = 'nv12' if converter is not None else 'rgba'
     pipeline = f"{pixel_format_name}, {'async' if readback.asynchronous else 'sync'} readback"
     print(f"car view pipeline: {pipeline}", flush=True)
-    from openpilot.starpilot.system.starport import identity as identity_store
+    print(f"car view content: {stream_content}", flush=True)
     from openpilot.starpilot.system.starport.render_profile import RenderPipelineSummary, RenderSampler, RenderSummary
-    config = identity_store.load_config()
     sampler = None
     if config["render_profile"]:
       sampler = RenderSampler(identity_store.LOG_DIR / "render_profile.txt", max_bytes=config["render_profile_kb"] * 1024)
       sampler.start()
       resources.callback(sampler.close)
-    summary = RenderSummary(time.monotonic())
+    summary = RenderSummary(time.monotonic(), content=stream_content)
     pipeline_summary = RenderPipelineSummary(time.monotonic_ns()) if sampler is not None else None
-    camera_pacer = CameraPacer()
+    # Operator-requested video optimization: birds-eye-only draws no camera (layout.camera_stream stays None),
+    # so it never subscribes a CameraState; frames follow the encoder interval.
+    camera_pacer = CameraPacer() if stream_content == "full" else None
     in_flight_ns = 0
     submitted_ns = 0
     in_flight_camera = None
@@ -277,17 +284,20 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
       the session to synchronous readback instead of crashing the renderer."""
       nonlocal async_failures
       try:
+        waited = time.monotonic()
         try:
           pixels = readback.finish()
         except RuntimeError as error:
           if not readback.asynchronous:
             raise
+          summary.drop()
           async_failures += 1
           print(f"car view dropped a frame: {error}", flush=True)
           if async_failures >= ASYNC_READBACK_FAILURES:
             readback.fall_back_to_sync()
             print(f"car view pipeline: {pixel_format_name}, sync readback (async failed {async_failures} times in a row)", flush=True)
           return
+        summary.add("readback_wait", time.monotonic() - waited)
         async_failures = 0
         producer.publish(request, pixels, in_flight_ns, pixel_format, advance=False)
         if pipeline_summary is not None and sampler is not None:
@@ -337,7 +347,8 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
           sampler.rendering = False
         time.sleep(min(delay, READBACK_POLL_STEP if readback.pending else 0.05))
         continue
-      if layout.camera_stream is not None:
+      camera_paced = layout.camera_stream is not None and camera_pacer is not None
+      if camera_paced:
         # Within that budget, draw as soon as the camera on screen has a new frame.
         if readback.pending and readback.ready():
           publish_readback()
@@ -352,12 +363,16 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
         sampler.rendering = True
       frame_began = time.monotonic()
       context.begin_frame(now)
+      phase = time.monotonic()
       ui_state.update()
+      summary.add("update", time.monotonic() - phase)
       if messaging.recv_one_or_none(saved_bookmarks) is not None and ui_state.started:
         layout.bookmark_saved()
       if sampler is not None:
         sampler.onroad = ui_state.started
+      phase = time.monotonic()
       layout.prepare()  # offscreen passes (the map) must not run inside the content target
+      summary.add("prepare", time.monotonic() - phase)
       # ANDROID AUTO VIDEO PERFORMANCE GUARDRAIL: Publish the previous frame before drawing the next; moving this later adds video latency.
       # Altering this can degrade video smoothness or introduce lag on Android Auto.
       # Do not change it autonomously; require an explicit user request specifically for this video optimization.
@@ -366,6 +381,7 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
         # frame's drawing. A busy renderer must not hold video until that draw ends.
         # A frame still on the GPU when the next camera frame arrived is waited for here.
         publish_readback()
+      phase = time.monotonic()
       rl.begin_texture_mode(content)
       try:
         rl.clear_background(rl.BLACK)
@@ -378,13 +394,16 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
           rl.rl_pop_matrix()
       finally:
         rl.end_texture_mode()
+      summary.add("draw", time.monotonic() - phase)
       layout.handle_touches(projected_touches(touch.drain(), geometry))
+      phase = time.monotonic()
       if output is not None:
         gpu_nv12.compose_rgba(content.texture, output, request.margin_w, request.margin_h,
                               content_left=request.content_left, content_top=request.content_top)
       regions = converter.convert(content.texture) if converter is not None else rgba_regions
       producer.advance(request, captured_ns)
       readback.start(regions)
+      summary.add("submit", time.monotonic() - phase)
       in_flight_ns = captured_ns
       if pipeline_summary is not None:
         submitted_ns = time.monotonic_ns()
@@ -393,9 +412,11 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
                             if layout.camera_stream is not None and camera.frame is not None else None)
       if not readback.asynchronous:
         publish_readback()
-      report = summary.frame_done(frame_began, time.monotonic())
-      if report is not None and sampler is not None:
-        sampler.summary = {**(sampler.summary or {}), **report}
+      report = summary.frame_done(frame_began, time.monotonic(), camera_paced=camera_paced)
+      if report is not None:
+        print(json.dumps(report), flush=True)  # car_ui.log: one line per window, copied off with the other logs
+        if sampler is not None:
+          sampler.summary = {**(sampler.summary or {}), **report}
       gui_app._frame += 1
   return 0
 
@@ -405,8 +426,9 @@ def main() -> int:
   parser.add_argument("--frames", required=True)
   parser.add_argument("--touch")
   parser.add_argument("--control")
+  parser.add_argument("--stream-content", choices=("birds_eye", "full"), help="override config stream_content (desktop preview)")
   args = parser.parse_args()
-  return run(args.frames, args.touch, args.control)
+  return run(args.frames, args.touch, args.control, args.stream_content)
 
 
 if __name__ == "__main__":

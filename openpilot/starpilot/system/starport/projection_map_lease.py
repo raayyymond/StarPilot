@@ -7,7 +7,9 @@ MAX_AGE_S = 3.0
 TOUCH_EVERY_S = 1.0
 
 
-class MapLeaseWriter:
+class LeaseWriter:
+  """Keeps a lease file fresh at most once a second while its owner is active."""
+
   def __init__(self, path=DEFAULT_PATH):
     self.path = str(path)
     self._touched = -TOUCH_EVERY_S
@@ -31,10 +33,17 @@ class MapLeaseWriter:
       pass
 
 
-def projection_map_active(path=DEFAULT_PATH, now=None):
+MapLeaseWriter = LeaseWriter
+
+
+def lease_active(path, max_age_s=MAX_AGE_S, now=None):
   try:
     # Filesystem mtimes use the realtime clock; monotonic time has a different epoch.
     age = (time.time() if now is None else now) - os.stat(path).st_mtime  # noqa: TID251
   except OSError:
     return False
-  return 0 <= age <= MAX_AGE_S
+  return 0 <= age <= max_age_s
+
+
+def projection_map_active(path=DEFAULT_PATH, now=None):
+  return lease_active(path, MAX_AGE_S, now)

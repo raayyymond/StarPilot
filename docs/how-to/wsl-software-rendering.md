@@ -57,3 +57,27 @@ The projection layout has a `birds_eye` widget (enabled by default, 520x600 pane
 right edge) drawing lane lines, road edges, the planned path, ego and leads top-down.
 Tapping it switches between the panel and a full-frame view. Preview it alone with
 `./dev python -m openpilot.starpilot.ui.preview_birds_eye --output be.png [--show]`.
+
+## Stream content (`stream_content`)
+
+The starport config key `"stream_content"` picks what the car screen shows while driving.
+`"birds_eye"` (the default) draws only the birds-eye view over the whole frame: no road
+camera, map, picture-in-picture, driver monitor, feeds, favorites, HUD or exit button, and
+taps do nothing; with no camera to follow, frames come at the encoder rate (30 fps on the
+comma). `"full"` is the camera composition with the birds-eye panel described above. The
+standby screen and its exit button are the same in both. `./aapreview --stream-content
+birds_eye|full` overrides the config for the preview (default: the config, else birds_eye).
+The renderer logs `car view content: ...` at start and, every 5 s, a `render_stats` line in
+`car_ui.log` and `render_profile.txt` with `fps`, `frame_ms` and per-frame means `update_ms`,
+`prepare_ms`, `draw_ms`, `submit_ms`, `readback_wait_ms`, plus `dropped`, `content` and
+`paced` (`camera`|`interval`).
+
+## The comma's own screen while streaming (`comma_screen_while_streaming`)
+
+With `"comma_screen_while_streaming": "black"` (the default) the supervisor touches
+`/tmp/starpilot-projection-stream.lease` once a second while focused car-view frames reach the
+car, and the native onroad view (checked at most once a second) draws a black screen with only
+openpilot alerts: no camera receive or texture upload, model, HUD, map or PiP. The lease is
+removed when the session ends and expires 2 s after the last touch, so the normal UI returns
+within about 3 s. `"normal"` keeps the usual UI. To see it in the simulator, touch the lease
+in a loop from another shell while `./simui --c4 --headless ...` runs.

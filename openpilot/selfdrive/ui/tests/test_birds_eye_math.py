@@ -192,3 +192,73 @@ def test_poll_accepts_only_fresh_model():
   assert not view.scene.valid, 'data from before this drive is ignored'
   view.poll(_SM(services, frame=12, updated=True), started_frame=10)
   assert view.scene.valid and view.scene.engaged and not view.scene.allow_throttle
+
+
+def test_ribbon_sides_matches_ribbon_on_each_run():
+  rng = np.random.default_rng(0)
+  centre = np.cumsum(rng.normal(size=(12, 2)), axis=0) * 10
+  half = rng.uniform(1, 4, size=12)
+  valid = np.array([True] * 5 + [False] + [True] * 2 + [False] + [True] * 3)
+  left, right = bem.ribbon_sides(centre, half, valid)
+  for start, end in bem.valid_runs(valid):
+    poly = bem.ribbon(centre[start:end], half[start:end])
+    n = end - start
+    assert left[start:end] == pytest.approx(poly[:n], abs=1e-3)
+    assert right[start:end] == pytest.approx(poly[n:][::-1], abs=1e-3)
+  stacked_left, _ = bem.ribbon_sides(np.stack((centre, centre)), np.stack((half, half)), np.stack((valid, valid)))
+  assert stacked_left[1] == pytest.approx(left), 'leading axes are independent ribbons'
+
+
+def test_hls_to_rgb_matches_colorsys():
+  import colorsys
+  rng = np.random.default_rng(1)
+  hue, light, sat = rng.uniform(0, 1, 50), rng.uniform(0, 1, 50), np.concatenate((rng.uniform(0, 1, 49), [0.0]))
+  expected = np.array([colorsys.hls_to_rgb(*v) for v in zip(hue, light, sat, strict=True)])
+  assert bem.hls_to_rgb(hue, light, sat) == pytest.approx(expected)
+
+
+def _renderer_with_scene():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  view = BirdsEyeRenderer(text=SimpleNamespace(measure=lambda text, size: (10.0, 10.0), draw=lambda *args: None))
+  radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=30.0, yRel=0.0, vRel=-2.0),
+                          leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
+  view.ingest(_model(), radar, SimpleNamespace(steeringAngleDeg=5.0, leftBlinker=False, rightBlinker=False), engaged=True)
+  return view, radar
+
+
+def _layers(view, rect=RECT):
+  key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), view.config)
+  return view._scene_layers(view.scene, rect, key, bem.view_params(rect, view.config))
+
+
+def test_scene_geometry_is_cached_until_an_input_changes():
+  view, radar = _renderer_with_scene()
+  road, lines, path = first = _layers(view)
+  assert road and lines and path, 'road, lines and path all produce quads'
+  assert len(road) % 6 == len(lines) % 6 == len(path) % 6 == 0, 'six raw calls per quad'
+  assert _layers(view) is first, 'an unchanged scene replays the cached call lists'
+  view.ingest(None, radar, None)
+  assert _layers(view) is first, 'leads and car state alone keep the road'
+  view.opacity = 0.5
+  assert _layers(view) is not first, 'opacity is part of the key'
+  again = _layers(view)
+  assert _layers(view, SimpleNamespace(x=0.0, y=0.0, width=300.0, height=400.0)) is not again, 'so is the rect'
+  again = _layers(view)
+  view.ingest(_model(path_y=0.5), radar, None)
+  assert _layers(view) is not again, 'a new model frame rebuilds'
+  again = _layers(view)
+  view.road_style = {'laneLines': '#FF8800C0'}
+  assert _layers(view) is not again, 'so does a lane color setting'
+
+
+def test_ego_glyph_cache_ignores_steering_jitter_below_its_resolution(monkeypatch):
+  import openpilot.selfdrive.ui.onroad.birds_eye_renderer as ber
+  view, _ = _renderer_with_scene()
+  built = []
+  monkeypatch.setattr(view, '_ego_glyph', lambda rect, v, wheel_angle: built.append(wheel_angle) or ([], ()))
+  monkeypatch.setattr(ber.rl, 'draw_circle_gradient', lambda *args: None)
+  rect_key = (RECT.x, RECT.y, RECT.width, RECT.height, view.config)
+  for steering in (5.0, 5.05, 5.1, 9.0):
+    view.scene.steering_deg = steering
+    view._ego(view.scene, RECT, rect_key, None)
+  assert len(built) == 2, 'sub-0.25 degree wheel changes reuse the glyph; a real turn rebuilds it'

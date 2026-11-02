@@ -113,6 +113,8 @@ DEDICATED_WIFI_RESET = ("dedicated_wifi_interface",)
 
 CONNECTIONS = ("wireless", "wired", "headunitpad", "openheadunit")
 RESOLUTIONS = ("auto", "480p", "720p", "1080p")
+STREAM_CONTENTS = ("birds_eye", "full")
+COMMA_SCREENS = ("black", "normal")
 
 DEFAULT_CONFIG = {
   "config_version": CONFIG_VERSION,
@@ -145,6 +147,10 @@ DEFAULT_CONFIG = {
   "hw_encoder_max_height": 720,  # comma hardware encoder limit, 720 or 1080. 1080 is an UNVERIFIED opt-in (BELIEF:
                                  # the Qualcomm encoder should do 1080p30, never tested on a comma 4); it needs
                                  # libstarport_encoder.so rebuilt from this source. Desktop software encoding allows 1080.
+  "stream_content": "birds_eye",  # what the car screen shows while driving: "birds_eye" draws only the birds-eye view over
+                                  # the whole frame (no camera, no overlay widgets; cheapest), "full" the camera composition
+  "comma_screen_while_streaming": "black",  # the comma's own screen while Android Auto is streaming: "black" draws only
+                                            # alerts (frees the GPU for the stream), "normal" keeps the usual onroad UI
   "wifi_interface": "wlan0",
   "dedicated_wifi_interface": True,   # join the car on its own aa0 station so wlan0 stays on home Wi-Fi
   "device_name": "StarPilot",
@@ -201,6 +207,10 @@ def load_config(path: Path | None = None) -> dict:
     config["resolution"] = "auto"
   if type(config["hw_encoder_max_height"]) is not int or config["hw_encoder_max_height"] not in (720, 1080):
     config["hw_encoder_max_height"] = DEFAULT_CONFIG["hw_encoder_max_height"]
+  if config["stream_content"] not in STREAM_CONTENTS:
+    config["stream_content"] = DEFAULT_CONFIG["stream_content"]
+  if config["comma_screen_while_streaming"] not in COMMA_SCREENS:
+    config["comma_screen_while_streaming"] = DEFAULT_CONFIG["comma_screen_while_streaming"]
   config["rfcomm_cache"] = {str(address).upper(): channel for address, channel in config["rfcomm_cache"].items()
                             if type(channel) is int and 1 <= channel <= 30}
   return config

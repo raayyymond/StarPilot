@@ -6,11 +6,15 @@ count, which keeps the ribbons simple and lets frames be blended without jitter.
 """
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
+from itertools import chain, repeat, starmap
 import math
+import operator
 import time
 
 import numpy as np
 import pyray as rl
+from raylib import rl as _raw  # the C functions pyray wraps; per-vertex calls skip its argument conversion
 
 from openpilot.selfdrive.ui.onroad import birds_eye_math as bem
 from openpilot.system.ui.lib.shader_polygon import Gradient
@@ -115,35 +119,114 @@ class _DefaultText:
     rl.draw_text_ex(gui_app.font(FontWeight.SEMI_BOLD), text, rl.Vector2(x, y), size, 0, color)
 
 
+
+def _rgba(rgb, alpha) -> tuple[int, int, int, int]:
+  return int(rgb[0]), int(rgb[1]), int(rgb[2]), int(max(0, min(255, alpha)))
+
+
 def _color(rgb, alpha) -> rl.Color:
-  return rl.Color(int(rgb[0]), int(rgb[1]), int(rgb[2]), int(max(0, min(255, alpha))))
+  return rl.Color(*_rgba(rgb, alpha))
 
 
-def _fan(points: np.ndarray, color: rl.Color) -> None:
-  """Filled convex polygon; raylib wants counter-clockwise as seen on a y-down screen."""
-  pts = np.asarray(points, dtype=np.float64)
-  if pts.shape[0] < 3:
+# A layer is a ready-made list of raw raylib calls, (function, *args), replayed by _emit. Each quad is
+# color0, vertex0, vertex1, color1, vertex2, vertex3, so a ribbon row fades along its length.
+Layer = list
+EMPTY: Layer = []
+_call = getattr(operator, 'call', lambda function, *args: function(*args))
+
+
+def _layer(cols, verts) -> Layer:
+  """Quads from per-quad colors (Q, 8) [r0, g0, b0, a0, r1, g1, b1, a1] and vertices (Q, 8) [x0, y0 .. x3, y3].
+
+  Built with C-level zips: no Python bytecode runs per vertex, here or in _emit."""
+  cols = np.asarray(cols, dtype=np.int32).reshape(-1, 8)
+  if not cols.shape[0]:
+    return []
+  c = cols.T.tolist()
+  v = np.asarray(verts, dtype=np.float64).reshape(-1, 8).T.tolist()
+  color, vertex = _raw.rlColor4ub, _raw.rlVertex2f
+
+  def calls(function, *columns):  # (function, *args) per quad; repeat() is endless, so not strict
+    return zip(repeat(function), *columns, strict=False)
+
+  quads = zip(calls(color, *c[:4]), calls(vertex, *v[0:2]), calls(vertex, *v[2:4]),
+              calls(color, *c[4:]), calls(vertex, *v[4:6]), calls(vertex, *v[6:8]), strict=True)
+  return list(chain.from_iterable(quads))
+
+
+def _emit(*layers: Layer) -> None:
+  """All quads of the given layers in one rlBegin/rlEnd, through the raw C functions (no pyray wrapping).
+
+  Vertex colors put each fade exactly where its row is on every target (shader gradients map through
+  gl_FragCoord, whose origin differs between a window and a render target)."""
+  if not any(layers):
     return
-  x, y = pts[:, 0], pts[:, 1]
-  if np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)) > 0:
-    pts = pts[::-1]
-  centre = pts.mean(axis=0)
-  fan = [rl.Vector2(float(centre[0]), float(centre[1]))] + [rl.Vector2(float(px), float(py)) for px, py in pts]
-  fan.append(fan[1])
-  rl.draw_triangle_fan(fan, len(fan), color)
+  # Bind the 1x1 white texture the way raylib's own shapes do: a quad batch opened right after text would
+  # otherwise continue the font's draw call and sample its atlas.
+  _raw.rlSetTexture(_raw.rlGetTextureIdDefault())
+  _raw.rlBegin(rl.RL_QUADS)
+  for layer in layers:
+    any(starmap(_call, layer))  # every call returns None, so any() just drains the iterator in C
+  _raw.rlEnd()
+  _raw.rlSetTexture(0)
 
 
-def _outline(points: np.ndarray, thickness: float, color: rl.Color) -> None:
-  pts = np.asarray(points, dtype=np.float64)
-  for i in range(len(pts)):
-    a, b = pts[i], pts[(i + 1) % len(pts)]
-    rl.draw_line_ex(rl.Vector2(float(a[0]), float(a[1])), rl.Vector2(float(b[0]), float(b[1])), thickness, color)
+def _ribbon_quads(left: np.ndarray, right: np.ndarray, rows: np.ndarray, valid: np.ndarray, bottom: float) -> tuple[Layer, np.ndarray]:
+  """Quads between consecutive valid rows of (R, N, 2) ribbon sides with one RGBA per row, and each ribbon's quad count.
+
+  Rows fully transparent at both ends and quads wholly below the rect bottom are dropped."""
+  rgba = np.clip(rows, 0, 255).astype(np.int32)
+  verts = np.concatenate((left[..., :-1, :], right[..., :-1, :], right[..., 1:, :], left[..., 1:, :]), axis=-1)
+  keep = valid[..., :-1] & valid[..., 1:] & ((rgba[..., :-1, 3] > 0) | (rgba[..., 1:, 3] > 0))
+  keep &= verts[..., 1::2].min(axis=-1) <= bottom
+  cols = np.concatenate((rgba[..., :-1, :], rgba[..., 1:, :]), axis=-1)
+  return _layer(cols[keep], verts[keep]), keep.sum(axis=-1)
+
+
+def _fan_indices(sizes) -> tuple[np.ndarray, np.ndarray]:
+  """Quad vertex indices filling consecutive convex polygons as fans, and each quad's polygon number."""
+  quads, owner, offset = [], [], 0
+  for number, n in enumerate(sizes):
+    for i in range(1, n - 1, 2):
+      quads.append((offset, offset + i, offset + i + 1, offset + min(i + 2, n - 1)))
+      owner.append(number)
+    offset += n
+  return np.array(quads), np.array(owner)
+
+
+def _polygon_quads(screen: np.ndarray, layout, colors) -> Layer:
+  """Fill polygons laid out by _fan_indices with one color each."""
+  index, owner = layout
+  rgba = np.asarray(colors, dtype=np.int32)[owner]
+  return _layer(np.concatenate((rgba, rgba), axis=1), screen[index])
+
+
+@lru_cache(maxsize=8)
+def _car_body(length: float, width: float) -> np.ndarray:
+  """Hull 8, roof 4 and windshield 4 points of a car glyph centered at the origin, car-frame meters."""
+  scale = np.array([length / 4.6, width / 1.9])
+  return np.concatenate((bem.car_outline(0.0, 0.0, 0.0, length, width, chamfer=0.38 * width / 1.9), ROOF * scale, SHIELD * scale))
+
+
+WHEEL = np.array([(0.36, -0.12), (-0.36, -0.12), (-0.36, 0.12), (0.36, 0.12)])
+ROOF = np.array([(0.45, -0.64), (-1.05, -0.66), (-1.05, 0.66), (0.45, 0.64)])
+SHIELD = np.array([(1.2, -0.62), (0.6, -0.7), (0.6, 0.7), (1.2, 0.62)])
+# Car glyph point order: [4 wheels x 4,] hull 8, roof 4, windshield 4.
+CAR_LAYOUT = _fan_indices((8, 4, 4))
+EGO_LAYOUT = _fan_indices((4, 4, 4, 4, 8, 4, 4))
+TRIANGLE_LAYOUT = _fan_indices((3,))
+TICK_FADE = ([0.0, 0.6, 0.95], [1.0, 0.8, 0.0])
+WHEEL_STEP = math.radians(0.25)  # ego front-wheel angle resolution
 
 
 class BirdsEyeRenderer(Widget):
   """Top-down chase view. Feed it with poll(sm, started_frame) or ingest(...), then render(rect).
 
   panel=True draws a rounded translucent card (overlay); panel=False fills the rect edge to edge.
+
+  Geometry that only changes with the rect, the settings or a new model frame (road, lane lines, distance
+  rungs, the ego glyph) is built once and replayed from cache. Scene arrays are treated as immutable:
+  ingest() replaces them, and the cache keys on their identity.
   """
 
   def __init__(self, config: bem.BirdsEyeConfig | None = None, text=None,
@@ -165,6 +248,8 @@ class BirdsEyeRenderer(Widget):
     self._last_model_frame = -1
     self._rainbow = None
     self._lead_model = None
+    self._cache: dict[str, tuple] = {}
+
 
   # ---- data -------------------------------------------------------------------------------------
 
@@ -227,6 +312,17 @@ class BirdsEyeRenderer(Widget):
     # Without a new modelV2 the road keeps its last good frame; leads, wheel and blinkers still follow.
     self.ingest(model, radar, car, engaged=engaged, experimental=experimental, allow_throttle=allow)
 
+  # ---- caching ----------------------------------------------------------------------------------
+
+  def _cached(self, name: str, key, build, keep=None):
+    """build() once per key. keep holds the objects whose ids are in the key, so those ids stay unique."""
+    hit = self._cache.get(name)
+    if hit is not None and hit[0] == key:
+      return hit[1]
+    value = build()
+    self._cache[name] = (key, value, keep)
+    return value
+
   # ---- drawing ----------------------------------------------------------------------------------
 
   def _render(self, rect: rl.Rectangle):
@@ -237,21 +333,27 @@ class BirdsEyeRenderer(Widget):
 
   def draw(self, rect: rl.Rectangle) -> None:
     from openpilot.starpilot.ui import clip
-    view = bem.view_params(rect, self.config)
+    rect_key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), self.config)
+    view = self._cached('view', rect_key, lambda: bem.view_params(rect, self.config))
     self._background(rect)
     clip.begin_scissor_mode(rect.x, rect.y, rect.width, rect.height)
     rl.rl_disable_backface_culling()
     try:
       scene = self.scene
+      road = lines = path = EMPTY
       if scene.valid:
-        self._road(scene, rect, view)
-      self._ticks(rect, view)
-      if scene.valid:
-        self._lines(scene, rect, view)
-        self._path(scene, rect, view)
+        if scene.path is not None:
+          target = 1.0 if scene.allow_throttle else 0.0
+          self._throttle_blend += (target - self._throttle_blend) * 0.2
+        road, lines, path = self._scene_layers(scene, rect, rect_key, view)
+      ticks, labels = self._cached('ticks', (rect_key, self.opacity, self.metric), lambda: self._ticks(rect, view))
+      _emit(road, ticks)
+      for text, size, x, y, shadow, color in labels:
+        self.text.draw(text, size, x + 1.5, y + 1.5, shadow)
+        self.text.draw(text, size, x, y, color)
+      _emit(lines, path)
       self._leads(scene, rect, view)
-      self._ego(scene, rect, view)
-      self._blinkers(scene, rect, view)
+      self._ego(scene, rect, rect_key, view)
     finally:
       rl.rl_draw_render_batch_active()
       rl.rl_enable_backface_culling()
@@ -279,11 +381,13 @@ class BirdsEyeRenderer(Widget):
 
   @staticmethod
   def _fade(rgb, alpha, t: np.ndarray, hold: float = 0.6, end: float = 0.95) -> np.ndarray:
-    """Per-row RGBA holding alpha near the car and fading out toward the far edge."""
-    a = alpha * np.interp(t, [0.0, hold, end], [1.0, 0.8, 0.0])
-    rows = np.empty((t.size, 4))
-    rows[:, :3] = rgb
-    rows[:, 3] = a
+    """Per-row RGBA holding alpha near the car and fading out toward the far edge.
+
+    rgb (3,) or (..., 3) and alpha scalar or (...,) broadcast against the rows t (..., N)."""
+    t = np.asarray(t, dtype=np.float64)
+    rows = np.empty((*t.shape, 4))
+    rows[..., :3] = np.asarray(rgb, dtype=np.float64)[..., None, :] if np.ndim(rgb) > 1 else rgb
+    rows[..., 3] = np.asarray(alpha, dtype=np.float64)[..., None] * np.interp(t, [0.0, hold, end], [1.0, 0.8, 0.0])
     return rows
 
   @staticmethod
@@ -295,100 +399,40 @@ class BirdsEyeRenderer(Widget):
     out[:, 3] *= alpha_scale
     return out
 
-  @staticmethod
-  def _strip(poly: np.ndarray, rows: np.ndarray) -> None:
-    """Draw a ribbon [L0..Ln-1, Rn-1..R0] with one RGBA per row, as per-vertex colored quads.
+  def _project_lines(self, ys: np.ndarray, grid: np.ndarray, view, rect) -> np.ndarray:
+    """(..., N) lateral offsets on the grid -> (..., N, 2) widget pixels (NaN offsets project as 0)."""
+    ys = np.nan_to_num(ys)
+    pts = np.stack((np.broadcast_to(grid, ys.shape), ys), axis=-1)
+    return bem.car_to_widget(pts.reshape(-1, 2), rect, self.config, view).astype(np.float64).reshape(*ys.shape, 2)
 
-    Shader gradients map through gl_FragCoord, whose origin differs between a window and a render
-    target; vertex colors put each fade exactly where its row is on every target."""
-    n = poly.shape[0] // 2
-    if n < 2:
-      return
-    rgba = np.clip(rows, 0, 255).astype(np.int32).tolist()
-    lp, rp = poly[:n].tolist(), poly[n:][::-1].tolist()
-    color, vertex = rl.rl_color4ub, rl.rl_vertex2f
-    rl.rl_begin(rl.RL_QUADS)
-    for i in range(n - 1):
-      c0, c1 = rgba[i], rgba[i + 1]
-      if c0[3] == 0 and c1[3] == 0:
-        continue
-      color(*c0)
-      vertex(*lp[i])
-      vertex(*rp[i])
-      color(*c1)
-      vertex(*rp[i + 1])
-      vertex(*lp[i + 1])
-    rl.rl_end()
+  def _scene_layers(self, scene, rect, rect_key, view) -> tuple[Layer, Layer, Layer]:
+    """(road, lines, path) layers; rebuilt only when the geometry, the path end or a setting changes."""
+    from openpilot.starpilot.ui.road_colors import path_mode
+    end = self._path_end(scene) if scene.path is not None else self.config.x_max
+    style = self.road_style
+    mode = path_mode(style)
+    arrays = (scene.grid, *scene.lanes, *scene.edges, scene.lane_probs, scene.edge_stds, scene.path, scene.path_accel)
+    build = lambda: self._build_scene(scene, rect, view, end)  # noqa: E731
+    if scene.engaged and mode == 'rainbow' and scene.path is not None:  # animated: rebuilt every frame
+      return build()
+    key = (rect_key, self.opacity, style.get('laneLines'), tuple(map(id, arrays)), end, self._throttle_blend,
+           scene.engaged, scene.experimental, mode, style.get('path'))
+    return self._cached('scene', key, build, keep=arrays)
 
-  def _project_line(self, ys, grid, view, rect):
-    pts = np.stack((grid, np.nan_to_num(ys)), axis=1)
-    return bem.car_to_widget(pts, rect, self.config, view)
+  def _road_pair(self, scene) -> list:
+    if len(scene.edges) == 2:
+      return scene.edges
+    return [scene.lanes[0], scene.lanes[3]] if len(scene.lanes) == 4 else []
 
-  def _line_ribbon(self, ys, grid, view, rect, width_m, min_px):
-    ok = np.isfinite(ys)
-    pieces = []
-    for start, end in bem.valid_runs(ok):
-      if end - start < 2:
-        continue
-      centre = self._project_line(ys[start:end], grid[start:end], view, rect)
-      half = np.maximum(width_m * bem.scale_at(grid[start:end], view), min_px) / 2
-      pieces.append((bem.ribbon(centre, half), centre))
-    return pieces
-
-  def _road(self, scene, rect, view) -> None:
-    grid = scene.grid
-    pair = scene.edges if len(scene.edges) == 2 else []
-    if not pair and len(scene.lanes) == 4:
-      pair = [scene.lanes[0], scene.lanes[3]]
-    if len(pair) != 2:
-      return
-    left, right = pair
-    ok = np.isfinite(left) & np.isfinite(right)
-    for start, end in bem.valid_runs(ok):
-      if end - start < 2:
-        continue
-      lpts = self._project_line(left[start:end], grid[start:end], view, rect)
-      rpts = self._project_line(right[start:end], grid[start:end], view, rect)
-      t = self._height_fraction(lpts[:, 1], rect)
-      self._strip(np.vstack((lpts, rpts[::-1])), self._fade((40, 46, 60), 215 * self.opacity, t, hold=0.55, end=0.97))
-
-  def _font_size(self, rect) -> float:
-    return max(15.0, min(26.0, rect.height * 0.026))
-
-  def _label(self, text, size, x, y, color) -> None:
-    self.text.draw(text, size, x + 1.5, y + 1.5, rl.Color(0, 0, 0, int(color.a * 0.7)))
-    self.text.draw(text, size, x, y, color)
-
-  def _ticks(self, rect, view) -> None:
-    """Faint distance rungs every 10 m (50 ft), labeled at 20/40/60 m (100/200 ft)."""
-    size = self._font_size(rect)
-    step, labeled, unit, per_unit = (10.0, (20, 40, 60), 'm', 1.0) if self.metric else (50.0, (100, 200), 'ft', 0.3048)
-    count = int(self.config.x_max / (step * per_unit))
-    for index in range(1, count + 1):
-      value = index * step
-      distance = value * per_unit
-      y = float(bem.car_to_widget(np.array([[distance, 0.0]]), rect, self.config, view)[0, 1])
-      if y < rect.y + size * 1.5:
-        break
-      half = min(rect.width / 2 - 14, 11.0 * float(bem.scale_at(distance, view)))
-      fade = float(np.interp(self._height_fraction(np.array([y]), rect)[0], [0.0, 0.6, 0.95], [1.0, 0.8, 0.0]))
-      rl.draw_line_ex(rl.Vector2(view.cx - half, y), rl.Vector2(view.cx + half, y), 1.0,
-                      rl.Color(255, 255, 255, int(24 * fade * self.opacity)))
-      if int(value) in labeled:
-        text = f"{int(value)} {unit}"
-        _, h = self.text.measure(text, size)
-        self._label(text, size, rect.x + 14, y - h / 2, rl.Color(170, 180, 198, int(160 * self.opacity)))
-
-  def _lines(self, scene, rect, view) -> None:
-    grid = scene.grid
+  def _line_styles(self, scene) -> list[tuple]:
+    """(offsets, width m, min width px, rgb, alpha) of each road edge then lane line worth drawing."""
+    from openpilot.starpilot.ui.road_colors import lane_color
+    lines = []
     for i, edge in enumerate(scene.edges):
       std = scene.edge_stds[i] if i < len(scene.edge_stds) else 1.0
       alpha = float(np.clip(1.0 - std, 0.0, 1.0))
-      if alpha < 0.05:
-        continue
-      for poly, centre in self._line_ribbon(edge, grid, view, rect, EDGE_WIDTH, 2.5):
-        self._strip(poly, self._fade((150, 158, 176), 230 * alpha * self.opacity, self._height_fraction(centre[:, 1], rect)))
-    from openpilot.starpilot.ui.road_colors import lane_color
+      if alpha >= 0.05:
+        lines.append((edge, EDGE_WIDTH, 2.5, (150, 158, 176), 230 * alpha * self.opacity))
     for i, lane in enumerate(scene.lanes):
       prob = float(scene.lane_probs[i]) if i < len(scene.lane_probs) else 0.0
       alpha = float(np.clip(prob, 0.0, 0.7)) / 0.7
@@ -396,15 +440,120 @@ class BirdsEyeRenderer(Widget):
         continue
       default = _color((236, 240, 248), 235 * alpha)
       color = lane_color(self.road_style, False, default, prob)
-      a = color.a if color is default else min(255, color.a / 0.7)
-      for poly, centre in self._line_ribbon(lane, grid, view, rect, LANE_WIDTH, 1.8):
-        self._strip(poly, self._fade((color.r, color.g, color.b), a * self.opacity, self._height_fraction(centre[:, 1], rect)))
+      lines.append((lane, LANE_WIDTH, 1.8, (color.r, color.g, color.b),
+                    (color.a if color is default else min(255, color.a / 0.7)) * self.opacity))
+    return lines
+
+  def _path_offsets(self, scene, end) -> tuple[np.ndarray, np.ndarray] | None:
+    """Path offsets on the full grid, NaN outside the drawn run, and its half widths in pixels need u."""
+    grid = scene.grid
+    ys = scene.path.copy()
+    ys[(grid > end) | (grid < EGO_FRONT - 0.5)] = np.nan
+    runs = bem.valid_runs(np.isfinite(ys))
+    if not runs or runs[0][1] - runs[0][0] < 2:
+      return None
+    lo, hi = runs[0]
+    ys[:lo] = np.nan
+    ys[hi:] = np.nan
+    u = (grid - grid[lo]) / max(1e-3, self.config.x_max - grid[lo])
+    return ys, u
+
+  def _build_scene(self, scene, rect, view, end) -> tuple[Layer, Layer, Layer]:
+    """Road, edges, lane lines and path as one batch: one projection, one ribbon pass, one quad build."""
+    grid = scene.grid
+    n = grid.size
+    pair = self._road_pair(scene)
+    lines = self._line_styles(scene)
+    path = self._path_offsets(scene, end) if scene.path is not None else None
+    offsets = [*pair, *(line[0] for line in lines)] + ([path[0]] if path is not None else [])
+    if not offsets:
+      return EMPTY, EMPTY, EMPTY
+    stack = np.stack(offsets)
+    centre = self._project_lines(stack, grid, view, rect)
+    valid = np.isfinite(stack)
+    t = self._height_fraction(centre[..., 1], rect)
+    road = 1 if pair else 0
+    lefts, rights, rows, oks = [], [], [], []
+    if pair:
+      lefts.append(centre[:1])
+      rights.append(centre[1:2])
+      rows.append(self._fade((40, 46, 60), 215 * self.opacity, t[0], hold=0.55, end=0.97)[None])
+      oks.append((valid[0] & valid[1])[None])
+    ribbon = centre[2 * road:]
+    if ribbon.shape[0]:
+      scale = bem.scale_at(grid, view)
+      half = np.empty((ribbon.shape[0], n))
+      if lines:
+        width_m, min_px = np.array([(line[1], line[2]) for line in lines]).T
+        half[:len(lines)] = np.maximum(width_m[:, None] * scale[None, :], min_px[:, None]) / 2
+        rows.append(self._fade(np.array([line[3] for line in lines], dtype=np.float64), np.array([line[4] for line in lines]),
+                               t[2 * road:2 * road + len(lines)]))
+      if path is not None:
+        half[-1] = np.maximum(PATH_WIDTH * (1.0 - 0.35 * path[1]) * scale, 3.0) / 2
+        accel = scene.path_accel if scene.path_accel is not None else np.empty(0)
+        rows.append(self._path_rows(scene, t[-1], accel)[None])
+      left, right = bem.ribbon_sides(ribbon, half, valid[2 * road:])
+      lefts.append(left)
+      rights.append(right)
+      oks.append(valid[2 * road:])
+    layer, counts = _ribbon_quads(np.concatenate(lefts), np.concatenate(rights), np.concatenate(rows), np.concatenate(oks),
+                                  rect.y + rect.height)
+    # Split the one call list back into road | edges and lanes | path (6 calls per quad).
+    cut_road = 6 * int(counts[:road].sum())
+    cut_path = len(layer) - (6 * int(counts[-1]) if path is not None else 0)
+    return layer[:cut_road], layer[cut_road:cut_path], layer[cut_path:]
+
+  def _font_size(self, rect) -> float:
+    return max(15.0, min(26.0, rect.height * 0.026))
+
+  def _ticks(self, rect, view) -> tuple[Layer, list]:
+    """Faint distance rungs every 10 m (50 ft), labeled at 20/40/60 m (100/200 ft)."""
+    size = self._font_size(rect)
+    step, labeled, unit, per_unit = (10.0, (20, 40, 60), 'm', 1.0) if self.metric else (50.0, (100, 200), 'ft', 0.3048)
+    count = int(self.config.x_max / (step * per_unit))
+    values = np.arange(1, count + 1) * step
+    distances = values * per_unit
+    ys = bem.car_to_widget(np.stack((distances, np.zeros_like(distances)), axis=1), rect, self.config, view)[:, 1].astype(np.float64)
+    shown = int(np.argmax(ys < rect.y + size * 1.5)) if (ys < rect.y + size * 1.5).any() else len(ys)
+    values, distances, ys = values[:shown], distances[:shown], ys[:shown]
+    half = np.minimum(rect.width / 2 - 14, 11.0 * bem.scale_at(distances, view))
+    fade = np.interp(self._height_fraction(ys, rect), *TICK_FADE)
+    alpha = (24 * fade * self.opacity).astype(np.int32)
+    verts = np.stack((view.cx - half, ys - 0.5, view.cx - half, ys + 0.5, view.cx + half, ys + 0.5, view.cx + half, ys - 0.5), axis=1)
+    labels = []
+    color = rl.Color(170, 180, 198, int(160 * self.opacity))
+    shadow = rl.Color(0, 0, 0, int(color.a * 0.7))
+    for value, y in zip(values.tolist(), ys.tolist(), strict=True):
+      if int(value) in labeled:
+        text = f"{int(value)} {unit}"
+        _, h = self.text.measure(text, size)
+        labels.append((text, size, rect.x + 14, y - h / 2, shadow, color))
+    return _layer([[255, 255, 255, a] * 2 for a in alpha.tolist()], verts), labels
+
+  def _path_profile(self, scene):
+    """(distances, offsets, slopes) of the path's finite points, or None: what lateral_at/heading_at derive per call."""
+    def build():
+      ok = np.isfinite(scene.path)
+      if np.count_nonzero(ok) < 2:
+        return None
+      gx, gy = scene.grid[ok], scene.path[ok]
+      return gx, gy, np.gradient(gy, gx)
+    return self._cached('path_profile', (id(scene.path), id(scene.grid)), build, keep=(scene.path, scene.grid))
+
+  def _heading_at(self, scene, x: float) -> float:
+    """bem.heading_at on the cached path profile."""
+    profile = self._path_profile(scene) if scene.path is not None else None
+    return 0.0 if profile is None else math.atan(float(np.interp(x, profile[0], profile[2])))
 
   def _path_end(self, scene) -> float:
     end = self.config.x_max
+    profile = self._path_profile(scene)
     for lead in scene.leads:
-      if abs(lead.y - bem.lateral_at(scene.grid, scene.path, lead.d_rel + EGO_FRONT, lead.y)) < 1.6:
-        end = min(end, lead.d_rel + EGO_FRONT - 1.0)
+      x = lead.d_rel + EGO_FRONT
+      # bem.lateral_at on the cached profile
+      lateral = lead.y if profile is None or x < profile[0][0] or x > profile[0][-1] else float(np.interp(x, profile[0], profile[1]))
+      if abs(lead.y - lateral) < 1.6:
+        end = min(end, x - 1.0)
     return end
 
   def _path_rows(self, scene, t: np.ndarray, accel: np.ndarray) -> np.ndarray:
@@ -429,93 +578,109 @@ class BirdsEyeRenderer(Widget):
       hue = np.clip(60 + acc * 35, 0, 120) / 360
       sat = np.minimum(np.abs(acc * 1.5), 1)
       light = np.interp(sat, [0, 1], [0.95, 0.62])
-      import colorsys
-      rgb = np.array([colorsys.hls_to_rgb(h, l, s_) for h, l, s_ in zip(hue, light, sat, strict=True)]) * 255
       rows = self._fade((0, 0, 0), 215 * a, t, hold=0.35, end=0.9)
-      rows[:, :3] = rgb
+      rows[:, :3] = bem.hls_to_rgb(hue, light, sat) * 255
       return rows
     blend = self._throttle_blend
     rgb = np.array([n + (th - n) * blend for n, th in zip(NO_THROTTLE[0], THROTTLE[0], strict=True)])
     return self._fade(rgb, 210 * a, t, hold=0.35, end=0.9)
 
-  def _path(self, scene, rect, view) -> None:
-    if scene.path is None:
-      return
-    target = 1.0 if scene.allow_throttle else 0.0
-    self._throttle_blend += (target - self._throttle_blend) * 0.2
-    grid = scene.grid
-    end = self._path_end(scene)
-    ys = scene.path.copy()
-    ys[(grid > end) | (grid < EGO_FRONT - 0.5)] = np.nan
-    runs = bem.valid_runs(np.isfinite(ys))
-    if not runs or runs[0][1] - runs[0][0] < 2:
-      return
-    lo, hi = runs[0]
-    g, y = grid[lo:hi], ys[lo:hi]
-    u = (g - g[0]) / max(1e-3, self.config.x_max - g[0])
-    centre = self._project_line(y, g, view, rect)
-    half = np.maximum(PATH_WIDTH * (1.0 - 0.35 * u) * bem.scale_at(g, view), 3.0) / 2
-    accel = scene.path_accel[lo:hi] if scene.path_accel is not None else np.empty(0)
-    t = self._height_fraction(centre[:, 1], rect)
-    self._strip(bem.ribbon(centre, half), self._path_rows(scene, t, accel))
-
-  def _car(self, view, rect, cx, cy, heading, length, width, body, glass, outline, wheel_angle=None) -> np.ndarray:
-    hull = bem.car_outline(cx, cy, heading, length, width, chamfer=0.38 * width / 1.9)
-    screen = bem.car_to_widget(hull, rect, self.config, view)
-    if wheel_angle is not None:
-      for fx, side in ((length / 2 - 0.9, -1), (length / 2 - 0.9, 1), (-length / 2 + 0.85, -1), (-length / 2 + 0.85, 1)):
-        angle = wheel_angle if fx > 0 else 0.0
-        local = bem.rotate_offsets(np.array([(0.36, -0.12), (-0.36, -0.12), (-0.36, 0.12), (0.36, 0.12)]), 0, 0, angle)
-        wheel = bem.rotate_offsets(local + np.array([fx, side * (width / 2 - 0.02)]), cx, cy, heading)
-        _fan(bem.car_to_widget(wheel, rect, self.config, view), rl.Color(16, 18, 24, body.a))
-    _fan(screen, body)
-    scale = np.array([length / 4.6, width / 1.9])
-    roof = bem.rotate_offsets(np.array([(0.45, -0.64), (-1.05, -0.66), (-1.05, 0.66), (0.45, 0.64)]) * scale, cx, cy, heading)
-    _fan(bem.car_to_widget(roof, rect, self.config, view), glass)
-    shield = bem.rotate_offsets(np.array([(1.2, -0.62), (0.6, -0.7), (0.6, 0.7), (1.2, 0.62)]) * scale, cx, cy, heading)
-    _fan(bem.car_to_widget(shield, rect, self.config, view), rl.Color(glass.r, glass.g, glass.b, int(glass.a * 0.7)))
-    if outline is not None:
-      _outline(screen, 1.5, outline)
-    return screen
+  def _cars(self, view, rect, poses, local, layout, hull_at: int, colors, outlines) -> tuple[list[Layer], np.ndarray]:
+    """Car glyphs in one batch: poses (C, 3) of (x, y, heading), shared car-frame points local (P, 2) filled per
+    layout with colors (C, polygons, 4), then outlines (C, 4). Returns one layer per car and the hulls (C, 8, 2)."""
+    poses = np.asarray(poses, dtype=np.float64).reshape(-1, 3)
+    cos_h, sin_h = np.cos(poses[:, 2]), np.sin(poses[:, 2])
+    pts = np.empty((poses.shape[0], local.shape[0], 2))
+    pts[..., 0] = poses[:, None, 0] + local[None, :, 0] * cos_h[:, None] - local[None, :, 1] * sin_h[:, None]
+    pts[..., 1] = poses[:, None, 1] + local[None, :, 0] * sin_h[:, None] + local[None, :, 1] * cos_h[:, None]
+    screen = bem.car_to_widget(pts.reshape(-1, 2), rect, self.config, view).astype(np.float64).reshape(pts.shape)
+    hulls = screen[:, hull_at:hull_at + 8]
+    index, owner = layout
+    rgba = np.asarray(colors, dtype=np.int32)[:, owner]
+    cols = np.concatenate((rgba, rgba), axis=-1)
+    verts = screen[:, index].reshape(poses.shape[0], -1, 8)
+    # Outline: one 1.5 px quad per hull edge, the shape draw_line_ex draws.
+    b = np.roll(hulls, -1, axis=1)
+    d = b - hulls
+    length = np.hypot(d[..., 0], d[..., 1])
+    length[length == 0] = 1.0
+    nrm = d[..., ::-1] * (np.array([-1.0, 1.0]) * (0.75 / length)[..., None])
+    line_cols = np.broadcast_to(np.tile(np.asarray(outlines, dtype=np.int32), 2)[:, None, :], (poses.shape[0], 8, 8))
+    cols = np.concatenate((cols, line_cols), axis=1)
+    verts = np.concatenate((verts, np.concatenate((hulls + nrm, hulls - nrm, b - nrm, b + nrm), axis=-1)), axis=1)
+    calls = _layer(cols, verts)
+    per_car = 6 * cols.shape[1]
+    return [calls[i * per_car:(i + 1) * per_car] for i in range(poses.shape[0])], hulls
 
   def _leads(self, scene, rect, view) -> None:
     size = self._font_size(rect)
-    for lead in sorted(scene.leads, key=lambda lead: -lead.d_rel):
+    leads = [lead for lead in sorted(scene.leads, key=lambda lead: -lead.d_rel)
+             if lead.d_rel + EGO_FRONT <= self.config.x_max]
+    if not leads:
+      return
+    poses, colors, outlines, rgbs = [], [], [], []
+    for lead in leads:
       cx = lead.d_rel + EGO_FRONT + LEAD_LENGTH / 2
-      if cx - LEAD_LENGTH / 2 > self.config.x_max:
-        continue
-      heading = bem.heading_at(scene.grid, scene.path, cx) if scene.path is not None else 0.0
+      poses.append((cx, lead.y, self._heading_at(scene, cx)))
       rgb = bem.lead_color(lead.d_rel, lead.v_rel if math.isfinite(lead.v_rel) else 0.0)
       a = (1.0 if lead.radar else 0.7) * self.opacity
-      screen = self._car(view, rect, cx, lead.y, heading, LEAD_LENGTH, LEAD_WIDTH, _color(rgb, 245 * a),
-                         rl.Color(64, 72, 88, int(170 * a)), _color((255, 255, 255), 60 * a))
+      glass = (64, 72, 88, int(170 * a))
+      colors.append((_rgba(rgb, 245 * a), glass, (*glass[:3], int(glass[3] * 0.7))))
+      outlines.append(_rgba((255, 255, 255), 60 * a))
+      rgbs.append(rgb)
+    layers, hulls = self._cars(view, rect, poses, _car_body(LEAD_LENGTH, LEAD_WIDTH), CAR_LAYOUT, 0, colors, outlines)
+    # Far to near, each car then its label, so a nearer car covers a farther label.
+    for lead, rgb, layer, screen in zip(leads, rgbs, layers, hulls, strict=True):
+      _emit(layer)
       text = bem.distance_label(lead.d_rel, self.metric)
       w, h = self.text.measure(text, size)
       x = float(screen[:, 0].max()) + 10
       if x + w > rect.x + rect.width - 8:
         x = float(screen[:, 0].min()) - 10 - w
-      self._label(text, size, x, float(screen[:, 1].mean()) - h / 2, _color(rgb, 255 * self.opacity))
+      color = _color(rgb, 255 * self.opacity)
+      y = float(screen[:, 1].mean()) - h / 2
+      self.text.draw(text, size, x + 1.5, y + 1.5, rl.Color(0, 0, 0, int(color.a * 0.7)))
+      self.text.draw(text, size, x, y, color)
 
-  def _ego(self, scene, rect, view) -> None:
+  def _ego_glyph(self, rect, view, wheel_angle: float) -> tuple[Layer, tuple]:
     a = self.opacity
     cx = EGO_FRONT - EGO_LENGTH / 2
     centre = bem.car_to_widget(np.array([[cx, 0.0]]), rect, self.config, view)[0]
-    glow_r = EGO_WIDTH * float(bem.scale_at(cx, view)) * 1.3
-    rl.draw_circle_gradient(rl.Vector2(float(centre[0]), float(centre[1])), glow_r,
-                            rl.Color(120, 170, 255, int(55 * a)), rl.Color(120, 170, 255, 0))
-    self._car(view, rect, cx, 0.0, 0.0, EGO_LENGTH, EGO_WIDTH, rl.Color(238, 241, 247, int(255 * a)),
-              rl.Color(48, 58, 76, int(255 * a)), rl.Color(255, 255, 255, int(110 * a)),
-              wheel_angle=bem.ego_wheel_angle(scene.steering_deg))
+    glow = (rl.Vector2(float(centre[0]), float(centre[1])), EGO_WIDTH * float(bem.scale_at(cx, view)) * 1.3,
+            rl.Color(120, 170, 255, int(55 * a)), rl.Color(120, 170, 255, 0))
+    length, width = EGO_LENGTH, EGO_WIDTH
+    front = bem.rotate_offsets(WHEEL, 0, 0, wheel_angle)
+    wheels = [(front if fx > 0 else WHEEL) + np.array([fx, side * (width / 2 - 0.02)])
+              for fx, side in ((length / 2 - 0.9, -1), (length / 2 - 0.9, 1), (-length / 2 + 0.85, -1), (-length / 2 + 0.85, 1))]
+    body, glass = (238, 241, 247, int(255 * a)), (48, 58, 76, int(255 * a))
+    colors = [[(16, 18, 24, body[3])] * 4 + [body, glass, (*glass[:3], int(glass[3] * 0.7))]]
+    layers, _ = self._cars(view, rect, [(cx, 0.0, 0.0)], np.concatenate((*wheels, _car_body(length, width))), EGO_LAYOUT, 16,
+                           colors, [(255, 255, 255, int(110 * a))])
+    return layers[0], glow
 
-  def _blinkers(self, scene, rect, view) -> None:
+  def _ego(self, scene, rect, rect_key, view) -> None:
+    # Rounded to WHEEL_STEP so small steering jitter replays the cached glyph (0.25 deg is ~0.1 px on a wheel).
+    wheel_angle = round(bem.ego_wheel_angle(scene.steering_deg) / WHEEL_STEP) * WHEEL_STEP
+    layer, glow = self._cached('ego', (rect_key, self.opacity, wheel_angle), lambda: self._ego_glyph(rect, view, wheel_angle))
+    rl.draw_circle_gradient(*glow)
+    _emit(layer, self._blinkers(scene, rect, rect_key, view))
+
+  def _blinkers(self, scene, rect, rect_key, view) -> Layer:
     if not (scene.left_blinker or scene.right_blinker) or (self.clock() % 0.8) > 0.5:
-      return
+      return EMPTY
+    return self._cached('blinkers', (rect_key, self.opacity, scene.left_blinker, scene.right_blinker),
+                        lambda: self._blinker_arrows(scene, rect, view))
+
+  def _blinker_arrows(self, scene, rect, view) -> Layer:
     cx = EGO_FRONT - EGO_LENGTH / 2 + 0.6
+    arrows = []
     for on, side in ((scene.left_blinker, -1), (scene.right_blinker, 1)):
       if on:
         base = side * (EGO_WIDTH / 2 + 0.7)
-        arrow = np.array([(cx + 0.8, base), (cx, base + side * 1.1), (cx - 0.8, base)])
-        _fan(bem.car_to_widget(arrow, rect, self.config, view), rl.Color(64, 220, 120, int(235 * self.opacity)))
+        arrows.append((cx + 0.8, base, cx, base + side * 1.1, cx - 0.8, base))
+    screen = bem.car_to_widget(np.array(arrows).reshape(-1, 2), rect, self.config, view).astype(np.float64).reshape(-1, 3, 2)
+    color = _rgba((64, 220, 120), 235 * self.opacity)
+    return [call for tri in screen for call in _polygon_quads(tri, TRIANGLE_LAYOUT, [color])]
 
 
 class BitmapText:
