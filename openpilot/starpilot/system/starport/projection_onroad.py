@@ -72,6 +72,7 @@ def native_dependencies():
   from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView, BORDER_COLORS
   from openpilot.selfdrive.ui.onroad.cameraview import CameraView
   from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer, BitmapText
   from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
   from openpilot.starpilot.ui.onroad import OnroadView
   from openpilot.starpilot.ui.onroad_customization import CAMERA_WIDGETS, placement, widget_size
@@ -143,7 +144,7 @@ def native_dependencies():
                          pip_rect=Rect, pip_widgets=CAMERA_WIDGETS, placement=placement, widget_size=widget_size,
                          alert=OnroadAlert, alert_size=AlertSize, map_overlay=MapOverlay, map_feed=MapFeed,
                          favorites=ProjectionFavorites, standby_logo=standby_logo, now_playing_feed=ProjectionNowPlayingFeed,
-                         jetlink_feed=JetlinkStatusFeed)
+                         jetlink_feed=JetlinkStatusFeed, birds_eye=BirdsEyeRenderer, birds_eye_text=BitmapText)
 
 
 class ProjectionOnroad:
@@ -212,6 +213,12 @@ class ProjectionOnroad:
         self.pip = native.pip_renderer("bubble")
         self._resources.callback(self.pip.close)
         self.onroad.pip_layer = self._pip_layer
+      self.birds_eye = None
+      # A tap on the car screen switches panel/full for this connection only; the saved layout is
+      # Galaxy-owned and only written while parked, so the projection never writes it.
+      self._birds_eye_display = None
+      self._birds_eye_press = None
+      self._ensure_birds_eye()
       self.map = None
       self.map_feed = None
       self._map_lease = MapLeaseWriter()
@@ -256,7 +263,97 @@ class ProjectionOnroad:
       wheel._texture = None
     self.onroad.close()
 
+  def _birds_eye_placement(self):
+    """The enabled birds-eye placement from this connection's layout, or None."""
+    # getattr: callers that build the view without __init__ (camera policy tests) have neither attribute.
+    customization = getattr(self, 'customization', None)
+    if customization is None or getattr(self, 'birds_eye', None) is None:
+      return None
+    placed = customization['widgets'].get('birds_eye')
+    return placed if placed is not None and placed.get('enabled') is True else None
+
+  def birds_eye_display(self):
+    """'overlay', 'full', or None when the birds-eye view is off."""
+    placed = self._birds_eye_placement()
+    if placed is None:
+      return None
+    return getattr(self, '_birds_eye_display', None) or placed.get('display', 'overlay')
+
+  def _ensure_birds_eye(self):
+    """Build the birds-eye renderer the first time a layout turns it on; it stays for the connection."""
+    native = self.native
+    placed = (self.customization or {}).get('widgets', {}).get('birds_eye')
+    if (self.birds_eye is not None or placed is None or placed.get('enabled') is not True or
+        getattr(native, 'birds_eye', None) is None):
+      return
+    ui = native.ui_state
+    text = native.birds_eye_text(self.fonts) if getattr(native, 'birds_eye_text', None) is not None else None
+    self.birds_eye = native.birds_eye(text=text, source=lambda: (ui.sm, ui.started_frame))
+    model_renderer = getattr(self.camera, 'model_renderer', None)
+    self.birds_eye.long_control = bool(getattr(model_renderer, '_longitudinal_control', True))
+    self.onroad.birds_eye_layer = self._birds_eye_layer
+
+  def _draw_birds_eye(self, rect, state, *, panel, opacity=1.0, parent_clip=None):
+    view = self.birds_eye
+    view.panel = panel
+    view.opacity = opacity
+    view.parent_clip = parent_clip
+    view.metric = bool(getattr(self.native.ui_state, 'is_metric', True))
+    customization = getattr(state, 'customization', None) or {}
+    view.road_style = customization.get('roadColors', {}).get('large', {})
+    view.render(rect)
+
+  def _birds_eye_layer(self, rect, state):
+    """Overlay panel, above the camera and below the HUD widgets; full mode draws in the camera layer instead."""
+    placed = self._birds_eye_placement()
+    if placed is None or self.birds_eye_display() != 'overlay':
+      return
+    rl = self.native.rl
+    self._draw_birds_eye(rl.Rectangle(placed['x'], placed['y'], placed['width'], placed['height']), state,
+                         panel=True, opacity=placed['opacity'] / 100.0, parent_clip=rect)
+
+  def _birds_eye_rect(self):
+    display = self.birds_eye_display()
+    if display == 'full':
+      return 30, 30, self.width - 60, self.height - 60
+    if display == 'overlay':
+      placed = self._birds_eye_placement()
+      return placed['x'], placed['y'], placed['width'], placed['height']
+    return None
+
+  def _birds_eye_touch(self, kind, x, y) -> bool:
+    """A tap on the birds-eye view switches panel/full; True while it owns the touch."""
+    if kind == 'cancel' or self._state is None or not self.native.ui_state.started:
+      claimed = self._birds_eye_press is not None
+      self._birds_eye_press = None
+      return claimed
+    if kind == 'down':
+      self._birds_eye_press = None
+      area = self._birds_eye_rect()
+      if area is None or not (area[0] <= x <= area[0] + area[2] and area[1] <= y <= area[1] + area[3]):
+        return False
+      # Buttons drawn over the view keep their taps.
+      if self.favorites is not None and self.favorites.hit(x, y, self._state) is not None:
+        return False
+      self._birds_eye_press = (x, y)
+      return True
+    if self._birds_eye_press is None:
+      return False
+    px, py = self._birds_eye_press
+    if abs(x - px) > 30 or abs(y - py) > 30:
+      self._birds_eye_press = None
+      return True
+    if kind == 'up':
+      self._birds_eye_press = None
+      self._birds_eye_display = 'overlay' if self.birds_eye_display() == 'full' else 'full'
+    return True
+
   def _camera_layer(self, rect, state):
+    if self.birds_eye_display() == 'full':
+      # The birds-eye view replaces the camera; no camera frame is drawn, so none is paced.
+      self._draw_birds_eye(rect, state, panel=False, parent_clip=rect)
+      self.camera_stream = None
+      return
     # The car screen's own lead choices; without them the marker stays off rather than following the comma.
     appearance = getattr(state, 'appearance', None)
     lead_display = ((appearance.show_lead_indicator, int(appearance.lead_info_mode), appearance.lead_info_metric)
@@ -319,6 +416,8 @@ class ProjectionOnroad:
     if invalidate is not None:
       invalidate()
     self._ensure_map()
+    self._birds_eye_display = None  # a newly saved layout's display choice wins over an earlier tap
+    self._ensure_birds_eye()
 
   def _own_appearance(self, appearance):
     if self.customization is None:
@@ -548,6 +647,10 @@ class ProjectionOnroad:
         if self.favorites is not None:
           self.favorites.cancel()
         continue
+      if self._birds_eye_touch(event.kind, x, y):
+        if self.favorites is not None:
+          self.favorites.cancel()
+        continue
       if self.favorites is None:
         continue
       if self._state is None or not self.native.ui_state.started:
@@ -577,6 +680,7 @@ class ProjectionOnroad:
 
   def cancel_touch(self):
     self.exit.cancel()
+    self._birds_eye_press = None
     if self._slc_input is not None:
       self._slc_input.cancel()
     if self.favorites is not None:

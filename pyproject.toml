@@ -77,6 +77,8 @@ testing = [
 
 tools = [
   "matplotlib",
+  # PyAV with libx264 for ./aapreview (Android Auto stream preview); desktop only, the comma uses /data/starport/deps.
+  "av==18.1.0 ; platform_machine != 'aarch64'",
 
   "comma-deps-imgui",
   "comma-deps-bootstrap-icons",

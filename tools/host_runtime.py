@@ -26,6 +26,7 @@ HELP = """Usage: ./dev <command> [args...]
 
   c3 / c4       Build and launch the large / compact StarPilot Raylib UI.
   onroad        Build replay and launch route UI(s); see ./onroad --help.
+  simui         Drive the c4/c3 UI from a synthetic scenario; see ./simui --help.
   replay        Build and run upstream replay.
   cabana        Build and run Cabana in its own concurrent cache.
   plotjuggler   Run PlotJuggler (alias: juggle).
@@ -34,6 +35,7 @@ HELP = """Usage: ./dev <command> [args...]
                 openpilot/starpilot/galaxy, restarting for Python changes and
                 reloading the open page after each edit (--no-autoreload: refresh
                 by hand).
+  aapreview     Live preview of the Android Auto projection stream; see ./aapreview --help.
   python        Run Python with current source and native extensions.
   pytest        Run pytest with current source and native extensions.
   shell         Open a shell in the isolated host worktree.
@@ -46,8 +48,13 @@ Native build artifacts, editable installs and Params stay in that cache.
 Shared commands wait while another shared command is running; Cabana is separate.
 ./build remains the Linux ARM64 device build, including ./build --panda.
 """
-COMMANDS = {'c3', 'c4', 'onroad', 'replay', 'cabana', 'plotjuggler', 'galaxy', 'python', 'pytest', 'shell', 'sync'}
-BUCKET_ALIASES = dict.fromkeys(('shared', 'default', 'ui', 'c3', 'c4', 'onroad', 'replay', 'shell', 'plotjuggler', 'juggle'), 'shared')
+SIMUI_HELP = """Usage: ./simui [jobs] [--c4|--c3] [--scenario straight|s_curve|lane_change|lead_stop|merge] [--seed N]
+               [--speed M/S] [--duration S] [--headless [--frames N] [--out DIR]] [--seconds S]
+               [--record out.mp4] [--gpu]
+Publishes a synthetic drive into a private session and opens the real native UI.
+See docs/how-to/wsl-software-rendering.md."""
+COMMANDS = {'c3', 'c4', 'onroad', 'simui', 'replay', 'cabana', 'plotjuggler', 'galaxy', 'python', 'pytest', 'shell', 'sync', 'aapreview'}
+BUCKET_ALIASES = dict.fromkeys(('shared', 'default', 'ui', 'c3', 'c4', 'onroad', 'simui', 'replay', 'shell', 'plotjuggler', 'juggle', 'aapreview'), 'shared')
 BUCKET_ALIASES['cabana'] = 'cabana'
 VENDORS = ('msgq_repo', 'opendbc_repo', 'rednose_repo', 'teleoprtc_repo', 'tinygrad_repo', 'jetlink_repo')
 # Never inherit a device/cross compiler or another project's editable imports.
@@ -328,7 +335,7 @@ class HostRuntime:
   def build(self, command, jobs):
     params = 'openpilot/common/libparams_c' + ('.dylib' if self.system == 'Darwin' else '.so')
     targets = [params, 'msgq_repo/msgq/ipc_pyx.so', 'msgq_repo/msgq/visionipc/visionipc_pyx.so']
-    if command in ('c3', 'c4', 'onroad', 'galaxy', 'python', 'pytest', 'shell'):
+    if command in ('c3', 'c4', 'onroad', 'simui', 'galaxy', 'python', 'pytest', 'shell', 'aapreview'):
       targets += ['rednose_repo/rednose/helpers/ekf_sym_pyx.so', 'openpilot/selfdrive/locationd',
                   'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/c_generated_code/acados_ocp_solver_pyx.so']
     if command in ('onroad', 'replay', 'cabana'):
@@ -355,6 +362,10 @@ class HostRuntime:
       argv = [python, '-m', 'openpilot.tools.plotjuggler.juggle', *arguments]
     elif command == 'galaxy':
       argv = [python, '-m', 'openpilot.starpilot.galaxy.server', *arguments]
+    elif command == 'simui':
+      argv = [python, '-m', 'openpilot.tools.simhil.run', *arguments]
+    elif command == 'aapreview':
+      argv = [python, '-m', 'openpilot.tools.starport.preview', *arguments]
     elif command == 'pytest':
       argv = [python, '-m', 'pytest', *arguments]
       env.setdefault('SCALE', '1')  # UI imports must not probe a monitor in test workers.
@@ -549,6 +560,11 @@ def main(arguments=None):
     helper = ROOT / ('openpilot/tools/replay/onroad.py' if command == 'onroad' else 'openpilot/starpilot/ui/host_launch.py')
     profile = [] if command == 'onroad' else ['large' if command == 'c3' else 'compact']
     return subprocess.call([sys.executable, str(helper), *profile, '--help'], cwd=ROOT)
+  if command == 'simui' and any(arg in ('--help', '-h') for arg in args):
+    print(SIMUI_HELP)
+    return 0
+  if command == 'aapreview' and any(arg in ('--help', '-h') for arg in args):
+    return subprocess.call([sys.executable, str(ROOT / 'openpilot/tools/starport/preview.py'), '--help'], cwd=ROOT)
   if command == 'sync':
     buckets = [BUCKET_ALIASES[args[0]]] if args else ['shared', 'cabana']
   else:

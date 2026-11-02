@@ -4,6 +4,10 @@ The Qualcomm EGL on AGNOS needs a GBM native display (``EGL_DEFAULT_DISPLAY`` is
 not supported). Opening the DRM *render* node does not take DRM master or touch
 the comma's own scanout, so the normal UI keeps the physical screen.
 
+On a desktop (no /AGNOS) the context is a surfaceless Mesa EGL pbuffer with
+desktop OpenGL 3.3 core instead (raylib's PC build; no render node, GBM or GLES
+needed, so it also works in WSL2), and readback uses libGL. Development only.
+
 Adapted from yummydirtx/openpilot ``tools/starport/native_egl.py`` (MIT),
 pinned at 672a16f6183567c0ada53654f8527d97e1a483fa.
 """
@@ -15,6 +19,16 @@ import os
 import time
 
 RENDER_NODE = "/dev/dri/renderD128"
+# Same test as openpilot.common.hardware.PC, without importing the hardware layer into the renderer.
+PC = not os.path.isfile("/AGNOS")
+# The comma has GLES (libGLESv2). A desktop has desktop OpenGL; raylib's PC build is GL 3.3 core.
+GL_LIBRARY = "libGL.so.1" if PC else "libGLESv2.so"
+EGL_LIBRARY = "libEGL.so.1" if PC else "libEGL.so"
+EGL_OPENGL_API = 0x30A2
+EGL_PLATFORM_SURFACELESS_MESA = 0x31DD
+EGL_CONTEXT_MINOR_VERSION = 0x30FB
+EGL_CONTEXT_OPENGL_PROFILE_MASK = 0x30FD
+EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT = 0x0001
 EGL_OPENGL_ES_API = 0x30A0
 EGL_CONTEXT_CLIENT_VERSION = 0x3098
 EGL_NONE = 0x3038
@@ -58,7 +72,7 @@ class FrameReadback:
     self.size, self.asynchronous = size, asynchronous
     self.pending = self._mapped = False
     self._fence = None
-    gl = self.gl = C.CDLL("libGLESv2.so")
+    gl = self.gl = C.CDLL(GL_LIBRARY)  # libGLESv2.so on the comma, unchanged
     signatures = {
       "glBindFramebuffer": (None, [C.c_uint, C.c_uint]),
       "glReadPixels": (None, [C.c_int] * 4 + [C.c_uint, C.c_uint, C.c_void_p]),
@@ -193,6 +207,13 @@ class HeadlessContext:
       raise
 
   def _initialize(self, width: int, height: int):
+    if PC:
+      self._initialize_pc(width, height)
+    else:
+      self._initialize_comma(width, height)
+    self._initialize_rlgl(width, height)
+
+  def _initialize_comma(self, width: int, height: int):
     self.egl = C.CDLL("libEGL.so")
     signatures = {
       "eglGetDisplay": (C.c_void_p, [C.c_void_p]),
@@ -238,6 +259,50 @@ class HeadlessContext:
       raise RuntimeError(f"Headless EGL context priority is not LOW ({actual_priority.value:#x})")
     self._check(self.egl.eglMakeCurrent(self.display, self.surface, self.surface, self.context), "make current")
 
+  def _initialize_pc(self, width: int, height: int):
+    """Desktop development only: a surfaceless Mesa EGL display and a desktop GL 3.3 core pbuffer.
+
+    No render node, GBM or GLES is needed (WSL2 has none of them), and no window
+    opens. Mesa picks llvmpipe, or the host GPU with GALLIUM_DRIVER=d3d12 on WSL.
+    There is no context priority to set: nothing else on a desktop shares the GPU budget.
+    """
+    self.egl = C.CDLL(EGL_LIBRARY)
+    signatures = {
+      "eglGetProcAddress": (C.c_void_p, [C.c_char_p]),
+      "eglInitialize": (C.c_uint, [C.c_void_p, C.POINTER(C.c_int), C.POINTER(C.c_int)]),
+      "eglBindAPI": (C.c_uint, [C.c_uint]),
+      "eglChooseConfig": (C.c_uint, [C.c_void_p, C.POINTER(C.c_int), C.POINTER(C.c_void_p), C.c_int, C.POINTER(C.c_int)]),
+      "eglCreatePbufferSurface": (C.c_void_p, [C.c_void_p, C.c_void_p, C.POINTER(C.c_int)]),
+      "eglCreateContext": (C.c_void_p, [C.c_void_p, C.c_void_p, C.c_void_p, C.POINTER(C.c_int)]),
+      "eglMakeCurrent": (C.c_uint, [C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p]),
+      "eglDestroySurface": (C.c_uint, [C.c_void_p, C.c_void_p]),
+      "eglDestroyContext": (C.c_uint, [C.c_void_p, C.c_void_p]),
+      "eglTerminate": (C.c_uint, [C.c_void_p]),
+      "eglGetError": (C.c_int, []),
+    }
+    for name, (result, args) in signatures.items():
+      function = getattr(self.egl, name)
+      function.restype, function.argtypes = result, args
+    address = self.egl.eglGetProcAddress(b"eglGetPlatformDisplayEXT")
+    self._check(address, "surfaceless platform (EGL_EXT_platform_base)")
+    get_platform_display = C.CFUNCTYPE(C.c_void_p, C.c_uint, C.c_void_p, C.c_void_p)(address)
+    self.display = get_platform_display(EGL_PLATFORM_SURFACELESS_MESA, None, None)
+    self._check(self.display, "surfaceless display")
+    major, minor, count, config = C.c_int(), C.c_int(), C.c_int(), C.c_void_p()
+    self._check(self.egl.eglInitialize(self.display, C.byref(major), C.byref(minor)), "initialize")
+    self._check(self.egl.eglBindAPI(EGL_OPENGL_API), "bind desktop OpenGL")
+    # SURFACE_TYPE=PBUFFER, RENDERABLE_TYPE=OPENGL, RGBA8888
+    attrs = (C.c_int * 13)(0x3033, 1, 0x3040, 0x0008, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 8, EGL_NONE)
+    self._check(self.egl.eglChooseConfig(self.display, attrs, C.byref(config), 1, C.byref(count)) and count.value, "config")
+    self.surface = self.egl.eglCreatePbufferSurface(self.display, config, (C.c_int * 5)(0x3057, width, 0x3056, height, EGL_NONE))
+    self._check(self.surface, "pbuffer")
+    self.context = self.egl.eglCreateContext(self.display, config, None, (C.c_int * 7)(
+      EGL_CONTEXT_CLIENT_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3,
+      EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE))
+    self._check(self.context, "GL 3.3 core context")
+    self._check(self.egl.eglMakeCurrent(self.display, self.surface, self.surface, self.context), "make current")
+
+  def _initialize_rlgl(self, width: int, height: int):
     import pyray as rl
     self.rl = rl
     rl.rl_load_extensions(rl.ffi.cast("void *", C.cast(self.egl.eglGetProcAddress, C.c_void_p).value))

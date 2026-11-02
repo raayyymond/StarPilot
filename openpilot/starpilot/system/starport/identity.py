@@ -112,6 +112,7 @@ VERIFY_RESET = ("verify_head_unit",)
 DEDICATED_WIFI_RESET = ("dedicated_wifi_interface",)
 
 CONNECTIONS = ("wireless", "wired", "headunitpad", "openheadunit")
+RESOLUTIONS = ("auto", "480p", "720p", "1080p")
 
 DEFAULT_CONFIG = {
   "config_version": CONFIG_VERSION,
@@ -139,6 +140,11 @@ DEFAULT_CONFIG = {
   "async_readback": True,      # car view: read frames back without stalling the renderer on the GPU
   "render_profile": True,      # car view: always-on sampling profile in logs/render_profile.txt (and .1.txt)
   "render_profile_kb": 256,    # size cap per render_profile file
+  "resolution": "auto",        # video size preference among what the head unit offers: "auto" (720p, then 480p,
+                               # then 1080p), "480p", "720p" or "1080p". The encoder limit below still applies.
+  "hw_encoder_max_height": 720,  # comma hardware encoder limit, 720 or 1080. 1080 is an UNVERIFIED opt-in (BELIEF:
+                                 # the Qualcomm encoder should do 1080p30, never tested on a comma 4); it needs
+                                 # libstarport_encoder.so rebuilt from this source. Desktop software encoding allows 1080.
   "wifi_interface": "wlan0",
   "dedicated_wifi_interface": True,   # join the car on its own aa0 station so wlan0 stays on home Wi-Fi
   "device_name": "StarPilot",
@@ -191,6 +197,10 @@ def load_config(path: Path | None = None) -> dict:
   if config["rate_control"] not in ("cbr", "vbr"):
     config["rate_control"] = "cbr"
   config["render_profile_kb"] = max(16, min(4096, int(config["render_profile_kb"])))
+  if config["resolution"] not in RESOLUTIONS:
+    config["resolution"] = "auto"
+  if type(config["hw_encoder_max_height"]) is not int or config["hw_encoder_max_height"] not in (720, 1080):
+    config["hw_encoder_max_height"] = DEFAULT_CONFIG["hw_encoder_max_height"]
   config["rfcomm_cache"] = {str(address).upper(): channel for address, channel in config["rfcomm_cache"].items()
                             if type(channel) is int and 1 <= channel <= 30}
   return config

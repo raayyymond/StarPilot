@@ -27,6 +27,10 @@ ABI = 3
 SUPPORTED_ABIS = (2, 3)
 OPTION_CBR = 1
 MAX_WIDTH, MAX_HEIGHT, HW_FPS = 1280, 720, 30
+# Opt-in through the starport config "hw_encoder_max_height": 1080. UNVERIFIED (BELIEF): the comma 4's
+# Qualcomm encoder has never been run at 1080p30 by this code, and it needs libstarport_encoder.so
+# rebuilt from the current starport_encoder.cc (an older library rejects anything over 1280x720).
+OPT_IN_SIZES = {720: (1280, 720), 1080: (1920, 1080)}
 AUD = b"\x00\x00\x00\x01\x09\xf0"
 
 
@@ -59,9 +63,10 @@ class HardwareH264Encoder:
   backend = "qcom-v4l2"
 
   def __init__(self, width: int, height: int, fps: int = HW_FPS, bitrate_kbps: int = 6000, margin_height: int = 0,
-               library: Path = LIBRARY, rate_control: str = "cbr"):
-    if not (0 < width <= MAX_WIDTH and 0 < height <= MAX_HEIGHT) or width % 2 or height % 2 or fps != HW_FPS:
-      raise ValueError("Hardware encoder supports even sizes up to 1280x720 at 30 fps")
+               library: Path = LIBRARY, rate_control: str = "cbr", max_height: int = MAX_HEIGHT):
+    max_width, max_height = OPT_IN_SIZES.get(max_height, (MAX_WIDTH, MAX_HEIGHT))
+    if not (0 < width <= max_width and 0 < height <= max_height) or width % 2 or height % 2 or fps != HW_FPS:
+      raise ValueError(f"Hardware encoder supports even sizes up to {max_width}x{max_height} at 30 fps")
     if margin_height % 4:
       margin_height = 0  # only chroma-aligned black margins may be skipped
     self.width, self.height, self.fps = width, height, fps
@@ -142,8 +147,10 @@ class HardwareH264Encoder:
 # Altering this can degrade video smoothness or introduce lag on Android Auto.
 # Do not change it autonomously; require an explicit user request specifically for this video optimization.
 def create_encoder(width: int, height: int, *, preference: str, bitrate_kbps: int, margin_height: int,
-                   software_fps: int, log, rate_control: str = "cbr") -> tuple[object, int]:
-  """Return ``(encoder, fps)``: hardware at 30 fps when it works, else libx264."""
+                   software_fps: int, log, rate_control: str = "cbr", hw_max_height: int = MAX_HEIGHT) -> tuple[object, int]:
+  """Return ``(encoder, fps)``: hardware at 30 fps when it works, else libx264.
+
+  ``hw_max_height`` is the config "hw_encoder_max_height" (720 by default; 1080 is UNVERIFIED on the comma 4)."""
   if preference not in ("auto", "hardware", "software"):
     preference = "auto"
   if preference != "software":
@@ -152,7 +159,7 @@ def create_encoder(width: int, height: int, *, preference: str, bitrate_kbps: in
       if not LIBRARY.is_file():
         raise RuntimeError(f"{LIBRARY.name} not built")
       encoder = HardwareH264Encoder(width, height, bitrate_kbps=max(bitrate_kbps, 4000), margin_height=margin_height,
-                                    rate_control=rate_control)
+                                    rate_control=rate_control, max_height=hw_max_height)
       # Exercise the driver and the keyframe contract before promising a session.
       encoder.encode_rgba(bytes(width * height * 4), keyframe=True)
       log("encoder", backend=encoder.backend, fps=HW_FPS, abi=encoder.abi, rate_control=encoder.rate_control,

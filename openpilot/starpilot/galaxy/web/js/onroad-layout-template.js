@@ -241,7 +241,7 @@ export const ONROAD_LAYOUT_TEMPLATE = `
                 <input v-if="selectedWidget.resizable" class="gx-slider" type="range" step="1" aria-label="Size" :min="selectedWidget.resizable.min" :max="selectedWidget.resizable.max"
                   :value="selectedPosition.size" :disabled="!editAvailable || !!state.drag || !!state.layerDrag" @input="sizeSlider($event)" @change="finishColorEdit" @blur="finishColorEdit">
                 <template v-if="selectedWidget.opacity">
-                  <label for="layout-widget-opacity">{{ selectedWidget.box ? 'Map opacity' : ['cruise_limits', 'jetlink_status'].includes(selectedWidget.kind) ? 'Background opacity' : 'Opacity' }} · {{ selectedPosition.opacity }}%</label>
+                  <label for="layout-widget-opacity">{{ selectedWidget.kind === 'nav_map' ? 'Map opacity' : selectedWidget.kind === 'birds_eye' ? 'Panel opacity' : ['cruise_limits', 'jetlink_status'].includes(selectedWidget.kind) ? 'Background opacity' : 'Opacity' }} · {{ selectedPosition.opacity }}%</label>
                   <input id="layout-widget-opacity" class="gx-slider" type="range" step="1" :min="selectedWidget.opacity.min" :max="selectedWidget.opacity.max"
                     :value="selectedPosition.opacity" :disabled="!editAvailable || !!state.drag || !!state.layerDrag" @input="opacityInput($event)" @change="finishColorEdit" @blur="finishColorEdit">
                 </template>
@@ -274,6 +274,15 @@ export const ONROAD_LAYOUT_TEMPLATE = `
                   </div>
                 </div>
                 <p v-if="!projection && stockConfidence && selectedWidget.kind === 'conditional_mode'" class="gx-note">Hidden while Model confidence uses the stock confidence ball.</p>
+                <div v-if="projection && selectedWidget.displayModes" class="gx-layout__favorite-display">
+                  <span>Show as</span>
+                  <div class="gx-segment" role="group" :aria-label="selectedWidget.label + ' display'">
+                    <button v-for="mode in selectedWidget.displayModes" :key="mode" class="gx-btn" type="button"
+                      :class="selectedPosition.display === mode ? 'gx-btn--primary' : 'gx-btn--tonal'"
+                      :aria-pressed="selectedPosition.display === mode" :disabled="!editAvailable || !!state.drag || !!state.layerDrag"
+                      @click="setDisplayMode(mode)">{{ mode === 'full' ? 'Full screen' : 'Panel' }}</button>
+                  </div>
+                </div>
                 <div v-if="projection && selectedWidget.iconSize" class="gx-layout__favorite-display">
                   <span>Show as</span>
                   <div class="gx-segment" role="group" :aria-label="selectedWidget.label + ' display'">

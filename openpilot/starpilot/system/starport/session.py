@@ -101,6 +101,9 @@ FRAME_RATES = {1: 60, 2: 30}
 # Software H.264 on the comma is the constraint: prefer 720p, then 480p. 1080p
 # is accepted only when nothing smaller is offered.
 RESOLUTION_PREFERENCE = (2, 1, 3)
+# The starport config "resolution" reorders that preference. Every choice still
+# takes only what the head unit offers; "auto" is the order above.
+RESOLUTION_ORDERS = {"auto": RESOLUTION_PREFERENCE, "480p": (1, 2, 3), "720p": (2, 1, 3), "1080p": (3, 2, 1)}
 
 # A real phone pings periodically; answering pings is mandatory, sending them
 # is harmless and keeps impatient receivers from declaring the link idle.
@@ -188,8 +191,14 @@ def describe_video_configs(channels: list[dict]) -> str:
   return ", ".join(offered) or "no video"
 
 
-def choose_video_mode(channels: list[dict]) -> VideoMode:
-  """Pick a negotiated H.264 mode the software encoder can sustain."""
+def choose_video_mode(channels: list[dict], resolution: str = "auto", max_height: int | None = None) -> VideoMode:
+  """Pick a negotiated H.264 mode the encoder can sustain.
+
+  ``resolution`` ("auto", "480p", "720p", "1080p") orders the offered sizes (see
+  RESOLUTION_ORDERS). Modes taller than ``max_height`` (the encoder's limit) are
+  chosen only when the head unit offers nothing else, as before.
+  """
+  order = RESOLUTION_ORDERS.get(resolution, RESOLUTION_PREFERENCE)
   candidates = []
   for channel in channels:
     for index, config in enumerate(channel.get("video_configs", [])):
@@ -216,10 +225,11 @@ def choose_video_mode(channels: list[dict]) -> VideoMode:
             left, top = left_edge, top_edge
       mode = VideoMode(int(channel["id"]), index, width, height, fps, margin_width, margin_height, left, top,
                        int(one(config, 5, 0) or 0))
-      candidates.append((RESOLUTION_PREFERENCE.index(resolution), fps != 30, index, mode))
+      over_limit = max_height is not None and height > max_height
+      candidates.append((over_limit, order.index(resolution), fps != 30, index, mode))
   if not candidates:
     raise ValueError(f"Head unit did not advertise a supported H.264 video mode (offered {describe_video_configs(channels)})")
-  return min(candidates, key=lambda item: item[:3])[3]
+  return min(candidates, key=lambda item: item[:4])[4]
 
 
 class Session:
@@ -606,6 +616,8 @@ class ProjectionSession(Session):
   nav = None
   # HeadunitPad acknowledges every fragment (codec config included) rather than every frame.
   fragment_acks = False
+  resolution = "auto"           # starport config "resolution", set by the supervisor before start()
+  max_video_height: int | None = None  # the encoder's limit; taller modes only when nothing else is offered
 
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
@@ -652,7 +664,7 @@ class ProjectionSession(Session):
 
   def start(self, device_name: str, device_brand: str) -> VideoMode:
     self.channels = self.discover(device_name, device_brand)
-    self.mode = choose_video_mode(self.channels)
+    self.mode = choose_video_mode(self.channels, self.resolution, self.max_video_height)
     self.open_video()
     self.open_input()
     if self.phone_services:

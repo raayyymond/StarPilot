@@ -168,7 +168,8 @@ struct Encoder {
     control(V4L2_CID_MPEG_VIDC_VIDEO_PRIORITY, V4L2_MPEG_VIDC_VIDEO_PRIORITY_REALTIME_DISABLE);
     control(V4L2_CID_MPEG_VIDC_VIDEO_IDR_PERIOD, 1);
     control(V4L2_CID_MPEG_VIDEO_H264_PROFILE, V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE);
-    control(V4L2_CID_MPEG_VIDEO_H264_LEVEL, V4L2_MPEG_VIDEO_H264_LEVEL_3_1);
+    // 3.1 covers 1280x720@30 (unchanged); 1080p30 needs level 4.0.
+    control(V4L2_CID_MPEG_VIDEO_H264_LEVEL, height > 720 ? V4L2_MPEG_VIDEO_H264_LEVEL_4_0 : V4L2_MPEG_VIDEO_H264_LEVEL_3_1);
     control(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE, V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CAVLC);
     control(V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE, V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED);
     control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE, 0);
@@ -287,7 +288,8 @@ void starport_encoder_timing(void *ptr, double *output) {
 }
 void *starport_encoder_create(int width, int height, int fps, int bitrate, int margin_height, int options, char *error, size_t size) {
   try {
-    if (width < 2 || width > 1280 || height < 2 || height > 720 || width % 2 || height % 2 ||
+    // Up to 1920x1080 only when hw_encoder_max_height opts in (Python checks it). UNVERIFIED on the comma 4 above 720p.
+    if (width < 2 || width > 1920 || height < 2 || height > 1080 || width % 2 || height % 2 ||
         fps != 30 || bitrate < 1000000 || bitrate > 20000000 || margin_height < 0 ||
         margin_height >= height || margin_height % 4 || (options & ~AA_ENCODER_CBR)) throw std::runtime_error("Unsupported encoder configuration");
     auto encoder = std::make_unique<Encoder>(width, height, fps, margin_height, options);

@@ -12,6 +12,8 @@ cache. The UI remains the custom large and compact Raylib UI.
 | `./build --cereal [jobs]` | Build the current schema, messaging libraries and bridge |
 | `./c3 [jobs]`, `./c4 [jobs]` | Large and compact custom desktop UI |
 | `./onroad [jobs] [--c3\|--c4\|--all\|--replay-only] <route>` | Route replay with selected desktop UI(s) |
+| `./simui [jobs] [--c4\|--c3] [--scenario NAME] [--headless]` | Synthetic drive (no route or hardware) into the desktop UI; [WSL notes](../docs/how-to/wsl-software-rendering.md) |
+| `./aapreview [jobs] [--res 480p\|720p\|1080p] [--encode] [--headless]` | Live preview of the Android Auto projection stream on the desktop; [WSL notes](../docs/how-to/wsl-software-rendering.md) |
 | `./dev replay [jobs] <replay arguments>` | Native replay and its terminal controls |
 | `./dev cabana [jobs] <arguments>` | Native Cabana in an independent cache |
 | `./dev plotjuggler [jobs] <arguments>` | Current PlotJuggler helper; `juggle` is an alias |

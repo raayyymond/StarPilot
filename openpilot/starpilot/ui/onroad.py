@@ -133,6 +133,7 @@ class OnroadView:
     self.extra_overlays = extra_overlays
     self.driver_monitor_layer: OverlayLayer | None = None
     self.map_layer: OverlayLayer | None = None  # Android Auto map overlay, under the HUD widgets
+    self.birds_eye_layer: OverlayLayer | None = None  # Android Auto birds-eye panel, under the HUD widgets
     self.projection_exit_layer: ProjectionControlLayer | None = None
     self.pip_layer = pip_layer
     self.stock_confidence_layer: OverlayLayer | None = None
@@ -302,6 +303,9 @@ class OnroadView:
       if "nav_map" in state.customization["layouts"]["large"] and state.alert.size != AlertSize.FULL:
         if map_layer := getattr(self, "map_layer", None):
           submit("nav_map", lambda: map_layer(content, state))
+      if "birds_eye" in state.customization["layouts"]["large"] and state.alert.size != AlertSize.FULL:
+        if birds_eye_layer := getattr(self, "birds_eye_layer", None):
+          submit("birds_eye", lambda: birds_eye_layer(content, state))
       if "nav_card" in state.customization["layouts"]["large"]:
         submit("nav_card", lambda: self.navigation.render(state))
       for key in ("nav_home", "nav_work", "bookmark"):
@@ -392,6 +396,9 @@ class OnroadView:
         map_layer = getattr(self, "map_layer", None)
         if map_layer is not None and state.alert.size != AlertSize.FULL:
           map_layer(content, state)
+        birds_eye_layer = getattr(self, "birds_eye_layer", None)
+        if birds_eye_layer is not None and state.alert.size != AlertSize.FULL:
+          birds_eye_layer(content, state)
         rl.draw_rectangle_gradient_v(30, 30, int(content.width), 300, rl.Color(0, 0, 0, 114), rl.BLANK)
         if state.alert.size != AlertSize.FULL:
           if placement(state.customization, "large", "cruise_limits")["enabled"]:

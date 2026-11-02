@@ -49,6 +49,7 @@ RECORD_QUALITY = int(os.getenv("RECORD_QUALITY", "23"))  # Dynamic bitrate quali
 RECORD_BITRATE = os.getenv("RECORD_BITRATE", "")  # Target bitrate e.g. "2000k" (overrides RECORD_QUALITY when set)
 RECORD_SPEED = int(os.getenv("RECORD_SPEED", "1"))  # Speed multiplier
 OFFSCREEN = os.getenv("OFFSCREEN") == "1"  # Disable FPS limiting for fast offline rendering
+HIDDEN_WINDOW = os.getenv("HIDDEN_WINDOW") == "1"  # Desktop only: render without showing a window (use with RECORD)
 
 GL_VERSION = """
 #version 300 es
@@ -348,6 +349,8 @@ class GuiApplication:
       flags = rl.ConfigFlags.FLAG_MSAA_4X_HINT
       if ENABLE_VSYNC:
         flags |= rl.ConfigFlags.FLAG_VSYNC_HINT
+      if HIDDEN_WINDOW and PC:
+        flags |= rl.ConfigFlags.FLAG_WINDOW_HIDDEN
       rl.set_config_flags(flags)
 
       rl.init_window(self._scaled_width, self._scaled_height, title)

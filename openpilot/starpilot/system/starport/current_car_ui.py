@@ -152,6 +152,9 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
   placement.start()
 
   os.environ['BIG'] = '1'
+  # A desktop GuiApplication otherwise opens and closes a window at import to size itself to the monitor,
+  # which leaves raylib's default-font texture id stale and breaks the bitmap font checks. No effect on the comma.
+  os.environ.setdefault('SCALE', '1')
   os.environ['STARPILOT_PROJECTION_READ_ONLY'] = '1'
   stopped = False
 

@@ -37,7 +37,15 @@ NOW_PLAYING_OPACITY = (0, 100, 85)
 JETLINK_SIZE = (420, 84)
 JETLINK_OPACITY = (0, 100, 85)
 CARD_WIDGETS = {NOW_PLAYING_WIDGET: NOW_PLAYING_OPACITY, JETLINK_WIDGET: JETLINK_OPACITY}
-PROJECTION_WIDGETS = (NAV_CARD, NAV_MAP, *DISPLAY_WIDGETS, STOPPED_TIMER_WIDGET, NOW_PLAYING_WIDGET, JETLINK_WIDGET, CAR_EXIT, 'following_distance')
+# Birds-eye (top-down) view: a panel over the camera, or the whole frame with the camera hidden.
+BIRDS_EYE = 'birds_eye'
+BIRDS_EYE_SIZE = (520, 600)
+BIRDS_EYE_MIN_SIZE = (240, 240)
+BIRDS_EYE_OPACITY = (20, 100, 90)
+BIRDS_EYE_DISPLAYS = ('overlay', 'full')
+BOX_WIDGETS = (NAV_MAP, BIRDS_EYE)
+PROJECTION_WIDGETS = (NAV_CARD, NAV_MAP, *DISPLAY_WIDGETS, STOPPED_TIMER_WIDGET, NOW_PLAYING_WIDGET, JETLINK_WIDGET, CAR_EXIT, 'following_distance',
+                      BIRDS_EYE)
 
 
 class ProjectionLayoutSource:
@@ -120,6 +128,17 @@ def layout_metadata_for_viewport(viewport):
                              'note': 'Shown while Jetlink is on: connection, device and host processing time. Opacity sets the card background.',
                              'opacity': {'min': JETLINK_OPACITY[0], 'max': JETLINK_OPACITY[1], 'default': JETLINK_OPACITY[2]},
                              'default': {'x': 30, 'y': 650, 'enabled': False, 'opacity': JETLINK_OPACITY[2]}}
+  # Right side, below the steering wheel and above Now playing; drawn under every other widget.
+  eye_w, eye_h = BIRDS_EYE_SIZE
+  widgets[BIRDS_EYE] = {'label': 'Birds-eye view', 'kind': BIRDS_EYE, 'width': eye_w, 'height': eye_h, 'colors': {},
+                        'layer': 'underlay',
+                        'note': 'Top-down lanes, path and lead cars. Full replaces the camera; tap it in the car to switch.',
+                        'box': {'minWidth': BIRDS_EYE_MIN_SIZE[0], 'maxWidth': width - 60,
+                                'minHeight': BIRDS_EYE_MIN_SIZE[1], 'maxHeight': height - 60},
+                        'opacity': {'min': BIRDS_EYE_OPACITY[0], 'max': BIRDS_EYE_OPACITY[1], 'default': BIRDS_EYE_OPACITY[2]},
+                        'displayModes': list(BIRDS_EYE_DISPLAYS),
+                        'default': {'x': width - 30 - eye_w, 'y': 290, 'width': eye_w, 'height': eye_h, 'enabled': True,
+                                    'opacity': BIRDS_EYE_OPACITY[2], 'display': 'overlay'}}
   exit_w, exit_h = CAR_EXIT_SIZE
   widgets[CAR_EXIT] = {'label': 'Exit to car', 'kind': CAR_EXIT, 'width': exit_w, 'height': exit_h, 'colors': {},
                        'required': True, 'frontmost': True,
@@ -132,7 +151,7 @@ def layout_metadata_for_viewport(viewport):
   # Background opacity for the cruise and speed-limit card; its text stays solid.
   widgets['cruise_limits'].update(opacity={'min': 0, 'max': 100, 'default': 100})
   widgets['cruise_limits']['default'].update(opacity=100)
-  profile["widgetOrder"] = [NAV_MAP, *[key for key in profile["widgetOrder"] if key not in (NAV_MAP, NAV_CARD, STOPPED_TIMER_WIDGET)],
+  profile["widgetOrder"] = [BIRDS_EYE, NAV_MAP, *[key for key in profile["widgetOrder"] if key not in (NAV_MAP, NAV_CARD, STOPPED_TIMER_WIDGET)],
                             STOPPED_TIMER_WIDGET, NAV_CARD, *DISPLAY_WIDGETS, NOW_PLAYING_WIDGET, JETLINK_WIDGET, CAR_EXIT]
   return profile
 
@@ -194,7 +213,7 @@ def placement_size(key, widget, placement):
     return FAVORITE_ICON_SIZE, FAVORITE_ICON_SIZE
   if widget.get('resizable'):
     return (placement.get('size', widget['resizable']['default']),) * 2
-  if key == NAV_MAP:
+  if key in BOX_WIDGETS:
     return placement['width'], placement['height']
   return widget['width'], widget['height']
 
@@ -243,7 +262,9 @@ def validate_layout_for_viewport(value, viewport, *, _legacy_geometry=False):
   if 'widgetOrder' in value:
     order = value['widgetOrder']
     if type(order) is list:
-      order = [*order, *(key for key in (CEM_GAUGE_WIDGET, MODE_WIDGET, CLOCK_WIDGET, *PROJECTION_WIDGETS) if key not in order)]
+      # The birds-eye view is a backdrop: a layout saved before it existed gains it underneath, not on top.
+      order = [*([BIRDS_EYE] if BIRDS_EYE not in order else []), *order,
+               *(key for key in (CEM_GAUGE_WIDGET, MODE_WIDGET, CLOCK_WIDGET, *PROJECTION_WIDGETS) if key not in order and key != BIRDS_EYE)]
     order = validate_widget_order(order, metadata['widgets'])
     # Older or hand-edited documents may put the escape control underneath
     # another widget. Preserve their order while restoring this safety layer.
@@ -262,6 +283,8 @@ def validate_layout_for_viewport(value, viewport, *, _legacy_geometry=False):
       placement.setdefault('opacity', CARD_WIDGETS[key][2])
     if key == NOW_PLAYING_WIDGET and type(placement) is dict:
       placement.setdefault('collapse', False)
+    if key == BIRDS_EYE and type(placement) is dict:
+      placement.setdefault('display', 'overlay')
     if key == 'driver_monitor' and type(placement) is dict and 'size' not in placement:
       for axis in ('x', 'y'):
         if type(placement.get(axis)) in (int, float):
@@ -275,7 +298,8 @@ def validate_layout_for_viewport(value, viewport, *, _legacy_geometry=False):
               ({'opacity', 'background'} if key in ACTION_WIDGETS else set()) |
               ({'opacity'} if key == 'cruise_limits' or key in CARD_WIDGETS else set()) |
               ({'collapse'} if key == NOW_PLAYING_WIDGET else set()) |
-              ({'width', 'height', 'opacity'} if key == NAV_MAP else set()))
+              ({'width', 'height', 'opacity'} if key in BOX_WIDGETS else set()) |
+              ({'display'} if key == BIRDS_EYE else set()))
     if type(placement) is not dict or set(placement) != fields or type(placement['enabled']) is not bool:
       raise ValueError('Invalid projection widget')
     if widget.get('required') is True and placement['enabled'] is not True:
@@ -298,8 +322,10 @@ def validate_layout_for_viewport(value, viewport, *, _legacy_geometry=False):
       size, limits = placement['size'], widget['resizable']
       if type(size) is not int or not limits['min'] <= size <= limits['max']:
         raise ValueError('Invalid widget size')
-    if key == NAV_MAP:
+    if key in BOX_WIDGETS:
       validate_map_box(placement, widget)
+    if key == BIRDS_EYE and placement['display'] not in BIRDS_EYE_DISPLAYS:
+      raise ValueError('Invalid birds-eye display')
     dimensions = placement_size(key, widget, placement)
     if value['version'] < 4 and key in SPEED_LAYOUT_V7['large']:
       dimensions = SPEED_LAYOUT_V7['large'][key][:2]

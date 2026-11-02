@@ -409,6 +409,55 @@ def test_choose_video_mode_prefers_720p():
     choose_video_mode([{"id": 3, "video_configs": [parse_fields(field(1, 2) + field(10, 7))]}])  # H.265 only
 
 
+def _offer(*resolutions):
+  return [{"id": 3, "video_configs": [parse_fields(field(1, r)) for r in resolutions]}]
+
+
+@pytest.mark.parametrize("resolution,expected", [("auto", (1280, 720)), ("720p", (1280, 720)), ("480p", (800, 480)),
+                                                 ("1080p", (1920, 1080)), ("bogus", (1280, 720))])
+def test_choose_video_mode_resolution_preference(resolution, expected):
+  mode = choose_video_mode(_offer(1, 2, 3), resolution)
+  assert (mode.width, mode.height) == expected
+
+
+def test_choose_video_mode_resolution_only_from_the_offer():
+  assert (choose_video_mode(_offer(1, 2), "1080p").height) == 720  # not offered: next preference
+  assert (choose_video_mode(_offer(1, 3), "720p").height) == 480
+  assert (choose_video_mode(_offer(3), "480p").height) == 1080  # the only offer is still taken
+
+
+def test_choose_video_mode_respects_encoder_height_limit():
+  assert choose_video_mode(_offer(1, 2, 3), "1080p", max_height=720).height == 720
+  assert choose_video_mode(_offer(1, 2, 3), "1080p", max_height=1080).height == 1080
+  assert choose_video_mode(_offer(1, 3), "1080p", max_height=720).height == 480
+  assert choose_video_mode(_offer(3), "auto", max_height=720).height == 1080  # as before: nothing else offered
+  # auto with the default limit is unchanged from before the knob existed
+  assert choose_video_mode(_offer(1, 2, 3), "auto", max_height=720).height == 720
+
+
+def test_config_resolution_and_encoder_limit_clamps(tmp_path):
+  from openpilot.starpilot.system.starport import identity as identity_store
+  path = tmp_path / "config.json"
+  config = identity_store.load_config(path)
+  assert config["resolution"] == "auto" and config["hw_encoder_max_height"] == 720
+  path.write_text(json.dumps({"config_version": identity_store.CONFIG_VERSION, "resolution": "1080p", "hw_encoder_max_height": 1080}))
+  config = identity_store.load_config(path)
+  assert config["resolution"] == "1080p" and config["hw_encoder_max_height"] == 1080
+  path.write_text(json.dumps({"config_version": identity_store.CONFIG_VERSION, "resolution": "4k", "hw_encoder_max_height": 2160}))
+  config = identity_store.load_config(path)
+  assert config["resolution"] == "auto" and config["hw_encoder_max_height"] == 720
+  path.write_text(json.dumps({"config_version": identity_store.CONFIG_VERSION, "hw_encoder_max_height": True}))
+  assert identity_store.load_config(path)["hw_encoder_max_height"] == 720
+
+
+def test_hardware_encoder_size_limit_follows_opt_in():
+  from openpilot.starpilot.system.starport import hw_encoder
+  with pytest.raises(ValueError, match="1280x720"):
+    hw_encoder.HardwareH264Encoder(1920, 1080, library=Path("/nonexistent"))
+  with pytest.raises(OSError):  # past the size check: 1080 is allowed once opted in (the library is missing here)
+    hw_encoder.HardwareH264Encoder(1920, 1080, library=Path("/nonexistent"), max_height=1080)
+
+
 def keyframe_au(tag: int) -> bytes:
   return b"\x00\x00\x00\x01\x09\xf0" + b"\x00\x00\x00\x01\x67\x42" + b"\x00\x00\x00\x01\x68\xce" + b"\x00\x00\x00\x01\x65" + bytes([tag])
 

@@ -272,6 +272,18 @@ export const LayoutWidgetPreview = {
         <text x="148" y="170" font-size="30" font-weight="700" fill="#c7aef7">500 ft</text>
         <text :x="widget.width - 24" y="170" text-anchor="end" font-size="22" fill="#bebbc5">4.2 mi - 9 min</text>
       </g>
+      <g v-else-if="widget.kind === 'birds_eye'">
+        <rect :width="widget.width" :height="widget.height" :rx="Math.min(28, widget.width / 4)" fill="#0a0c12" :fill-opacity="235 / 255 * (widget.opacity ?? 90) / 100" stroke="#ffffff28" stroke-width="2" />
+        <g :transform="'translate(' + widget.width / 2 + ' ' + widget.height + ') scale(' + Math.min(widget.width / 520, widget.height / 650) + ')'" stroke-linecap="round" fill="none">
+          <path d="M-190 -20 Q-130 -420 -210 -630 L-60 -630 Q40 -420 190 -20 Z" fill="#283040" stroke="none" />
+          <path d="M-190 -20 Q-130 -420 -210 -630 M190 -20 Q40 -420 -60 -630" stroke="#969eb0" stroke-width="4" />
+          <path d="M-60 -20 Q-40 -420 -160 -630 M60 -20 Q-5 -420 -110 -630" stroke="#eceff8" stroke-width="3" />
+          <path d="M0 -130 Q-5 -300 -60 -400" stroke="#4fd28a" stroke-width="40" stroke-opacity=".8" />
+          <rect x="-24" y="-130" width="48" height="76" rx="12" fill="#eef1f7" />
+          <rect x="-82" y="-470" width="40" height="34" rx="8" fill="#d6dbe4" transform="rotate(-18 -62 -453)" />
+        </g>
+        <text :x="widget.width / 2" y="40" text-anchor="middle" font-size="26" font-weight="600" fill="#aab4c6">{{ widget.display === 'full' ? 'Birds-eye (full screen)' : 'Birds-eye view' }}</text>
+      </g>
       <g v-else-if="widget.kind === 'nav_map'">
         <defs>
           <radialGradient id="gx-nav-map-fade" cx=".5" cy=".55" r=".75"><stop offset=".55" stop-color="white" /><stop offset="1" stop-color="white" stop-opacity="0" /></radialGradient>
@@ -482,7 +494,7 @@ export const OnroadLayoutPage = {
         }
         const [width, height] = widgetSize(widget, this.layout[widget.id])
         return {
-          ...widget, width, height, ...(widget.iconSize ? { display: this.layout[widget.id].display } : {}),
+          ...widget, width, height, ...(widget.iconSize || widget.displayModes ? { display: this.layout[widget.id].display } : {}),
           ...(widget.opacity ? { opacity: this.layout[widget.id].opacity } : {}),
           ...(widget.backgroundToggle ? { background: this.layout[widget.id].background } : {}),
           ...(widget.collapseToggle ? { collapse: this.layout[widget.id].collapse } : {})
@@ -979,6 +991,14 @@ export const OnroadLayoutPage = {
       }
       Object.assign(this.selectedPosition, clampPlacement(this.limitProfile, this.state.selected,
         this.selectedPosition.x, this.selectedPosition.y, this.layout))
+      this.recordChange(before)
+      this.state.notice = ""
+    },
+    setDisplayMode(mode) {
+      if (!this.editable || this.state.drag || this.state.layerDrag || !this.selectedWidget?.displayModes?.includes(mode)) return
+      this.finishColorEdit()
+      const before = clone(this.state.draft)
+      this.selectedPosition.display = mode
       this.recordChange(before)
       this.state.notice = ""
     },

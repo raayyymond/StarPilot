@@ -1508,6 +1508,10 @@ class Supervisor:
     session.fragment_acks = fragment_acks
     tuning = car_profiles.tuning(config)
     session.max_window = tuning["max_window"]
+    # Video size preference among the head unit's offer; the hardware encoder's height limit (720 unless opted in).
+    session.resolution = config["resolution"]
+    if encoder_preference(config["encoder"]) == "hardware":
+      session.max_video_height = config["hw_encoder_max_height"]
     session.phone_frames = tuning["phone_frames"]
     if tuning["phone_services"]:
       session.phone_services = True
@@ -1536,7 +1540,7 @@ class Supervisor:
                                   bitrate_kbps=config["bitrate_kbps"],
                                   margin_height=mode.margin_height if mode.content_top in (None, mode.margin_height // 2) else 0,
                                   software_fps=software_fps, log=self.log,
-                                  rate_control=config["rate_control"])
+                                  rate_control=config["rate_control"], hw_max_height=config["hw_encoder_max_height"])
     fps = min(fps, mode.fps, config["fps"] or fps)
     interval = 1.0 / fps
     flags = (FLAG_NV12 if config["gpu_nv12"] and getattr(encoder, "supports_nv12", False) else 0) | \
