@@ -1,4 +1,4 @@
-"""Accord on the angle-loop EPS firmware (39990-TVA,A16<letter>): detection, the 0xE4 frame, the setpoint limits."""
+"""Accord on the angle-loop EPS firmware (39990-TVA,A16<letter> or A34<letter>): detection, the 0xE4 frame, the setpoint limits."""
 import math
 from types import SimpleNamespace
 
@@ -56,7 +56,12 @@ def accord_cp(eps_fw: bytes | None):
   (b"39990-TVA,A16A\x00\x00", True),   # V298, NUL-padded as the car reports it
   (b"39990-TVA,A16B\x00\x00", True),   # V299
   (b"39990-TVA,A16C", True),           # the release
+  (b"39990-TVA,A34C\x00\x00", True),   # the release ported to the A340 compile (V300-A340)
   (b"39990-TVA,A160\x00\x00", False),  # torque-map images
+  (b"39990-TVA,A340\x00\x00", False),  # torque-map image on the A340 compile (V37A-A340)
+  (b"39990-TVA-A340\x00\x00", False),  # stock A340
+  (b"39990-TVA,A34", False),
+  (b"39990-TVA,A24C", False),          # no such family
   (b"39990-TVA-A160\x00\x00", False),  # stock
   (b"39990-TVA,A16", False),
   (b"39990-TVA,A16AB", False),
@@ -67,7 +72,8 @@ def test_fw_detection(fw, expected):
   assert is_accord_eps_angle_loop_fw(fw) is expected
 
 
-@pytest.mark.parametrize("fw", [b"39990-TVA,A16A\x00\x00", b"39990-TVA,A16B\x00\x00", b"39990-TVA,A16C\x00\x00"])
+@pytest.mark.parametrize("fw", [b"39990-TVA,A16A\x00\x00", b"39990-TVA,A16B\x00\x00", b"39990-TVA,A16C\x00\x00",
+                                b"39990-TVA,A34C\x00\x00"])
 def test_angle_fw_selects_angle_control(fw):
   CP = accord_cp(fw)
   assert CP.steerControlType == CarParams.SteerControlType.angle
@@ -129,6 +135,8 @@ def _steer_faults(CP):
   (b"39990-TVA,A16C\x00\x00", True, False),   # angle EPS read -> angle mode
   (b"39990-TVA-A160\x00\x00", False, False),  # stock EPS read -> torque mode, no fault
   (b"39990-TVA,A160\x00\x00", False, False),  # torque-map EPS read -> torque mode, no fault
+  (b"39990-TVA,A34C\x00\x00", True, False),   # angle EPS on the A340 compile -> angle mode
+  (b"39990-TVA,A340\x00\x00", False, False),  # torque-map EPS on the A340 compile -> torque mode, no fault
   (None, False, True),                         # no EPS fw at all -> permanent fault
 ])
 def test_eps_fw_unread_faults(fw, angle, unread):

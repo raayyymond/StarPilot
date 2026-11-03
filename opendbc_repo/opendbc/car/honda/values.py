@@ -113,15 +113,17 @@ class HondaFlags(IntFlag):
   EPS_FW_UNREAD = 32768  # Accord with no EPS fw response: the firmware family is unknown, so do not steer
 
 
-# Accord EPS angle-loop firmware family: 39990-TVA,A16 + exactly one capital letter (A16A, A16B, A16C ...).  Torque
-# images read 39990-TVA,A160 (a digit) and stock 39990-TVA-A1x0, so neither matches.
-ACCORD_EPS_ANGLE_LOOP_FW_FAMILY = b"39990-TVA,A16"
+# Accord EPS angle-loop firmware families: 39990-TVA,A16 (the A160 compile: A16A, A16B, A16C ...) or 39990-TVA,A34
+# (the A340 compile, a different build of the same EPS: A34C ...) + exactly one capital letter.  Torque images read
+# 39990-TVA,A160 / 39990-TVA,A340 (a digit) and stock 39990-TVA-A1x0 / -A340, so none of those matches.
+ACCORD_EPS_ANGLE_LOOP_FW_FAMILIES = (b"39990-TVA,A16", b"39990-TVA,A34")
+ACCORD_EPS_ANGLE_LOOP_FW_FAMILY = ACCORD_EPS_ANGLE_LOOP_FW_FAMILIES[0]
 
 
 def is_accord_eps_angle_loop_fw(fw_version: bytes) -> bool:
   v = bytes(fw_version).rstrip(b"\x00")  # the EPS pads fwVersion with NULs
-  family = ACCORD_EPS_ANGLE_LOOP_FW_FAMILY
-  return len(v) == len(family) + 1 and v.startswith(family) and ord("A") <= v[-1] <= ord("Z")
+  return any(len(v) == len(family) + 1 and v.startswith(family) and ord("A") <= v[-1] <= ord("Z")
+             for family in ACCORD_EPS_ANGLE_LOOP_FW_FAMILIES)
 
 
 # ---- Accord, angle mode only (steerControlType == angle): the variable-ratio rack map.
