@@ -101,6 +101,7 @@ def run_stream(monkeypatch, session, lease):
   sup._set = lambda **values: None
   sup._native_reconnects, sup._native_reconnect_limit = 0, 0
   sup._stream_lease = lease
+  sup._companion_keeper = None  # dev feeb87e45: the loop checks the hands-free keeper once a second
   encoder = NS(last_encode_ms=0.0, encode_rgba=lambda data, keyframe: (b'h264', keyframe))
   timer = threading.Timer(0.2, sup._stop.set)
   timer.start()
