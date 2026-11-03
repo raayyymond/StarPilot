@@ -71,6 +71,10 @@ class JoinTimeout(NetworkError):
   """The car's network never came up in time."""
 
 
+class NetworkTimeout(NetworkError):
+  """NetworkManager did not answer a D-Bus request in time; the request may still have gone through."""
+
+
 def _boottime() -> float:
   """NetworkManager's AccessPoint.LastSeen clock."""
   return time.clock_gettime(time.CLOCK_BOOTTIME) if hasattr(time, "CLOCK_BOOTTIME") else time.monotonic()
@@ -192,21 +196,29 @@ class NetworkLease:
   def _call(self, path: str, interface: str, member: str, signature: str | None = None, body: tuple = (), timeout: float = 10.0):
     address = DBusAddress(path, bus_name=NM, interface=interface)
     message = new_method_call(address, member, signature, body) if signature else new_method_call(address, member)
-    reply = self._open().send_and_get_reply(message, timeout=timeout)
+    reply = self._reply(message, timeout, member)
     if reply.header.message_type == MessageType.error:
       raise NetworkError(f"{member} failed: {reply.body[0] if reply.body else reply.header}")
     return reply.body
 
+  def _reply(self, message, timeout: float, what: str):
+    # jeepney raises a bare TimeoutError (empty message) when NetworkManager does not answer. 2026-11-02 OTTOCAST: three
+    # joins failed with that blank error 5 s after NetworkManager had activated the profile, so the join below retries.
+    try:
+      return self._open().send_and_get_reply(message, timeout=timeout)
+    except TimeoutError as error:
+      raise NetworkTimeout(f"NetworkManager did not answer {what} within {timeout:.0f} s") from error
+
   def _get(self, path: str, interface: str, name: str):
     address = DBusAddress(path, bus_name=NM, interface=interface)
-    reply = self._open().send_and_get_reply(Properties(address).get(name), timeout=5.0)
+    reply = self._reply(Properties(address).get(name), 5.0, f"reading {name}")
     if reply.header.message_type == MessageType.error:
       raise NetworkError(f"Cannot read {name}: {reply.body[0] if reply.body else ''}")
     return reply.body[0][1]
 
   def _set(self, path: str, interface: str, name: str, signature: str, value) -> None:
     address = DBusAddress(path, bus_name=NM, interface=interface)
-    reply = self._open().send_and_get_reply(Properties(address).set(name, signature, value), timeout=5.0)
+    reply = self._reply(Properties(address).set(name, signature, value), 5.0, f"setting {name}")
     if reply.header.message_type == MessageType.error:
       raise NetworkError(f"Cannot set {name}: {reply.body[0] if reply.body else ''}")
 
@@ -310,6 +322,9 @@ class NetworkLease:
         raise NetworkError("cancelled")
       try:
         state = self._get(self.active_path, NM_ACTIVE_IFACE, "State")
+      except NetworkTimeout as error:
+        self._slow_answer(error, deadline)
+        continue
       except NetworkError as error:
         raise NetworkError("The projection network connection was removed (wrong key or out of range?)") from error
       if state == ACTIVE_STATE_ACTIVATED:
@@ -319,11 +334,25 @@ class NetworkLease:
       if time.monotonic() >= deadline:
         raise JoinTimeout(f"Timed out joining the projection network after {timeout:.0f} s")
       time.sleep(0.25)
-    self.local_ip = self._ipv4()
+    while True:
+      if cancelled():
+        raise NetworkError("cancelled")
+      try:
+        self.local_ip = self._ipv4()
+        break
+      except NetworkTimeout as error:
+        self._slow_answer(error, deadline)  # the network is up; a slow answer must not tear it down
     if self.dedicated:
       self._check_overlap()
     self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **self._radio())
     return self.local_ip
+
+  def _slow_answer(self, error: NetworkTimeout, deadline: float) -> None:
+    """A NetworkManager request timed out mid-join: log it and keep waiting until the join's own deadline."""
+    self.log("wifi_slow_answer", error=str(error))
+    if time.monotonic() >= deadline:
+      raise JoinTimeout("NetworkManager stopped answering while joining the projection network") from error
+    time.sleep(0.5)
 
   def _seen_frequency(self, credentials: WifiCredentials) -> int:
     """The channel this interface recently saw the car's BSSID broadcast its SSID on, or 0."""
