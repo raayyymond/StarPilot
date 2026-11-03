@@ -309,6 +309,23 @@ def test_bootstrap_join_failure_reports_status():
   assert signed(one(seen["connect_status"], 1)) == bs.STATUS_NETWORK_UNAVAILABLE
 
 
+def test_bootstrap_join_failure_names_a_bare_exception():
+  """2026-11-02: jeepney's bare TimeoutError left the session log with a blank join error."""
+  phone, car = socket.socketpair()
+  thread = threading.Thread(target=lambda: rfcomm_head_unit(car, ("10.0.0.1", 5000), pings=False), daemon=True)
+  thread.start()
+
+  def join(_):
+    raise TimeoutError
+
+  with pytest.raises(bs.BootstrapError) as error:
+    bs.WirelessBootstrap(phone, lambda *a, **k: None, stage_timeout=5.0).run(join)
+  assert str(error.value) == "joining_wifi: TimeoutError"
+  thread.join(5)
+  phone.close()
+  car.close()
+
+
 def test_bootstrap_timeout_names_stage():
   phone, car = socket.socketpair()
   with pytest.raises(bs.BootstrapError) as error:
@@ -1144,6 +1161,59 @@ def test_network_lease_retries_without_bssid_and_restores_previous():
   assert "bssid" in nm.added[0]["802-11-wireless"] and "bssid" not in nm.added[1]["802-11-wireless"]
   lease.release(restore=True)
   assert nm.calls[-1] == "ActivateConnection"  # home Wi-Fi comes back
+
+
+def test_network_lease_names_a_networkmanager_timeout():
+  from openpilot.starpilot.system.starport import network
+  lease = network.NetworkLease(lambda *a, **k: None)
+  lease.router = Mock(send_and_get_reply=Mock(side_effect=TimeoutError))
+  with pytest.raises(network.NetworkTimeout, match="did not answer reading Ip4Config within 5 s"):
+    lease._get("/active/aa1", network.NM_ACTIVE_IFACE, "Ip4Config")
+  with pytest.raises(network.NetworkTimeout, match="did not answer RequestScan within 10 s"):
+    lease._call("/dev/wlan0", network.NM_WIRELESS_IFACE, "RequestScan", "a{sv}", ({},))
+
+
+def test_network_lease_keeps_a_joined_network_through_slow_answers(monkeypatch):
+  """2026-11-02 OTTOCAST: NetworkManager had activated the profile, then three 5 s reads timed out and each join was
+  reported failed and torn down. The network is up; wait for the answer instead."""
+  from openpilot.starpilot.system.starport import network
+  monkeypatch.setattr(network.time, "sleep", lambda _: None)
+  nm = FakeNetworkManager()
+  lease = make_lease(nm)
+  events = []
+  lease.log = lambda event, **fields: events.append((event, fields))
+  slow = {"State": 1, "Ip4Config": 2}  # one slow State read while activating, two slow address reads once activated
+  real_get = lease._get.side_effect
+
+  def get(path, interface, name):
+    if slow.get(name):
+      slow[name] -= 1
+      raise network.NetworkTimeout(f"NetworkManager did not answer reading {name} within 5 s")
+    return real_get(path, interface, name)
+
+  lease._get = Mock(side_effect=get)
+  assert lease.acquire(credentials(), timeout=2.0) == "192.168.50.23"
+  assert [e for e, _ in events].count("wifi_slow_answer") == 3 and "DeactivateConnection" not in nm.calls
+  assert len(nm.added) == 1  # no retry without the BSSID either
+
+
+def test_network_lease_gives_up_when_networkmanager_never_answers(monkeypatch):
+  from openpilot.starpilot.system.starport import network
+  clock = [1000.0]
+  monkeypatch.setattr(network.time, "monotonic", lambda: clock[0])
+  monkeypatch.setattr(network.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+  nm = FakeNetworkManager()
+  lease = make_lease(nm)
+  real_get = lease._get.side_effect
+
+  def get(path, interface, name):
+    if name == "Ip4Config":
+      raise network.NetworkTimeout("NetworkManager did not answer reading Ip4Config within 5 s")
+    return real_get(path, interface, name)
+
+  lease._get = Mock(side_effect=get)
+  with pytest.raises(network.JoinTimeout, match="stopped answering"):
+    lease._acquire_once(credentials(), 3.0, lambda: False)
 
 
 def test_network_lease_waits_for_a_slow_honda_access_point(monkeypatch):

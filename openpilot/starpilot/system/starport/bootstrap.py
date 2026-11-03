@@ -472,7 +472,7 @@ class WirelessBootstrap:
       except OSError:
         pass
       error = outcome["error"]
-      raise BootstrapError(self.stage, str(error)) from error
+      raise BootstrapError(self.stage, str(error) or type(error).__name__) from error
     if self.cancelled():
       raise BootstrapError(self.stage, "cancelled")
     self.send(WIFI_CONNECT_STATUS, field(1, STATUS_SUCCESS))
