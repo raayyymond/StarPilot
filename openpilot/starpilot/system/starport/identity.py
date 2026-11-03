@@ -158,6 +158,7 @@ DEFAULT_CONFIG = {
   "phone_class": True,         # while pairing/connecting, present as a phone: HFP gateway + smartphone Class of Device
   "auto_connect": True,        # start projection on its own when the chosen car is on (onroad, or it reaches the comma)
   "rfcomm_cache": {},          # car address -> Android Auto RFCOMM channel learned over SDP, to skip discovery next time
+  "wifi_channels": {},         # car access point BSSID -> frequency (MHz) it was last found on, for profiles that pin the first join
   "car_type": "",              # wireless setup shown in Galaxy: "builtin" or "adapter"; "" = work it out from the saved companion car
   "car_profile_override": "",  # "" = pick by fingerprint (a wireless adapter must choose); "default" = standard; otherwise a car_profiles id
   "car_fingerprint": {},       # what the chosen car's head unit reported last time, used to pick a profile before it connects
@@ -213,6 +214,8 @@ def load_config(path: Path | None = None) -> dict:
     config["comma_screen_while_streaming"] = DEFAULT_CONFIG["comma_screen_while_streaming"]
   config["rfcomm_cache"] = {str(address).upper(): channel for address, channel in config["rfcomm_cache"].items()
                             if type(channel) is int and 1 <= channel <= 30}
+  config["wifi_channels"] = {str(bssid).upper(): frequency for bssid, frequency in config["wifi_channels"].items()
+                             if type(frequency) is int and 2400 <= frequency <= 5900}
   return config
 
 

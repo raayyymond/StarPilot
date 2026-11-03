@@ -46,16 +46,19 @@ def test_aawireless_tuning_applies_only_when_chosen():
 
 
 def test_ottocast_tuning_applies_only_when_chosen():
-  # The operator's experiment set for that dongle: every connection/reconnection fix is off for everyone else.
+  # The operator's set for that dongle: every connection fix is off for everyone else. 2026-11-02: the screen is gated
+  # by the car's own hands-free link, so the negotiate delay and the native-screen reconnects are gone.
   chosen = config(car_profile_override="ottocast")
   assert car_profiles.resolve(chosen) == ("ottocast", "override")
-  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0, "phone_services": True,
-                                         "native_reconnects": 2, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True,
-                                         "max_window": 30}  # the car's full video window (it offers 4): 2 in flight capped the stream at 7 fps
+  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "phone_services": True, "reuse_wifi_join": True,
+                                         "tcp_stops_with_rfcomm": True, "hfp_gate": True, "remember_wifi_channel": True,
+                                         "setup_restarts": 2, "max_window": 30}  # the car's full video window (it offers 4)
+  assert car_profiles.tuning(chosen)["negotiate_delay_s"] == 0.0 and car_profiles.tuning(chosen)["native_reconnects"] == 0
   assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST"
   for other in (config(), config(car_profile_override="default"), config(car_profile_override="aawireless")):
     tuning = car_profiles.tuning(other)
-    assert (tuning["negotiate_delay_s"], tuning["native_reconnects"], tuning["reuse_wifi_join"], tuning["tcp_stops_with_rfcomm"]) == (0.0, 0, False, False)
+    assert (tuning["negotiate_delay_s"], tuning["native_reconnects"], tuning["reuse_wifi_join"], tuning["tcp_stops_with_rfcomm"],
+            tuning["hfp_gate"], tuning["remember_wifi_channel"], tuning["setup_restarts"]) == (0.0, 0, False, False, False, False, 0)
 
 
 def test_leaving_the_adapter_setup_clears_the_adapter_model(sup):

@@ -1474,9 +1474,9 @@ def test_supervisor_reconnects_when_the_car_keeps_its_own_screen(identity, tmp_p
   monkeypatch.setattr(supervisor_module, "FOCUS_RETRY_INTERVAL", 0.1)
   sup, leases = make_supervisor(identity, tmp_path, monkeypatch, rfcomm)
   from openpilot.starpilot.system.starport import car_profiles
-  sup.config["car_profile_override"] = "ottocast"  # the reconnects are that profile's; "Other" keeps the session
+  sup.config["car_profile_override"] = "ottocast"  # the reconnect mechanism is per profile; give this one two (2026-11-02: off by default)
   ottocast = next(rule for rule in car_profiles.RULES if rule["id"] == "ottocast")
-  monkeypatch.setitem(ottocast["tuning"], "negotiate_delay_s", 0.0)  # three connections must fit the deadline
+  monkeypatch.setitem(ottocast["tuning"], "native_reconnects", 2)
   sup.start()
   try:
     deadline = time.monotonic() + 15

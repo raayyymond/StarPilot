@@ -90,6 +90,9 @@ class BluezPhone:
     self._hfp_retry_at = 0.0
     self.accepts: Callable[[str], bool] = lambda address: True  # which devices may open the HFP link
     self.on_connection: Callable[[str], None] = lambda address: None
+    self.on_disconnection: Callable[[str], None] = lambda address: None
+    self._peers_lock = threading.Lock()
+    self._hfp_peers: dict[str, int] = {}  # address -> open hands-free links with it (incoming or ConnectProfile)
     self._filter = self.router.filter(MatchRule(type="method_call", path=HFP_PROFILE_PATH), bufsize=16)
     self._queue = self._filter.__enter__()
     self._thread = threading.Thread(target=self._profile_loop, name="aa_hfp_profile", daemon=True)
@@ -259,9 +262,11 @@ class BluezPhone:
             sock.close()
             self.log("hfp_refused", device=device_path.rsplit("/", 1)[-1])
             raise RuntimeError("StarPilot answers hands-free only for the chosen car")
-          threading.Thread(target=hfp.serve, args=(sock, self._stop, self.log, device_path.rsplit("/", 1)[-1]),
-                           name="aa_hfp_conn", daemon=True).start()
-          self.log("hfp_connected", device=device_path.rsplit("/", 1)[-1])
+          peer = device_path.rsplit("/", 1)[-1]
+          with self._peers_lock:
+            self._hfp_peers[address] = self._hfp_peers.get(address, 0) + 1
+          threading.Thread(target=self._serve_peer, args=(sock, address, peer), name="aa_hfp_conn", daemon=True).start()
+          self.log("hfp_connected", device=peer)
           self.on_connection(address)
         self.router.send(new_method_return(message))
       except Exception as error:
@@ -269,6 +274,26 @@ class BluezPhone:
           self.router.send(new_error(message, "org.bluez.Error.Rejected", "s", (str(error),)))
         except Exception:
           pass
+
+  def _serve_peer(self, sock: socket.socket, address: str, peer: str) -> None:
+    try:
+      hfp.serve(sock, self._stop, self.log, peer)
+    finally:
+      with self._peers_lock:
+        remaining = self._hfp_peers.get(address, 1) - 1
+        if remaining > 0:
+          self._hfp_peers[address] = remaining
+        else:
+          self._hfp_peers.pop(address, None)
+      try:
+        self.on_disconnection(address)
+      except Exception:
+        pass
+
+  def hfp_link(self, address: str) -> bool:
+    """Whether a hands-free link with this device is open right now (the car's HandsFreeLink, or the adapter)."""
+    with self._peers_lock:
+      return address.upper() in self._hfp_peers
 
   def set_phone_class(self) -> None:
     if self._class_changed:

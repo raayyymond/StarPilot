@@ -93,6 +93,7 @@ class DedicatedLease:
     self.enabled = enabled
     self.lease = None
     self.reuse_join = False  # copied onto the aa0 lease once it exists
+    self.channel_memory = None  # likewise
     self.iface = None
     self.legacy = not enabled
     self.timeouts = 0
@@ -124,6 +125,7 @@ class DedicatedLease:
       self.iface.open()
       lease = self.lease_factory(self.log, INTERFACE, dedicated=True)
       lease.reuse_join = self.reuse_join
+      lease.channel_memory = self.channel_memory
       try:
         lease.prepare_device(self._cancel.is_set)
       except BaseException:
@@ -150,6 +152,8 @@ class DedicatedLease:
     if self.lease is None:
       self.legacy = True
       self.lease = self.lease_factory(self.log, self.fallback_interface)
+      self.lease.reuse_join = self.reuse_join
+      self.lease.channel_memory = self.channel_memory
 
   def _fall_back(self, error: Exception) -> None:
     self.log("wifi_dedicated_unavailable", error=str(error) or type(error).__name__)

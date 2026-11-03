@@ -253,6 +253,9 @@ class WirelessBootstrap:
     self.cancelled: Callable[[], bool] = lambda: False
     self.join_cancelled = threading.Event()
     self.link_closed = threading.Event()  # set when keepalive saw the head unit close or break RFCOMM
+    self.restarted = threading.Event()  # keepalive saw a new WifiVersionRequest and on_restart() took it
+    self.restart_payload = b""
+    self.on_restart: Callable[[], bool] = lambda: False  # supervisor: True while the projection connection is still being set up
 
   def join_is_cancelled(self) -> bool:
     """For join_wifi: stop on user cancellation or once the handshake has failed."""
@@ -501,7 +504,7 @@ class WirelessBootstrap:
     try:
       self._keepalive(stop)
     finally:
-      if not stop.is_set():
+      if not stop.is_set() and not self.restarted.is_set():
         self.link_closed.set()
 
   def _keepalive(self, stop: threading.Event) -> None:
@@ -518,6 +521,13 @@ class WirelessBootstrap:
           self.log("bootstrap_link_closed", error=str(error))
         return
       self.frames_seen = 0  # the frame budget applies to the handshake, not the session
+      if message_id == WIFI_VERSION_REQUEST and self.on_restart():
+        # The adapter restarted its handshake (2026-11-02 OTTOCAST: ~12 s after sending its network) while TCP/TLS were
+        # still being set up; the endpoint it gave us is dead. The supervisor answers this request and connects again.
+        self.restart_payload = payload
+        self.restarted.set()
+        self.log("bootstrap_restart_during_setup")
+        return
       try:
         if not self.service(message_id, payload):
           self.log("bootstrap_ignored", message=NAMES.get(message_id, message_id))
