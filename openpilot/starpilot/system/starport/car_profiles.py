@@ -10,6 +10,9 @@ DEFAULTS = {
   "native_reconnects": 0,       # a car that never grants the screen: shut down cleanly and reconnect this many times
   "reuse_wifi_join": False,     # the adapter restarted the handshake with the same network: keep the join in progress
   "tcp_stops_with_rfcomm": False,  # the adapter closed RFCOMM before accepting TCP: stop retrying, reconnect instead
+  "hfp_gate": False,            # the car grants the screen only once its own hands-free link to the comma is up: keep opening it
+  "remember_wifi_channel": False,  # pin the first join to the channel the car's access point used last time
+  "setup_restarts": 0,          # the adapter restarted its handshake while TCP/TLS were being set up: answer it and connect again
 }
 
 FINGERPRINT_KEYS = ("head_unit_make", "head_unit_model", "car_make", "car_model", "car_year")
@@ -17,15 +20,18 @@ FINGERPRINT_KEYS = ("head_unit_make", "head_unit_model", "car_make", "car_model"
 RULES: list[dict] = [
   {"id": "aawireless", "label": "AAWireless", "match": {},
    "tuning": {"max_window": 30, "phone_services": True, "phone_frames": True}},
-  # OTTOCAST (Wi-Fi "CAR2-xxxx"), 2020 Honda Accord, 2026-10-28..31 over 19 projections: the car granted the screen only
-  # when the dongle answered the first Android Auto message at once (5 of 6), never when it answered ~2 s later (0 of 13),
-  # which is every connection made at ignition. The dongle's own session (its "connect via Bluetooth" screen) and a phone
-  # are always granted; both offer the car-data and Bluetooth channels we leave closed, so open them too (phone_services,
-  # 2026-10-31 experiment). Everything below is the operator's experiment set for that dongle and applies to no other
-  # adapter; the standard behaviour stays as it was for AAWireless and "Other".
+  # OTTOCAST (Wi-Fi "CAR2-xxxx"), 2020 Honda Accord, 2026-10-28..11-02 over 43 projections. The Honda grants the screen
+  # if and only if its own hands-free link to the comma is up (24 of 24 once the Bluetooth channel was open): it then
+  # answers the pairing request twice with status 1 and hands over within a second, whether that link came up before
+  # the connection or 38 s into it. How fast the dongle answered never mattered. So: open the Bluetooth channel like a
+  # phone (phone_services), keep the car's hands-free link up (hfp_gate), and stop paying for the old theory (no
+  # negotiate delay, no native-screen reconnects). The dongle restarts its handshake ~12 s after sending its network;
+  # an unpinned first join (hidden-SSID scan, median 6.5 s, up to 11.4 s) ran into that on every session, so pin the
+  # remembered channel and answer a restart during setup instead of waiting for the dead TCP endpoint. Everything
+  # below is the operator's set for that dongle and applies to no other adapter.
   {"id": "ottocast", "label": "OTTOCAST", "match": {},
-   "tuning": {"negotiate_delay_s": 3.0, "phone_services": True, "native_reconnects": 2, "reuse_wifi_join": True,
-              "tcp_stops_with_rfcomm": True}},
+   "tuning": {"phone_services": True, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True, "hfp_gate": True,
+              "remember_wifi_channel": True, "setup_restarts": 2}},
 ]
 
 

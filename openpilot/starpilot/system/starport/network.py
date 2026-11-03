@@ -168,6 +168,36 @@ def connection_settings(credentials: WifiCredentials, interface: str, frequency:
   return settings
 
 
+NM_DEVICE_STATE_USABLE = 30  # NetworkManager device states below this: 10 unmanaged, 20 unavailable (no supplicant yet)
+
+
+class ChannelMemory:
+  """Where a car's access point was last found, per BSSID. 2026-11-02 OTTOCAST: without a sighting in the last 30 s the
+  first join scans every channel for the hidden SSID (median 6.5 s, up to 11.4 s) and the adapter restarts its handshake
+  at ~12 s; pinned joins took 3.4 s. A pin that fails is forgotten and the retry scans as before."""
+
+  def __init__(self, load: Callable[[], dict], save: Callable[[dict], None]):
+    self.load, self.save = load, save
+
+  def frequency(self, bssid: str) -> int:
+    try:
+      return int(self.load().get(bssid.upper(), 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+      return 0
+
+  def remember(self, bssid: str, frequency: int) -> None:
+    """Store where the access point was found, or forget it (``frequency`` 0)."""
+    channels = dict(self.load())
+    key = bssid.upper()
+    if frequency:
+      if channels.get(key) == frequency:
+        return
+      channels[key] = frequency
+    elif channels.pop(key, None) is None:
+      return
+    self.save(channels)
+
+
 class NetworkLease:
   def __init__(self, log: Callable[..., None], interface: str = "wlan0", dedicated: bool = False):
     """``dedicated``: the interface exists only for the car, so never fall back to another one or touch its previous network."""
@@ -184,6 +214,8 @@ class NetworkLease:
     self.autoconnect_paused = False
     self.joined: WifiCredentials | None = None  # what active_path was activated for
     self.reuse_join = False  # car profile: keep a join in progress when the adapter restarts the handshake
+    self.channel_memory: ChannelMemory | None = None  # car profile: pin the first join to the remembered channel
+    self.pinned_from_memory = False
     self.marker = AUTOCONNECT_MARKER
     self.scan_requested_at = -SCAN_REUSE_S
     self._lock = threading.Lock()
@@ -266,6 +298,10 @@ class NetworkLease:
         raise
       except NetworkError as error:
         last_error = error
+        if self.pinned_from_memory and self.channel_memory is not None and not cancelled():
+          self.pinned_from_memory = False  # the access point is not where it was last time; scan for it as before
+          self.channel_memory.remember(attempt.bssid, 0)
+          self.log("wifi_channel_forgotten", bssid=attempt.bssid, error=str(error))
         if cancelled() or index == len(attempts) - 1:
           raise
         self.log("wifi_retry_without_bssid", error=str(error))
@@ -307,11 +343,17 @@ class NetworkLease:
             pass
         self._delete_stale_profiles()
         frequency = self._seen_frequency(credentials) if credentials.bssid else 0
+        pinned_source = "seen" if frequency else ""
+        if not frequency and credentials.bssid and self.channel_memory is not None:
+          frequency = self.channel_memory.frequency(credentials.bssid)
+          pinned_source = "remembered" if frequency else ""
+        self.pinned_from_memory = pinned_source == "remembered"
         self._request_scan()  # every attempt: a retry's access point may have restarted since the last scan
         self.log("wifi_joining", interface=self.interface, **{k: v for k, v in credentials.describe().items() if k != "key_length"},
-                 had_previous=bool(self.previous_connection), pinned_freq=frequency)
+                 had_previous=bool(self.previous_connection), pinned_freq=frequency, pinned_source=pinned_source)
+        # A remembered channel keeps the profile hidden: the access point may not broadcast, and the pin alone narrows the scan.
         body = self._call(NM_PATH, NM_IFACE, "AddAndActivateConnection2", "a{sa{sv}}ooa{sv}",
-                          (connection_settings(credentials, self.interface, frequency, hidden=not frequency), self.device_path, "/",
+                          (connection_settings(credentials, self.interface, frequency, hidden=pinned_source != "seen"), self.device_path, "/",
                            {"persist": ("s", "volatile")}), timeout=15.0)
         self.connection_path, self.active_path = body[0], body[1]
         self.joined = credentials
@@ -344,8 +386,20 @@ class NetworkLease:
         self._slow_answer(error, deadline)  # the network is up; a slow answer must not tear it down
     if self.dedicated:
       self._check_overlap()
-    self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **self._radio())
+    radio = self._radio()
+    self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **radio)
+    self.pinned_from_memory = False
+    if self.channel_memory is not None and credentials.bssid and radio.get("freq"):
+      self.channel_memory.remember(credentials.bssid, int(radio["freq"]))
     return self.local_ip
+
+  def interface_state(self) -> int:
+    """NetworkManager's state for this interface: 10 unmanaged, 20 unavailable, 30 and up usable; 0 without such a device."""
+    with self._lock:
+      for path, name in self._wifi_devices():
+        if name == self.interface:
+          return int(self._get(path, NM_DEVICE_IFACE, "State"))
+    return 0
 
   def _slow_answer(self, error: NetworkTimeout, deadline: float) -> None:
     """A NetworkManager request timed out mid-join: log it and keep waiting until the join's own deadline."""

@@ -91,6 +91,42 @@ class CompanionTests(unittest.TestCase):
     self.assertEqual(self.owner.companion_devices, {})
     self.assertFalse(self.lease.released)
 
+  def test_disconnecting_the_saved_car_keeps_it_saved_and_only_forgetting_drops_it(self):
+    # 2026-11-02: Galaxy's Disconnect used to drop the saved car; the comma then refused the car's hands-free link and a
+    # Honda, which grants its screen only over that link, never showed Android Auto again until the car was re-selected.
+    from openpilot.starpilot.system.starport.supervisor import Supervisor
+    def operation(operation, address):
+      self.forgotten.append((operation, address))
+      self.devices[address]['connected'] = operation == 'connect'
+    self.client.operation = operation
+    host = Supervisor.__new__(Supervisor)
+    host._lock = threading.RLock()
+    host.config = {'receiver_address': ADAPTER, 'companion_address': CAR, 'companion_name': 'HandsFreeLink'}
+    host._shared_bluetooth_owner = self.owner
+    with patch.object(host, '_phone', return_value=self.phone), patch('openpilot.starpilot.system.starport.identity.save_config') as save:
+      host.companion_bluetooth_action('disconnect', CAR, SESSION)
+      self.assertEqual((host.config['companion_address'], host.config['companion_name']), (CAR, 'HandsFreeLink'))
+      save.assert_not_called()
+      host.companion_bluetooth_action('forget', CAR, SESSION)
+      self.assertEqual(host.config['companion_address'], '')
+      save.assert_called_once()
+
+  def test_saved_car_connect_follows_its_hands_free_link_not_the_bluez_flag(self):
+    # BlueZ says Connected while only the car's audio profile is up; the hands-free link, the one a Honda gates its
+    # screen on, is not. With link_up the connect goes ahead and uses the caller's timeout.
+    self.devices[CAR]['connected'] = True
+    link = {'up': False}
+    def call(*args, **kwargs):
+      self.calls.append((args, kwargs))
+      link['up'] = args[2] == 'ConnectProfile'
+    self.phone._call = call
+    self.owner.prepare_companion(CAR, lambda: CAR, connect=True, timeout=8.0, link_up=lambda: link['up'])
+    self.assertEqual(self.calls[0][0][2:], ('ConnectProfile', 's', (HFP,)))
+    self.assertEqual(self.calls[0][1], {'timeout': 8.0})
+    self.calls.clear()
+    self.owner.prepare_companion(CAR, lambda: CAR, connect=True, link_up=lambda: True)
+    self.assertEqual(self.calls, [])  # the link is up: nothing to connect, whatever BlueZ's flag says
+
   def test_session_pairing_and_changed_owner_are_fail_closed(self):
     alterations = [('valid', False), ('enabled', False), ('selected', CAR)]
     for key, value in alterations:

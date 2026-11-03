@@ -35,7 +35,7 @@ from typing import Any
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.starpilot.system.starport import car_profiles, device_health, identity as identity_store, system_slice
 from openpilot.starpilot.system.starport.auto_connect import AutoConnectPolicy
-from openpilot.starpilot.system.starport.bootstrap import NAMES, BootstrapError, WirelessBootstrap
+from openpilot.starpilot.system.starport.bootstrap import NAMES, WIFI_VERSION_REQUEST, BootstrapError, WirelessBootstrap
 from openpilot.starpilot.system.starport.bugsink_report import PairingAttempt
 from openpilot.starpilot.system.starport.frame_source import (DEFAULT_PATH as DEFAULT_FRAME_PATH, FLAG_ASYNC_READBACK, FLAG_NV12,
                                                                   FORMAT_NV12, FrameRequest)
@@ -77,6 +77,13 @@ FOCUS_RETRIES = 5
 # session. 2026-10-28..30 Honda/OTTOCAST: 9 of 12 projections were refused for the whole drive, and reconnecting was the
 # only thing that ever got video.
 NATIVE_FOCUS_GIVE_UP_S = 15.0
+# A car that grants the screen only once its own hands-free link to the comma is up (2026-11-02 Honda/OTTOCAST, 24 of 24):
+# while it keeps its own screen, open that link again this often, each try bounded by this timeout.
+COMPANION_LINK_RETRY_S = 10.0
+COMPANION_CONNECT_TIMEOUT_S = 8.0
+COMPANION_LINK_HINT = ("Waiting for the car's hands-free link to StarPilot; the car keeps its own screen until it is up. "
+                       "If another phone is connected to the car's hands-free, connect StarPilot on the car's phone screen.")
+WIFI_READY_PROBE_S = 5.0     # how often auto-connect asks NetworkManager whether it manages the Wi-Fi radio yet
 REPORTED_SETTINGS = ("connection", "usb_mode", "view", "encoder", "fps", "bitrate_kbps", "rate_control", "gpu_nv12",
                      "async_readback", "wifi_interface", "dedicated_wifi_interface", "verify_head_unit", "version_status",
                      "rfcomm_channel", "phone_class", "auto_connect")
@@ -334,6 +341,45 @@ class EventLog:
         self._dropped += 1
 
 
+class CompanionLinkKeeper:
+  """While a car that gates its screen on its own hands-free link keeps that screen, keep opening the link to the comma.
+
+  2026-11-02 Honda/OTTOCAST: the car granted video within a second of its HandsFreeLink completing a hands-free
+  connection to the comma, 38 s into one projection; without that link it never did. Runs beside the projection
+  connection from the moment the adapter accepted us until the car hands over or the session ends.
+  """
+
+  def __init__(self, connect: Callable[[float], str], link_up: Callable[[], bool], log: Callable[..., None],
+               interval: float = COMPANION_LINK_RETRY_S, timeout: float = COMPANION_CONNECT_TIMEOUT_S):
+    self.connect, self.link_up, self.log = connect, link_up, log
+    self.interval, self.timeout = interval, timeout
+    self.attempts = 0
+    self.outcome = ""
+    self._stop = threading.Event()
+    self._thread = threading.Thread(target=self._run, name="aa_companion_link", daemon=True)
+
+  def start(self) -> CompanionLinkKeeper:
+    self._thread.start()
+    return self
+
+  def stop(self) -> None:
+    self._stop.set()
+    if self._thread.is_alive() and threading.current_thread() is not self._thread:
+      self._thread.join(timeout=1.0)
+
+  def _run(self) -> None:
+    while not self._stop.is_set():
+      if not self.link_up():
+        self.attempts += 1
+        try:
+          self.outcome = self.connect(self.timeout)
+        except Exception as error:  # never let a Bluetooth hiccup take the keeper down
+          self.outcome = f"{type(error).__name__}: {error}"
+        self.log("companion_link", attempt=self.attempts, outcome=self.outcome[:160], up=self.link_up())
+      if self._stop.wait(self.interval):
+        return
+
+
 class Supervisor:
   _pairing_note = ""      # why a paired car was not chosen, kept after the pairing window closes
   _no_starport_since = 0.0
@@ -371,6 +417,12 @@ class Supervisor:
     self._hfp_link = threading.Event()  # set when the chosen car opens the hands-free link
     self.auto = AutoConnectPolicy()
     self._companion_retry_at = 0.0
+    self._companion_keeper: CompanionLinkKeeper | None = None
+    self._setup_phase = False  # TCP/TLS of the projection connection still being set up (a handshake restart is answered)
+    self._setup_sock: socket.socket | None = None
+    self._wifi_probe: Any = None
+    self._wifi_probe_at = -WIFI_READY_PROBE_S
+    self._wifi_ready_state = True
     self.log = EventLog()
     self.config = identity_store.load_config()
     self._status: dict = {"state": "idle", "detail": "", "error": "", "last_stage": "", "attempt": 0,
@@ -792,9 +844,32 @@ class Supervisor:
         self._set(error=f'Waiting for selected car: {error}'[:300])
     car_link = bool(car_device and car_device["connected"]) or now - self._car_seen_at < CAR_LINK_HOLD
     onroad = self._onroad()
-    action = self.auto.decide(now, enabled=True, onroad=onroad, car_link=car_link,
-                              ready=adapter_ready and bool(device and device["paired"]) and (not companion or car_link), running=running)
+    ready = adapter_ready and bool(device and device["paired"]) and (not companion or car_link) and self._wifi_ready(now)
+    action = self.auto.decide(now, enabled=True, onroad=onroad, car_link=car_link, ready=ready, running=running)
     self._apply_auto_action(now, action, onroad)
+
+  def _wifi_ready(self, now: float) -> bool:
+    """NetworkManager manages the Wi-Fi radio. After a cold boot it takes the radio ~25 s after StarPort starts
+    (2026-11-02), and a session started before that fails its joins with "device wlan0 is strictly unmanaged"."""
+    if self._lease_factory is not None or self.config["connection"] != "wireless":
+      return True
+    if now - self._wifi_probe_at < WIFI_READY_PROBE_S:
+      return self._wifi_ready_state
+    self._wifi_probe_at = now
+    state = None
+    try:
+      if self._wifi_probe is None:
+        from openpilot.starpilot.system.starport.network import NetworkLease
+        self._wifi_probe = NetworkLease(self.log, self.config["wifi_interface"])
+      state = self._wifi_probe.interface_state()
+      from openpilot.starpilot.system.starport.network import NM_DEVICE_STATE_USABLE
+      ready = state >= NM_DEVICE_STATE_USABLE
+    except Exception:
+      ready = True  # fail open: a join reports the real problem
+    if ready != self._wifi_ready_state:
+      self.log("wifi_radio_ready" if ready else "wifi_radio_waiting", interface=self.config["wifi_interface"], state=state)
+      self._wifi_ready_state = ready
+    return ready
 
   def _apply_auto_action(self, now: float, action: str | None, onroad: bool) -> None:
     if action == "start":
@@ -953,7 +1028,9 @@ class Supervisor:
         for previous in list(owner.companion_devices):
           if previous != device['address']:
             owner.companion_devices.pop(previous, None)
-      elif self.config.get('companion_address', '').upper() == address.upper():
+      elif operation == 'forget' and self.config.get('companion_address', '').upper() == address.upper():
+        # Only forgetting drops the saved car. Disconnecting used to drop it too; with no saved car the comma refuses
+        # the car's hands-free link, and a car that gates its screen on that link (Honda) never shows Android Auto again.
         self.config.update(companion_address='', companion_name='')
         identity_store.save_config(self.config)
       return result
@@ -978,6 +1055,53 @@ class Supervisor:
     if address.upper() in (self.config["receiver_address"].upper(), self.config.get("companion_address", "").upper()):
       self._car_seen_at = time.monotonic()
       self._hfp_link.set()
+
+  def _companion_link_up(self) -> bool:
+    """The saved car's own hands-free link to the comma is open (not merely some BlueZ profile of it)."""
+    companion = self.config.get('companion_address', '')
+    bluez = self._bluez
+    link = getattr(bluez, 'hfp_link', None) if companion and bluez is not None else None
+    try:
+      return bool(link is not None and link(companion))
+    except Exception:
+      return False
+
+  def _connect_companion_link(self, timeout: float) -> str:
+    """Open the saved car's hands-free link to the comma: "up", "connected", or why not."""
+    companion = self.config.get('companion_address', '')
+    owner = self._shared_bluetooth_owner
+    if not companion or owner is None:
+      return "no saved car"
+    if self._companion_link_up():
+      return "up"
+    try:
+      owner.prepare_companion(companion, lambda: self.config.get('companion_address', ''), connect=True, timeout=timeout,
+                              link_up=self._companion_link_up)
+    except Exception as error:
+      return str(error) or type(error).__name__
+    return "connected" if self._companion_link_up() else "no link"
+
+  def _start_companion_keeper(self, tuning: dict) -> None:
+    self._stop_companion_keeper()
+    if tuning["hfp_gate"] and self.config.get('companion_address', '') and self._shared_bluetooth_owner is not None:
+      self._companion_keeper = CompanionLinkKeeper(self._connect_companion_link, self._companion_link_up, self.log).start()
+
+  def _stop_companion_keeper(self) -> None:
+    keeper, self._companion_keeper = self._companion_keeper, None
+    if keeper is not None:
+      keeper.stop()
+
+  def _drop_setup_socket(self) -> None:
+    sock, self._setup_sock = self._setup_sock, None
+    if sock is None:
+      return
+    with self._lock:
+      self._sockets.discard(sock)
+    for close in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+      try:
+        close()
+      except OSError:
+        pass
 
   def _release_phone(self) -> None:
     """Stop looking like a phone; keep only the standby gateway auto-connect needs."""
@@ -1020,7 +1144,9 @@ class Supervisor:
     if factory is None:
       from openpilot.starpilot.system.starport.network import NetworkLease
       factory = NetworkLease
-    reuse_join = car_profiles.tuning(self.config)["reuse_wifi_join"]
+    tuning = car_profiles.tuning(self.config)
+    reuse_join = tuning["reuse_wifi_join"]
+    channel_memory = self._channel_memory() if tuning["remember_wifi_channel"] else None
     if self.config["dedicated_wifi_interface"]:
       from openpilot.starpilot.system.starport.car_interface import DedicatedLease
       strikes = self._dedicated_strikes.get(self.config["receiver_address"], 0)
@@ -1028,11 +1154,22 @@ class Supervisor:
         self.log("wifi_dedicated_skipped", strikes=strikes)
       lease = DedicatedLease(self.log, self.config["wifi_interface"], factory, enabled=strikes < DEDICATED_STRIKES)
       lease.reuse_join = reuse_join
+      lease.channel_memory = channel_memory
       lease.prepare()
       return lease
     lease = factory(self.log, self.config["wifi_interface"])
     lease.reuse_join = reuse_join
+    lease.channel_memory = channel_memory
     return lease
+
+  def _channel_memory(self):
+    from openpilot.starpilot.system.starport.network import ChannelMemory
+    return ChannelMemory(lambda: self.config.get("wifi_channels", {}), self._save_wifi_channels)
+
+  def _save_wifi_channels(self, channels: dict) -> None:
+    with self._lock:
+      self.config["wifi_channels"] = dict(channels)
+      identity_store.save_config(self.config)
 
   def _count_dedicated(self, lease) -> None:
     """A car whose network keeps failing on aa0 but joining on wlan0 stays on wlan0 until the daemon restarts."""
@@ -1278,12 +1415,57 @@ class Supervisor:
     self._set(head_unit=result.head_unit)
     self._remember_fingerprint(result.head_unit)
     bluez.restore_class()  # the car has accepted the comma; stop looking like a phone to everything else
-    keepalive_stop = threading.Event()
-    threading.Thread(target=boot.keepalive, args=(keepalive_stop,), name="aa_rfcomm_keepalive", daemon=True).start()
+    self._start_companion_keeper(tuning)
     try:
-      self._project(result, lease, ident, link_lost=boot.link_closed.is_set if tuning["tcp_stops_with_rfcomm"] else lambda: False)
+      self._project_with_restarts(boot, result, lease, ident, tuning)
     finally:
-      keepalive_stop.set()
+      self._stop_companion_keeper()
+
+  def _project_with_restarts(self, boot, result, lease, ident, tuning: dict) -> None:
+    """Project; when the adapter restarts its handshake while TCP/TLS are still being set up, answer it and connect again.
+
+    2026-11-02 OTTOCAST: the dongle re-sent WifiVersionRequest ~12 s after its network details, 1 s after we had connected
+    to the endpoint it first gave; that socket then sat idle until "disconnected after 0/4 bytes" and a 30 s retry cycle.
+    """
+    restarts = 0
+    limit = int(tuning["setup_restarts"])
+
+    def take_restart() -> bool:
+      if not self._setup_phase or restarts >= limit or self._stop.is_set():
+        return False
+      sock = self._setup_sock
+      if sock is not None:
+        try:
+          sock.shutdown(socket.SHUT_RDWR)  # whoever waits on the dead endpoint stops at once
+        except OSError:
+          pass
+      return True
+
+    boot.on_restart = take_restart
+    link_lost = (lambda: boot.link_closed.is_set() or boot.restarted.is_set()) if tuning["tcp_stops_with_rfcomm"] else (lambda: False)
+    while True:
+      boot.restarted.clear()
+      self._setup_phase = limit > 0
+      keepalive_stop = threading.Event()
+      keepalive = threading.Thread(target=boot.keepalive, args=(keepalive_stop,), name="aa_rfcomm_keepalive", daemon=True)
+      keepalive.start()
+      try:
+        self._project(result, lease, ident, link_lost=link_lost)
+        return
+      except Exception as error:
+        if not (boot.restarted.is_set() and self._setup_phase and not self._stop.is_set()):
+          raise
+        restarts += 1
+        self.log("bootstrap_restarted_during_setup", stage=self._status["last_stage"], restarts=restarts, error=str(error)[:120])
+      finally:
+        self._setup_phase = False
+        keepalive_stop.set()
+      keepalive.join(2.0)
+      self._drop_setup_socket()
+      boot.queue.insert(0, (WIFI_VERSION_REQUEST, boot.restart_payload))
+      self._set(state="wifi_start")
+      result = boot.run(lambda credentials: lease.acquire(credentials, cancelled=boot.join_is_cancelled), cancelled=self._stop.is_set)
+      self._set(head_unit=result.head_unit)
 
   def _discover_channel(self, address: str) -> int:
     from openpilot.starpilot.system.starport import bt_sockets, sdp
@@ -1503,6 +1685,7 @@ class Supervisor:
                link_lost: Callable[[], bool] = lambda: False) -> None:
     config = self.config
     sock = connect() if connect is not None else self._connect_tcp(result, lease, link_lost)
+    self._setup_sock = sock
     ca = ident.root if config.get("verify_head_unit", False) else None
     session = ProjectionSession(sock, ident.cert, ident.key, self.log, ca)
     session.fragment_acks = fragment_acks
@@ -1519,6 +1702,7 @@ class Supervisor:
       self._wait(delay)
     self._stage("negotiating")
     mode = session.start(config["device_name"], "comma.ai")
+    self._setup_phase, self._setup_sock = False, None  # from here a handshake restart is the adapter dropping the session
     self._set(mode=mode.as_dict(), error="")
     self.log("projection_ready", mode=mode.as_dict(), head_unit_subject=session.head_unit_subject)
     try:
@@ -1696,6 +1880,15 @@ class Supervisor:
         next_check = now + 1.0
         if watch.lost:
           raise RuntimeError(watch.lost)
+        keeper = self._companion_keeper
+        if keeper is not None:
+          if session.focused:
+            self._stop_companion_keeper()  # the car handed over; its hands-free link is now its own business
+            hint = ""
+          else:
+            hint = "" if self._companion_link_up() else COMPANION_LINK_HINT
+          if session.focus_epoch == 0 and self._status.get("detail", "") != hint:
+            self._set(detail=hint)
         label = source.label
         source.check(now, focused=session.focused)
         if source.label != label:
