@@ -9,8 +9,10 @@ d = 1 + k*u, a point lands at
   px = cx + y * lateral_ppm / d
   py = bottom - (1 + k) * u / d * depth_px
 
-k = 0 is a plain orthographic top-down view. k > 0 is a mild chase-cam: straight lines stay
-straight, the ego region keeps its scale and distant geometry narrows by 1 / (1 + k).
+k = 0 is a plain orthographic top-down view. With isotropic=True (the default) it is a true-to-scale map:
+one pixels-per-meter forward and sideways at every distance, so lane widths, car outlines and gaps all
+keep their real proportions and a 30 m gap is twice a 15 m one. k > 0 is a mild chase-cam: straight
+lines stay straight, the ego region keeps its scale and distant geometry narrows by 1 / (1 + k).
 """
 from dataclasses import dataclass
 import math
@@ -20,11 +22,26 @@ import numpy as np
 
 @dataclass(frozen=True)
 class BirdsEyeConfig:
-  x_min: float = -6.0          # meters behind the camera shown below the ego origin
-  x_max: float = 80.0          # meters ahead at the top edge
-  lateral_range: float = 10.0  # meters either side visible at the ego, before the scale cap
-  perspective: float = 0.6     # 0 = orthographic, 1 = isotropic at the ego (strong chase cam)
-  max_ppm_fraction: float = 0.045  # lateral pixels-per-meter cap, as a fraction of the rect height
+  """View extent and scale.
+
+  Defaults (chosen for the 1280x720 Android Auto stream, also fine for the overlay panel): a true-to-scale,
+  linear top-down map. perspective 0 + isotropic: one pixels-per-meter in both directions, the forward fit
+  (x_max - x_min over the rect height) sets it unless lateral_range would not fit the width.
+  - x_min -5 / x_max 68: 73 m over ~677 px = ~9.3 px/m at 720 p. The ego outline (front bumper at 1.5 m,
+    4.6 m long) fits above the bottom and a lead at 60 m (rear bumper 61.5 m, front 66.1 m) fits below the top.
+  - Trade-off: true scale makes the road small. A 3.7 m lane is ~34 px and a 4.6 x 1.9 m car
+    ~43 x 18 px at 720 p (half a lane wide);
+    a shorter x_max would enlarge it but cut leads off before 60 m. A 1280 px wide frame shows ~69 m either side,
+    so the neighbouring lanes always fit.
+  - The old default (perspective 0.6) drew a 30 m radar gap as ~17.5 m of ego-car lengths at 1280x720, so the
+    printed distance looked 50-100 % too large for the picture.
+  """
+  x_min: float = -5.0          # meters behind the camera shown below the ego origin
+  x_max: float = 68.0          # meters ahead at the top edge
+  lateral_range: float = 12.0  # meters either side that must fit the width (it lowers the scale if it does not)
+  perspective: float = 0.0     # 0 = orthographic (linear distance), 1 = isotropic at the ego (strong chase cam)
+  isotropic: bool = True       # with perspective 0: one scale forward and sideways (true to scale)
+  max_ppm_fraction: float = 0.045  # non-isotropic only: lateral pixels-per-meter cap, as a fraction of the rect height
   top_pad: float = 0.03        # fractions of the rect height kept clear at the top and bottom
   bottom_pad: float = 0.03
   sample_step: float = 1.5     # meters between resampled line points near the car
@@ -49,6 +66,10 @@ def view_params(rect, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> ViewParams:
   width, height = float(rect.width), float(rect.height)
   depth_px = max(1.0, height * (1.0 - cfg.top_pad - cfg.bottom_pad))
   span = max(1e-3, cfg.x_max - cfg.x_min)
+  if cfg.isotropic and cfg.perspective <= 0:
+    ppm = max(1e-3, min(depth_px / span, width / (2.0 * cfg.lateral_range)))
+    return ViewParams(cx=float(rect.x) + width / 2.0, bottom=float(rect.y) + height * (1.0 - cfg.bottom_pad),
+                      depth_px=ppm * span, lateral_ppm=ppm, k=0.0, x_min=cfg.x_min, x_max=cfg.x_max)
   lateral_ppm = max(1e-3, min(width / (2.0 * cfg.lateral_range), height * cfg.max_ppm_fraction))
   depth_ppm = depth_px / span
   # k at which the ego region is isotropic (equal lateral and forward pixels per meter).
@@ -86,6 +107,21 @@ def depth_scale_at(x, view: ViewParams) -> np.ndarray:
   """Forward pixels per meter at forward distance x (derivative of py)."""
   _, d = _u_and_d(x, view)
   return (1.0 + view.k) * view.depth_px / (view.x_max - view.x_min) / (d * d)
+
+
+def slope_profile(grid: np.ndarray, ys: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+  """(distances, dy/dx) of a resampled line's finite points, or None with fewer than two."""
+  ok = np.isfinite(ys)
+  if np.count_nonzero(ok) < 2:
+    return None
+  gx, gy = grid[ok], ys[ok]
+  return gx, np.gradient(gy, gx)
+
+
+def mean_heading(profiles, x: float) -> float | None:
+  """atan of the mean slope at x over the slope_profiles that cover x; None when none does."""
+  slopes = [float(np.interp(x, gx, dy)) for gx, dy in profiles if gx[0] <= x <= gx[-1]]
+  return math.atan(sum(slopes) / len(slopes)) if slopes else None
 
 
 def widget_y_for_distance(x: float, rect, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
@@ -254,10 +290,14 @@ def lead_color(d_rel: float, v_rel: float) -> tuple[int, int, int]:
   return tuple(int(round(p + (q - p) * t)) for p, q in zip(a, b, strict=True))  # type: ignore[return-value]
 
 
+FEET_PER_METER = 3.28084
+
+
 def distance_label(d_rel: float, metric: bool = True) -> str:
+  """The radar gap (dRel, ego front bumper to lead rear bumper) as printed, with no offset."""
   if metric:
     return f"{max(0.0, d_rel):.0f} m"
-  return f"{max(0.0, d_rel) * 3.28084:.0f} ft"
+  return f"{max(0.0, d_rel) * FEET_PER_METER:.0f} ft"
 
 
 def ego_wheel_angle(steering_angle_deg: float, steer_ratio: float = 15.0, exaggerate: float = 2.0) -> float:

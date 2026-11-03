@@ -23,9 +23,12 @@ RULES: list[dict] = [
   # are always granted; both offer the car-data and Bluetooth channels we leave closed, so open them too (phone_services,
   # 2026-10-31 experiment). Everything below is the operator's experiment set for that dongle and applies to no other
   # adapter; the standard behaviour stays as it was for AAWireless and "Other".
+  # Video window (2026-11-02 drives, session logs 27/28): the Accord offers a window of 4 and the stream ran at a steady
+  # 7 fps whenever its acknowledgements took ~280 ms with only 2 frames in flight (fps = window / ack latency), while the
+  # renderer and encoder kept 30 fps. Use the car's full window; the ACK timeout still catches a silent receiver.
   {"id": "ottocast", "label": "OTTOCAST", "match": {},
    "tuning": {"negotiate_delay_s": 3.0, "phone_services": True, "native_reconnects": 2, "reuse_wifi_join": True,
-              "tcp_stops_with_rfcomm": True}},
+              "tcp_stops_with_rfcomm": True, "max_window": 30}},
 ]
 
 

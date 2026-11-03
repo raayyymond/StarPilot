@@ -18,8 +18,22 @@ def test_ego_bottom_centre_and_far_edge_top():
   assert pts[1, 1] == pytest.approx(RECT.y + RECT.height * cfg.top_pad, abs=1e-3)
 
 
+def test_default_is_isotropic_true_to_scale():
+  cfg = bem.DEFAULT_CONFIG
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  view = bem.view_params(stream, cfg)
+  assert view.k == 0.0
+  assert float(bem.depth_scale_at(30.0, view)) == pytest.approx(view.lateral_ppm), 'one px/m forward and sideways'
+  assert view.lateral_ppm == pytest.approx(720 * (1 - cfg.top_pad - cfg.bottom_pad) / (cfg.x_max - cfg.x_min))
+  narrow = SimpleNamespace(x=0.0, y=0.0, width=200.0, height=720.0)
+  assert bem.view_params(narrow, cfg).lateral_ppm == pytest.approx(200 / (2 * cfg.lateral_range)), 'a narrow rect still fits the lanes'
+  # 3.7 m sideways is the same pixel count as 3.7 m forward.
+  pts = bem.car_to_widget(np.array([[10.0, -1.85], [10.0, 1.85], [13.7, -1.85]]), stream, cfg)
+  assert pts[1, 0] - pts[0, 0] == pytest.approx(pts[0, 1] - pts[2, 1], rel=1e-4)
+
+
 def test_orthographic_is_linear_and_uniform():
-  cfg = bem.BirdsEyeConfig(perspective=0.0)
+  cfg = bem.BirdsEyeConfig(perspective=0.0, isotropic=False)
   xs = np.array([0.0, 10.0, 20.0, 40.0])
   pts = bem.car_to_widget(np.stack((xs, np.full_like(xs, 2.0)), axis=1), RECT, cfg)
   dy = np.diff(pts[:, 1]) / np.diff(xs)
@@ -56,7 +70,7 @@ def test_isotropic_at_ego_with_full_perspective():
 
 
 def test_right_is_positive_and_scale_follows_rect():
-  cfg = bem.BirdsEyeConfig()
+  cfg = bem.BirdsEyeConfig(isotropic=False)
   pts = bem.car_to_widget(np.array([[0.0, -2.0], [0.0, 2.0]]), RECT, cfg)
   assert pts[0, 0] < RECT.x + RECT.width / 2 < pts[1, 0]
   wide = SimpleNamespace(x=0, y=0, width=1800, height=1020)
@@ -262,3 +276,141 @@ def test_ego_glyph_cache_ignores_steering_jitter_below_its_resolution(monkeypatc
     view.scene.steering_deg = steering
     view._ego(view.scene, RECT, rect_key, None)
   assert len(built) == 2, 'sub-0.25 degree wheel changes reuse the glyph; a real turn rebuilds it'
+
+
+def _text_recorder():
+  drawn = []
+  return SimpleNamespace(measure=lambda text, size: (0.5 * size * len(text), size), draw=lambda text, size, *a: drawn.append((text, size))), drawn
+
+
+def test_label_font_is_about_twice_the_first_version():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  view = BirdsEyeRenderer(text=object())
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  old = max(15.0, min(26.0, stream.height * 0.026))
+  assert view._font_size(stream) == pytest.approx(2 * old, rel=0.05)
+  assert view._font_size(SimpleNamespace(height=200.0)) >= 30.0
+  assert view._font_size(SimpleNamespace(height=4000.0)) <= 54.0
+
+
+def test_ego_lane_lines_follow_the_lateral_state():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  from openpilot.starpilot.lateral.lane_feedback import BLUE
+  assert ber.LANE_CENTERING_LANE == BLUE
+  view, radar = _renderer_with_scene()
+
+  def colors():
+    lanes = view._line_styles(view.scene)[len(view.scene.edges):]
+    return [line[3] for line in lanes]
+
+  idle = colors()
+  assert ber.LAT_ACTIVE_LANE not in idle and BLUE not in idle
+  first = _layers(view)
+  view.ingest(None, radar, None, lat_active=True)
+  assert colors()[1:3] == [ber.LAT_ACTIVE_LANE] * 2, 'the ego lane own lines turn green'
+  assert colors()[0] == idle[0] and colors()[3] == idle[3], 'the outer lines keep their color'
+  green = _layers(view)
+  assert green is not first, 'the lateral state is part of the scene cache key'
+  assert _layers(view) is green, 'and an unchanged state still replays the cache'
+  view.ingest(None, radar, None, lane_centering=True)
+  assert colors()[1:3] == [BLUE] * 2, 'blue while the lane-centering correction applies'
+  view.ingest(None, radar, None, lat_active=False)
+  assert colors() == idle, 'centering without lateral control is not shown'
+
+
+def _lateral_sm(frame, lat_active, applied, now_ns, fresh_ns=None):
+  services = {'modelV2': _model(), 'carControl': SimpleNamespace(latActive=lat_active),
+              'starpilotLateralState': SimpleNamespace(laneCentering=SimpleNamespace(
+                version=1, lateralActive=lat_active, requestedCorrection=applied, appliedCorrection=applied,
+                modelMonoTime=now_ns - 1000, carControlMonoTime=now_ns - 1000, reason='ok'))}
+  sm = _SM(services, frame=frame, updated=True)
+  sm.alive = dict.fromkeys(services, True)
+  sm.logMonoTime = dict.fromkeys(services, now_ns - 1000 if fresh_ns is None else fresh_ns)
+  return sm
+
+
+def test_poll_reads_lateral_active_and_lane_centering():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  now = 10_000_000_000
+  view = BirdsEyeRenderer(text=object())
+  view.clock_ns = lambda: now
+  view.poll(_lateral_sm(12, True, 0.0, now), started_frame=10)
+  assert view.scene.lat_active and not view.scene.lane_centering, 'active with no applied correction is green'
+  view.poll(_lateral_sm(12, True, 0.001, now), started_frame=10)
+  assert view.scene.lat_active and view.scene.lane_centering
+  view.poll(_lateral_sm(12, True, 0.001, now, fresh_ns=now - 1_000_000_000), started_frame=10)
+  assert view.scene.lat_active and not view.scene.lane_centering, 'a stale lane-centering message is not blue'
+  view.poll(_lateral_sm(12, False, 0.0, now), started_frame=10)
+  assert not view.scene.lat_active and not view.scene.lane_centering
+  view.poll(_SM({'carControl': SimpleNamespace(latActive=True)}, frame=12, updated=True), started_frame=10)
+  assert view.scene.lat_active and not view.scene.lane_centering, 'a SubMaster without the fork service is green only'
+
+
+def test_distance_rungs_are_gone():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  assert not hasattr(BirdsEyeRenderer, '_ticks')
+
+
+def test_default_forward_scale_is_linear_and_cars_are_true_to_scale():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  cfg = bem.DEFAULT_CONFIG
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  view = bem.view_params(stream, cfg)
+  assert cfg.perspective == 0.0 and view.k == 0.0
+  front = ber.EGO_FRONT
+  xs = np.array([front, front + 15.0, front + 30.0, front + 60.0])
+  ys = bem.car_to_widget(np.stack((xs, np.zeros(4)), axis=1), stream, cfg)[:, 1]
+  gaps = ys[0] - ys[1:]
+  assert gaps / gaps[0] == pytest.approx([1.0, 2.0, 4.0], rel=1e-5), 'twice the distance is twice the pixels'
+  ppm = view.lateral_ppm
+  assert gaps[1] / ppm == pytest.approx(30.0, rel=1e-4), 'the drawn gap is the printed gap'
+  # The printed number is radar dRel unchanged.
+  radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=30.0, yRel=0.0, vRel=0.0),
+                          leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
+  lead = ber.scene_leads(radar, None)[0]
+  assert lead.d_rel == 30.0
+  assert bem.distance_label(lead.d_rel) == '30 m' and bem.distance_label(lead.d_rel, metric=False) == '98 ft'
+  assert bem.distance_label(30.48, metric=False) == '100 ft'
+  # Lead and ego outlines: 4.6 x 1.9 m at the lane lines' px/m, the lead's rear bumper at dRel.
+  assert (ber.EGO_LENGTH, ber.EGO_WIDTH, ber.LEAD_LENGTH, ber.LEAD_WIDTH) == (4.6, 1.9, 4.6, 1.9)
+  renderer = ber.BirdsEyeRenderer(text=object())
+  body = ber._car_body(ber.LEAD_LENGTH, ber.LEAD_WIDTH)
+  cx = lead.d_rel + front + ber.LEAD_LENGTH / 2
+  _, hulls = renderer._cars(view, stream, [(cx, 0.0, 0.0)], body, ber.CAR_LAYOUT, 0, [[(1, 1, 1, 1)] * 3], [(1, 1, 1, 1)])
+  hull = hulls[0]
+  assert np.ptp(hull[:, 0]) / ppm == pytest.approx(1.9, rel=1e-3)
+  assert np.ptp(hull[:, 1]) / ppm == pytest.approx(4.6, rel=1e-3)
+  assert (ys[0] - hull[:, 1].max()) / ppm == pytest.approx(30.0, abs=0.01)
+  assert 3.7 * ppm / np.ptp(hull[:, 0]) == pytest.approx(3.7 / 1.9, rel=1e-3), 'a lane is ~2 car widths'
+  # A 60 m lead's whole outline and the whole ego fit on the stream frame.
+  far = bem.car_to_widget(np.array([[60.0 + front + ber.LEAD_LENGTH, 0.0], [front - ber.EGO_LENGTH, 0.0]]), stream, cfg)
+  assert far[0, 1] > 0 and far[1, 1] < stream.height
+
+
+def test_lead_heading_follows_the_lanes_not_the_planned_path():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  xs = np.linspace(0, 120, 33)
+  model = _model()
+  model.position = _xyz(xs, 0.004 * xs ** 2)  # the plan curves right (steering), the road is straight
+  view = BirdsEyeRenderer(text=object())
+  view.ingest(model, None, None)
+  assert view._heading_at(view.scene, 30.0) > 0.1, 'the path heading bends with the plan'
+  assert view._road_heading(view.scene, 30.0) == pytest.approx(0.0, abs=1e-9), 'the lead follows the road'
+  bent = _model()
+  bent.laneLines = [_xyz(xs, 0.1 * xs + off) for off in (-5.4, -1.8, 1.8, 5.4)]
+  bent.roadEdges = [_xyz(xs, np.full(33, off)) for off in (-7, 7)]
+  view = BirdsEyeRenderer(text=object())
+  view.ingest(bent, None, None)
+  assert view._road_heading(view.scene, 30.0) == pytest.approx(math.atan(0.1))
+  profiles = view._road_profiles(view.scene)
+  assert view._road_profiles(view.scene) is profiles, 'cached per model frame'
+  # Unconfident ego lane lines fall back to the road edges, then to the path.
+  bent.laneLineProbs = [0.9, 0.1, 0.1, 0.9]
+  view = BirdsEyeRenderer(text=object())
+  view.ingest(bent, None, None)
+  assert view._road_heading(view.scene, 30.0) == pytest.approx(0.0, abs=1e-9), 'edges are straight here'
+  bent.roadEdges = []
+  model.laneLineProbs, model.roadEdges, model.position = [0.0] * 4, [], _xyz(xs, 0.1 * xs)
+  view = BirdsEyeRenderer(text=object())
+  view.ingest(model, None, None)
+  assert view._road_heading(view.scene, 30.0) == pytest.approx(math.atan(0.1), abs=1e-6), 'path only without lanes/edges'

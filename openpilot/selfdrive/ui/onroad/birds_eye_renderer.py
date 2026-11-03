@@ -21,7 +21,7 @@ from openpilot.system.ui.lib.shader_polygon import Gradient
 from openpilot.system.ui.widgets import Widget
 
 EGO_FRONT = 1.5      # meters from the camera to the ego front bumper
-EGO_LENGTH = 4.8
+EGO_LENGTH = 4.6     # car outlines are true to scale: 4.6 x 1.9 m, the same px/m as the lane lines
 EGO_WIDTH = 1.9
 LEAD_LENGTH = 4.6
 LEAD_WIDTH = 1.9
@@ -31,6 +31,10 @@ EDGE_WIDTH = 0.28
 MODEL_LEAD_PROB = 0.5
 SMOOTHING = 0.55     # blend toward each new model frame
 LEAD_SMOOTHING = 0.5
+
+LANE_HEADING_PROB = 0.3  # an ego lane line needs this probability to steer the lead glyph's heading
+LAT_ACTIVE_LANE = (52, 216, 104)  # ego lane lines while lateral control is active
+LANE_CENTERING_LANE = (0, 176, 220)  # = lane_feedback.BLUE, while the lane-centering correction applies
 
 THROTTLE = ((13, 248, 122), (114, 255, 92))
 NO_THROTTLE = ((242, 242, 242), (242, 242, 242))
@@ -60,6 +64,8 @@ class BirdsEyeScene:
   engaged: bool = False
   experimental: bool = False
   allow_throttle: bool = True
+  lat_active: bool = False        # carControl.latActive
+  lane_centering: bool = False    # the fork's lane-centering correction is being applied (lane_feedback.direction)
   valid: bool = False
 
 
@@ -215,7 +221,6 @@ SHIELD = np.array([(1.2, -0.62), (0.6, -0.7), (0.6, 0.7), (1.2, 0.62)])
 CAR_LAYOUT = _fan_indices((8, 4, 4))
 EGO_LAYOUT = _fan_indices((4, 4, 4, 4, 8, 4, 4))
 TRIANGLE_LAYOUT = _fan_indices((3,))
-TICK_FADE = ([0.0, 0.6, 0.95], [1.0, 0.8, 0.0])
 WHEEL_STEP = math.radians(0.25)  # ego front-wheel angle resolution
 
 
@@ -224,8 +229,8 @@ class BirdsEyeRenderer(Widget):
 
   panel=True draws a rounded translucent card (overlay); panel=False fills the rect edge to edge.
 
-  Geometry that only changes with the rect, the settings or a new model frame (road, lane lines, distance
-  rungs, the ego glyph) is built once and replayed from cache. Scene arrays are treated as immutable:
+  Geometry that only changes with the rect, the settings, the lateral state or a new model frame (road, lane
+  lines, the ego glyph) is built once and replayed from cache. Scene arrays are treated as immutable:
   ingest() replaces them, and the cache keys on their identity.
   """
 
@@ -243,6 +248,7 @@ class BirdsEyeRenderer(Widget):
     self.long_control = True
     self.parent_clip: rl.Rectangle | None = None
     self.clock = time.monotonic
+    self.clock_ns = time.monotonic_ns  # the logMonoTime clock lane-centering freshness is judged against
     self.scene = BirdsEyeScene(grid=bem.sample_grid(self.config))
     self._throttle_blend = 1.0
     self._last_model_frame = -1
@@ -254,7 +260,7 @@ class BirdsEyeRenderer(Widget):
   # ---- data -------------------------------------------------------------------------------------
 
   def ingest(self, model=None, radar_state=None, car_state=None, *, engaged=None, experimental=None,
-             allow_throttle=None) -> None:
+             allow_throttle=None, lat_active=None, lane_centering=None) -> None:
     """Accept one observation. model=None keeps the last good road geometry."""
     scene = self.scene
     if model is not None:
@@ -280,6 +286,10 @@ class BirdsEyeRenderer(Widget):
       scene.experimental = bool(experimental)
     if allow_throttle is not None:
       scene.allow_throttle = bool(allow_throttle)
+    if lat_active is not None:
+      scene.lat_active = bool(lat_active)
+    if lane_centering is not None:
+      scene.lane_centering = bool(lane_centering)
 
   @staticmethod
   def _smooth_leads(previous, current):
@@ -309,8 +319,19 @@ class BirdsEyeRenderer(Widget):
       experimental = sm['selfdriveState'].experimentalMode
     if fresh('longitudinalPlan'):
       allow = sm['longitudinalPlan'].allowThrottle or not self.long_control
+    lat_active = bool(fresh('carControl') and sm['carControl'].latActive)
+    # Blue only while the fork's own freshness and consistency rules say the correction applies.
+    lane_centering = lat_active and self._lane_centering_direction(sm, started_frame) != 0
     # Without a new modelV2 the road keeps its last good frame; leads, wheel and blinkers still follow.
-    self.ingest(model, radar, car, engaged=engaged, experimental=experimental, allow_throttle=allow)
+    self.ingest(model, radar, car, engaged=engaged, experimental=experimental, allow_throttle=allow,
+                lat_active=lat_active, lane_centering=lane_centering)
+
+  def _lane_centering_direction(self, sm, started_frame: int) -> int:
+    try:
+      from openpilot.starpilot.lateral.lane_feedback import direction
+    except ImportError:
+      return 0
+    return direction(sm, self.clock_ns(), started_frame)
 
   # ---- caching ----------------------------------------------------------------------------------
 
@@ -346,12 +367,7 @@ class BirdsEyeRenderer(Widget):
           target = 1.0 if scene.allow_throttle else 0.0
           self._throttle_blend += (target - self._throttle_blend) * 0.2
         road, lines, path = self._scene_layers(scene, rect, rect_key, view)
-      ticks, labels = self._cached('ticks', (rect_key, self.opacity, self.metric), lambda: self._ticks(rect, view))
-      _emit(road, ticks)
-      for text, size, x, y, shadow, color in labels:
-        self.text.draw(text, size, x + 1.5, y + 1.5, shadow)
-        self.text.draw(text, size, x, y, color)
-      _emit(lines, path)
+      _emit(road, lines, path)
       self._leads(scene, rect, view)
       self._ego(scene, rect, rect_key, view)
     finally:
@@ -416,7 +432,7 @@ class BirdsEyeRenderer(Widget):
     if scene.engaged and mode == 'rainbow' and scene.path is not None:  # animated: rebuilt every frame
       return build()
     key = (rect_key, self.opacity, style.get('laneLines'), tuple(map(id, arrays)), end, self._throttle_blend,
-           scene.engaged, scene.experimental, mode, style.get('path'))
+           scene.engaged, scene.experimental, mode, style.get('path'), self._lateral_rgb(scene))
     return self._cached('scene', key, build, keep=arrays)
 
   def _road_pair(self, scene) -> list:
@@ -424,9 +440,18 @@ class BirdsEyeRenderer(Widget):
       return scene.edges
     return [scene.lanes[0], scene.lanes[3]] if len(scene.lanes) == 4 else []
 
+  @staticmethod
+  def _lateral_rgb(scene):
+    """Ego lane line color for the lateral state: blue while lane centering applies, green while lateral control
+    is active, None (the normal lane color) otherwise."""
+    if scene.lat_active and scene.lane_centering:
+      return LANE_CENTERING_LANE
+    return LAT_ACTIVE_LANE if scene.lat_active else None
+
   def _line_styles(self, scene) -> list[tuple]:
     """(offsets, width m, min width px, rgb, alpha) of each road edge then lane line worth drawing."""
     from openpilot.starpilot.ui.road_colors import lane_color
+    lateral = self._lateral_rgb(scene)
     lines = []
     for i, edge in enumerate(scene.edges):
       std = scene.edge_stds[i] if i < len(scene.edge_stds) else 1.0
@@ -437,6 +462,9 @@ class BirdsEyeRenderer(Widget):
       prob = float(scene.lane_probs[i]) if i < len(scene.lane_probs) else 0.0
       alpha = float(np.clip(prob, 0.0, 0.7)) / 0.7
       if alpha < 0.05:
+        continue
+      if lateral is not None and i in (1, 2):  # the ego lane's own left and right lines
+        lines.append((lane, LANE_WIDTH * 1.6, 3.0, lateral, 245 * alpha * self.opacity))
         continue
       default = _color((236, 240, 248), 235 * alpha)
       color = lane_color(self.road_style, False, default, prob)
@@ -504,31 +532,8 @@ class BirdsEyeRenderer(Widget):
     return layer[:cut_road], layer[cut_road:cut_path], layer[cut_path:]
 
   def _font_size(self, rect) -> float:
-    return max(15.0, min(26.0, rect.height * 0.026))
-
-  def _ticks(self, rect, view) -> tuple[Layer, list]:
-    """Faint distance rungs every 10 m (50 ft), labeled at 20/40/60 m (100/200 ft)."""
-    size = self._font_size(rect)
-    step, labeled, unit, per_unit = (10.0, (20, 40, 60), 'm', 1.0) if self.metric else (50.0, (100, 200), 'ft', 0.3048)
-    count = int(self.config.x_max / (step * per_unit))
-    values = np.arange(1, count + 1) * step
-    distances = values * per_unit
-    ys = bem.car_to_widget(np.stack((distances, np.zeros_like(distances)), axis=1), rect, self.config, view)[:, 1].astype(np.float64)
-    shown = int(np.argmax(ys < rect.y + size * 1.5)) if (ys < rect.y + size * 1.5).any() else len(ys)
-    values, distances, ys = values[:shown], distances[:shown], ys[:shown]
-    half = np.minimum(rect.width / 2 - 14, 11.0 * bem.scale_at(distances, view))
-    fade = np.interp(self._height_fraction(ys, rect), *TICK_FADE)
-    alpha = (24 * fade * self.opacity).astype(np.int32)
-    verts = np.stack((view.cx - half, ys - 0.5, view.cx - half, ys + 0.5, view.cx + half, ys + 0.5, view.cx + half, ys - 0.5), axis=1)
-    labels = []
-    color = rl.Color(170, 180, 198, int(160 * self.opacity))
-    shadow = rl.Color(0, 0, 0, int(color.a * 0.7))
-    for value, y in zip(values.tolist(), ys.tolist(), strict=True):
-      if int(value) in labeled:
-        text = f"{int(value)} {unit}"
-        _, h = self.text.measure(text, size)
-        labels.append((text, size, rect.x + 14, y - h / 2, shadow, color))
-    return _layer([[255, 255, 255, a] * 2 for a in alpha.tolist()], verts), labels
+    """Label size: ~2x the first version (unreadable on a car screen), ~37 px at 720 p."""
+    return max(30.0, min(54.0, rect.height * 0.052))
 
   def _path_profile(self, scene):
     """(distances, offsets, slopes) of the path's finite points, or None: what lateral_at/heading_at derive per call."""
@@ -544,6 +549,25 @@ class BirdsEyeRenderer(Widget):
     """bem.heading_at on the cached path profile."""
     profile = self._path_profile(scene) if scene.path is not None else None
     return 0.0 if profile is None else math.atan(float(np.interp(x, profile[0], profile[2])))
+
+  def _road_profiles(self, scene) -> list[list]:
+    """Slope profiles of the ego lane's two lines (if confident), then of the road edges; cached per model frame."""
+    def build():
+      lanes = [scene.lanes[i] for i in (1, 2) if i < len(scene.lanes) and i < len(scene.lane_probs) and
+               scene.lane_probs[i] >= LANE_HEADING_PROB]
+      return [[p for p in (bem.slope_profile(scene.grid, ys) for ys in group) if p is not None] for group in (lanes, scene.edges)]
+    arrays = (scene.grid, scene.lane_probs, *scene.lanes, *scene.edges)
+    return self._cached('road_profiles', tuple(map(id, arrays)), build, keep=arrays)
+
+  def _road_heading(self, scene, x: float) -> float:
+    """Road direction at x: mean slope of the ego lane lines, else of the road edges, else the planned path.
+
+    The path bends with steering intent; the lane lines are the road, so a lead glyph does not turn with the wheel."""
+    for profiles in self._road_profiles(scene):
+      heading = bem.mean_heading(profiles, x)
+      if heading is not None:
+        return heading
+    return self._heading_at(scene, x)
 
   def _path_end(self, scene) -> float:
     end = self.config.x_max
@@ -587,7 +611,9 @@ class BirdsEyeRenderer(Widget):
 
   def _cars(self, view, rect, poses, local, layout, hull_at: int, colors, outlines) -> tuple[list[Layer], np.ndarray]:
     """Car glyphs in one batch: poses (C, 3) of (x, y, heading), shared car-frame points local (P, 2) filled per
-    layout with colors (C, polygons, 4), then outlines (C, 4). Returns one layer per car and the hulls (C, 8, 2)."""
+    layout with colors (C, polygons, 4), then outlines (C, 4). Returns one layer per car and the hulls (C, 8, 2).
+
+    Drawn in car-frame meters through the view mapping, so with the default isotropic view they are true to scale."""
     poses = np.asarray(poses, dtype=np.float64).reshape(-1, 3)
     cos_h, sin_h = np.cos(poses[:, 2]), np.sin(poses[:, 2])
     pts = np.empty((poses.shape[0], local.shape[0], 2))
@@ -620,8 +646,9 @@ class BirdsEyeRenderer(Widget):
       return
     poses, colors, outlines, rgbs = [], [], [], []
     for lead in leads:
+      # The outline's rear bumper is at dRel ahead of the ego front bumper: exactly the gap the label prints.
       cx = lead.d_rel + EGO_FRONT + LEAD_LENGTH / 2
-      poses.append((cx, lead.y, self._heading_at(scene, cx)))
+      poses.append((cx, lead.y, self._road_heading(scene, cx)))
       rgb = bem.lead_color(lead.d_rel, lead.v_rel if math.isfinite(lead.v_rel) else 0.0)
       a = (1.0 if lead.radar else 0.7) * self.opacity
       glass = (64, 72, 88, int(170 * a))
@@ -638,7 +665,7 @@ class BirdsEyeRenderer(Widget):
       if x + w > rect.x + rect.width - 8:
         x = float(screen[:, 0].min()) - 10 - w
       color = _color(rgb, 255 * self.opacity)
-      y = float(screen[:, 1].mean()) - h / 2
+      y = min(max(float(screen[:, 1].mean()) - h / 2, rect.y + 4), rect.y + rect.height - h - 4)
       self.text.draw(text, size, x + 1.5, y + 1.5, rl.Color(0, 0, 0, int(color.a * 0.7)))
       self.text.draw(text, size, x, y, color)
 

@@ -50,7 +50,8 @@ def test_ottocast_tuning_applies_only_when_chosen():
   chosen = config(car_profile_override="ottocast")
   assert car_profiles.resolve(chosen) == ("ottocast", "override")
   assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "negotiate_delay_s": 3.0, "phone_services": True,
-                                         "native_reconnects": 2, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True}
+                                         "native_reconnects": 2, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True,
+                                         "max_window": 30}  # the car's full video window (it offers 4): 2 in flight capped the stream at 7 fps
   assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST"
   for other in (config(), config(car_profile_override="default"), config(car_profile_override="aawireless")):
     tuning = car_profiles.tuning(other)

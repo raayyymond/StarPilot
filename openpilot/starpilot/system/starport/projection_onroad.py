@@ -161,11 +161,16 @@ def birds_eye_dependencies():
     from opendbc.car.structs import car
     return bool(messaging.log_from_bytes(raw, car.CarParams).openpilotLongitudinalControl)
 
+  def birds_eye_hud(text, source):
+    """The acceleration bar and torque arc over the birds-eye view (imported only when built)."""
+    from openpilot.starpilot.system.starport.birds_eye_hud import BirdsEyeHud
+    return BirdsEyeHud(rl, text, source)
+
   standby_logo = standby_logo_loader(rl)
   return SimpleNamespace(rl=rl, ui_state=ui_state, fonts=BitmapFonts, font_role=FontRole, profile=Profile,
                          font_directory=default_font_directory, standby_logo=standby_logo,
                          birds_eye=BirdsEyeRenderer, birds_eye_text=BitmapText, road_style=road_style,
-                         long_control=long_control)
+                         long_control=long_control, birds_eye_hud=birds_eye_hud)
 
 
 def standby_logo_loader(rl):
@@ -305,6 +310,10 @@ class ProjectionOnroad:
     ui = native.ui_state
     text = native.birds_eye_text(self.fonts) if getattr(native, 'birds_eye_text', None) is not None else None
     self.birds_eye = native.birds_eye(text=text, source=lambda: (ui.sm, ui.started_frame))
+    self.hud = None
+    if getattr(native, 'birds_eye_hud', None) is not None:
+      self.hud = native.birds_eye_hud(text, lambda: (ui.sm, getattr(ui, 'CP', None)))
+      self._resources.callback(self.hud.close)
 
   def _refresh_birds_eye_settings(self, now_ns):
     """Road colors and longitudinal control change rarely; re-read them once a second, never per frame."""
@@ -328,14 +337,18 @@ class ProjectionOnroad:
         self.birds_eye.long_control = long_control
 
   def _render_birds_eye_only(self):
-    """The birds-eye view edge to edge over the whole logical frame: no border, inset, HUD or brand text."""
+    """The birds-eye view over the logical frame, clear of the HUD's acceleration strip and torque dock; no border or brand text."""
     view = self.birds_eye
     view.panel = False
     view.opacity = 1.0
     view.parent_clip = None
     view.metric = bool(getattr(self.native.ui_state, 'is_metric', True))
     view.road_style = self._road_style
-    view.render(self.native.rl.Rectangle(0, 0, self.width, self.height))
+    hud = getattr(self, 'hud', None)
+    rect = hud.view_rect(self.width, self.height) if hud is not None else (0, 0, self.width, self.height)
+    view.render(self.native.rl.Rectangle(*rect))
+    if hud is not None:
+      hud.render(self.width, self.height)
 
   @staticmethod
   def create_view(view_factory, fonts, *, viewport, **layers):

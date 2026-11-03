@@ -94,6 +94,40 @@ class TestBirdsEyeOnly(unittest.TestCase):
     self.assertNotIn('exit_button', events)
     self.assertFalse([event for event in events if isinstance(event, tuple)], 'no StarPilot brand text')
 
+  def test_birds_eye_view_yields_the_hud_areas_and_the_hud_draws_after_it(self):
+    native, _ = self.native()
+    order = []
+    native.ui_state.CP = 'CP'
+
+    class Hud:
+      def __init__(self, text, source):
+        self.text, self.source = text, source
+
+      @staticmethod
+      def view_rect(width, height):
+        return 84, 0, width - 84, height - 64
+
+      def render(self, width, height):
+        order.append(('hud', len(view.birds_eye.rendered), width, height, self.source()[1]))
+
+      def close(self):
+        order.append('hud_closed')
+
+    native.birds_eye_hud = Hud
+    view = self.view(native)
+    self.assertEqual(view.hud.text[0], 'text', 'the HUD shares the birds-eye bitmap text drawer')
+    native.ui_state.started = True
+    view.render()
+    self.assertEqual(view.birds_eye.rendered[0][0], (84, 0, VIEWPORT[0] - 84, VIEWPORT[1] - 64))
+    self.assertEqual(order, [('hud', 1, *VIEWPORT, 'CP')], 'drawn after the birds-eye view')
+    view.close()
+    self.assertEqual(order[-1], 'hud_closed')
+
+  def test_dependencies_build_the_hud_lazily(self):
+    source = (ROOT / 'projection_onroad.py').read_text()
+    self.assertNotIn('birds_eye_hud import', source.split('def birds_eye_dependencies')[0], 'no module-level HUD import')
+    self.assertIn('from openpilot.starpilot.system.starport.birds_eye_hud import BirdsEyeHud', source)
+
   def test_settings_are_read_once_a_second_and_failures_keep_defaults(self):
     reads = []
 

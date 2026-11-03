@@ -23,3 +23,9 @@ A first read of a slow stream: if `encoder` says `libx264`, the hardware encoder
 software path caps at 15 fps on a comma; if `stats.fps` is low while `render_stats.fps` is near 30, the
 encoder or the Wi-Fi link is the limit (`encode_ms`, `frame_age_p95_ms`, `wifi_dbm`); if
 `render_stats.fps` itself is low, the phase means say which part of the renderer is slow.
+
+Receiver flow control: `stats.pending` is the number of frames the head unit has not acknowledged and
+`video_setup` records the window it offered (`window`) and the one used (`used_window`). When `pending`
+sits at `used_window` in every sample, the stream is ack-bound and runs at about `used_window / ack
+latency`: on 2026-11-02 the Accord acknowledged after ~280 ms, so 2 in flight gave a steady 7 fps while
+the renderer and encoder held 30. The OTTOCAST profile now uses the car's full offer (4).

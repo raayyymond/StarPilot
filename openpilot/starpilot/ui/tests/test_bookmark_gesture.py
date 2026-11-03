@@ -159,3 +159,17 @@ def test_short_swipe_rejects_slow_drag_jitter_release_jump_pause_reversal_and_ba
     n.frame(n.event(x, pressed=index == 0, down=index != 3, released=index == 3, timestamp=timestamp))
   n.callback.assert_not_called()
   assert n.page.rect.x == 0
+
+
+def test_streaming_blackout_keeps_the_bookmark_swipe(navigation):
+  """Android Auto streaming blacks out the onroad view (onroad.OnroadView._alerts_only); the swipe is handled by the
+  main layout and the icon is drawn by the shell page after the view, so bookmarking works on the black screen."""
+  n = navigation
+  order = []
+  n.page.session.render.side_effect = lambda *_: order.append('black view')
+  n.bookmark._render.side_effect = lambda *_: order.append('bookmark icon')
+  events = [n.event(400, pressed=True, down=True), n.event(380, down=True), n.event(230, down=True), n.event(230, released=True)]
+  for event in events:
+    n.frame(event)
+  n.callback.assert_called_once()
+  assert order[-2:] == ['black view', 'bookmark icon']
