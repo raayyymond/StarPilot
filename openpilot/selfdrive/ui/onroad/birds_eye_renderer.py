@@ -439,7 +439,7 @@ class BirdsEyeRenderer(Widget):
     self.parent_clip: rl.Rectangle | None = None
     self.clock = time.monotonic
     self.clock_ns = time.monotonic_ns  # the logMonoTime clock lane-centering freshness is judged against
-    self.scene = BirdsEyeScene(grid=bem.sample_grid(self.config))
+    self.scene = BirdsEyeScene(grid=bem.sample_grid(bem.zoomed_config(self.config, bem.far_x_max(self.config))))
     self._throttle_blend = 1.0
     self._last_model_frame = -1
     self._rainbow = None
@@ -589,7 +589,7 @@ class BirdsEyeRenderer(Widget):
     self.draw(rect)
 
   def view_config(self) -> bem.BirdsEyeConfig:
-    """self.config zoomed for the current speed, tightened to a radar leadOne (filtered and quantized: see
+    """self.config zoomed for the current speed, widened to keep a radar leadOne on screen (filtered and quantized: see
     bem.ZoomFilter)."""
     if self._zoom.cfg is not self.config:
       self._zoom = bem.ZoomFilter(self.config)
@@ -756,7 +756,7 @@ class BirdsEyeRenderer(Widget):
     if pair:
       (a, a_std), (b, b_std) = pair
       end = min(reach, bem.std_end(grid, a_std), bem.std_end(grid, b_std))
-      rows = bem.line_rows(grid, np.where(np.isfinite(b), a, np.nan), end, view.x_min, self._tail_step(view))
+      rows = bem.line_rows(grid, np.where(np.isfinite(b), a, np.nan), end, view.x_min, self._tail_step(view), view.x_max)
       if rows is not None:
         xs, ya, ok, end, fade = rows
         ok_b = np.isfinite(b)
@@ -769,7 +769,7 @@ class BirdsEyeRenderer(Widget):
     # Lines with the same rows (the usual case: one model frame, one end) share one projection and ribbon pass.
     styles = self._line_styles(scene)
     step = self._tail_step(view)
-    rows = [bem.line_rows(grid, line[0], min(reach, bem.std_end(grid, line[5])), view.x_min, step) for line in styles]
+    rows = [bem.line_rows(grid, line[0], min(reach, bem.std_end(grid, line[5])), view.x_min, step, view.x_max) for line in styles]
     batches: dict = {}
     for i, r in enumerate(rows):
       if r is not None:

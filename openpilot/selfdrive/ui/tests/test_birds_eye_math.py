@@ -498,34 +498,42 @@ def test_zoom_rate_is_limited():
   dt = 1 / 30
   previous, values = cfg.x_max, []
   for _ in range(300):
-    values.append(zoom.update(30.0, dt, 20.0))
+    values.append(zoom.update(30.0, dt, 200.0))
+    assert values[-1] - previous <= bem.ZOOM_MAX_RATE * dt + bem.ZOOM_STEP + 1e-9, 'x_max never grows faster than the limit'
+    previous = values[-1]
+  assert values[-1] == bem.ZOOM_FAR_X_MAX
+  first_at_cap = next(i for i, v in enumerate(values) if v == bem.ZOOM_FAR_X_MAX)
+  assert first_at_cap * dt >= (bem.ZOOM_FAR_X_MAX - cfg.x_max) / bem.ZOOM_MAX_RATE - dt, 'the glide takes its time'
+  start = zoom.value
+  for _ in range(60):
+    values.append(zoom.update(30.0, dt, None))
     assert previous - values[-1] <= bem.ZOOM_MAX_RATE * dt + bem.ZOOM_STEP + 1e-9, 'x_max never drops faster than the limit'
     previous = values[-1]
-  assert values[-1] == bem.ZOOM_NEAR_X_MAX
-  first_at_floor = next(i for i, v in enumerate(values) if v == bem.ZOOM_NEAR_X_MAX)
-  assert first_at_floor * dt >= (cfg.x_max - bem.ZOOM_NEAR_X_MAX) / bem.ZOOM_MAX_RATE - dt, 'the glide takes its time'
-  for _ in range(60):
-    zoom.update(30.0, dt, None)
-  assert zoom.value - bem.ZOOM_NEAR_X_MAX <= bem.ZOOM_MAX_RATE * 2 + 0.01, 'widening is limited the same way'
+  assert start - zoom.value <= bem.ZOOM_MAX_RATE * 2 + 0.01, 'tightening is limited the same way'
 
 
-def test_zoom_tightens_to_a_radar_lead():
+def test_zoom_widens_to_keep_a_radar_lead_on_screen():
   cfg = bem.DEFAULT_CONFIG
   from openpilot.selfdrive.ui.onroad.birds_eye_renderer import EGO_FRONT, LEAD_LENGTH
   def front(d_rel):
     return d_rel + EGO_FRONT + LEAD_LENGTH
-  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max, 'no lead: the speed preset'
-  assert bem.lead_zoom_x_max(30.0, front(20.0)) == pytest.approx(20.0 + EGO_FRONT + LEAD_LENGTH + bem.ZOOM_LEAD_BUFFER)
-  assert bem.lead_zoom_x_max(30.0, front(55.0)) == pytest.approx(67.1), 'a far lead still fits under the preset'
-  assert bem.lead_zoom_x_max(30.0, front(80.0)) == cfg.x_max, 'never wider than the preset'
-  assert bem.lead_zoom_x_max(30.0, front(5.0)) == bem.ZOOM_NEAR_X_MAX, 'never tighter than the city view'
-  assert bem.lead_zoom_x_max(5.0, front(20.0)) == bem.ZOOM_NEAR_X_MAX
+  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max == 68.0, 'no lead: the speed preset'
+  assert bem.lead_zoom_x_max(30.0, front(20.0)) == cfg.x_max, 'a near lead never tightens the preset'
+  assert bem.lead_zoom_x_max(30.0, front(55.0)) == cfg.x_max, 'a lead that fits keeps the preset'
+  assert bem.lead_zoom_x_max(30.0, front(80.0)) == pytest.approx(80.0 + EGO_FRONT + LEAD_LENGTH + bem.ZOOM_LEAD_BUFFER)
+  assert bem.lead_zoom_x_max(30.0, front(200.0)) == bem.ZOOM_FAR_X_MAX == bem.far_x_max(cfg), 'capped at the widest zoom'
+  assert bem.lead_zoom_x_max(5.0, front(10.0)) == bem.ZOOM_NEAR_X_MAX, 'never tighter than the city view'
+  assert bem.lead_zoom_x_max(5.0, front(20.0)) == pytest.approx(front(20.0) + bem.ZOOM_LEAD_BUFFER), 'widens the city view too'
   zoom = bem.ZoomFilter()
-  assert zoom.update(30.0, 0.0, front(20.0)) == 32.0, 'quantized to ZOOM_STEP'
-  assert zoom.update(30.0, 0.0, None) == 32.0, 'the change is filtered, not a jump'
+  assert zoom.update(30.0, 0.0, front(80.0)) == 92.0, 'quantized to ZOOM_STEP (92.1 m)'
+  assert zoom.update(30.0, 0.0, None) == 92.0, 'the change is filtered, not a jump'
   for _ in range(300):
     zoom.update(30.0, 1 / 30, None)
   assert zoom.x_max == cfg.x_max, 'the lead gone: back to the preset'
+  zoom.update(30.0, 0.0, front(200.0))
+  for _ in range(300):
+    zoom.update(30.0, 1 / 30, front(200.0))
+  assert zoom.x_max == bem.ZOOM_FAR_X_MAX, 'x_max may pass cfg.x_max, up to ZOOM_FAR_X_MAX'
 
 
 def test_renderer_zoom_follows_the_radar_lead_one():
@@ -534,7 +542,13 @@ def test_renderer_zoom_follows_the_radar_lead_one():
   view.clock = lambda: 0.0
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
   view.scene.lead_one_d = 20.0
-  assert view.view_config().x_max == 32.0
+  assert view.view_config().x_max == view.config.x_max, 'a near lead keeps the preset'
+  view = BirdsEyeRenderer(text=object())
+  view.clock = lambda: 0.0
+  view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
+  view.scene.lead_one_d = 80.0
+  wide = view.view_config()
+  assert wide.x_max == 92.0 and wide.lateral_range == pytest.approx(view.config.lateral_range * 97 / 73), 'same aspect'
   view = BirdsEyeRenderer(text=object())
   view.clock = lambda: 0.0
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
@@ -552,7 +566,41 @@ def test_renderer_zoom_rebuilds_the_view_only_on_a_step():
   assert first.x_max == bem.ZOOM_NEAR_X_MAX and first.x_min == view.config.x_min
   now[0] += 1 / 30
   assert view.view_config() == first
-  assert view.scene.grid[-1] == view.config.x_max, 'the scene grid spans the widest zoom'
+  assert view.scene.grid[-1] == bem.ZOOM_FAR_X_MAX > view.config.x_max, 'the scene grid spans the widest zoom'
+
+
+def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  view = ber.BirdsEyeRenderer(text=SimpleNamespace(measure=lambda text, size: (10.0, 10.0), draw=lambda *args: None))
+  now = [0.0]
+  view.clock = lambda: now[0]
+  radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=90.0, yRel=0.0, vRel=0.0),
+                          leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
+  view.ingest(_model(), None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
+  assert view.view_config().x_max == view.config.x_max, 'no lead yet: the highway preset'
+  view.ingest(None, radar, None)  # a lead appears 90 m ahead
+  poses = []
+  monkeypatch.setattr(view, '_cars', lambda v, rect, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 8, 2))))
+  monkeypatch.setattr(ber, '_run', lambda *a: None)
+  monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
+
+  def draw_leads():
+    cfg = view.view_config()
+    view._leads(view.scene, RECT, bem.view_params(RECT, cfg))
+    return cfg
+  assert draw_leads().x_max < 70.0
+  assert not poses, 'beyond the preset view until the zoom catches up'
+  for _ in range(300):  # 10 s at 30 Hz
+    now[0] += 1 / 30
+    cfg = draw_leads()
+  assert cfg.x_max == 102.0, '90 + 1.5 + 4.6 + 6 = 102.1, quantized'
+  assert poses and poses[-1][0] == pytest.approx(90.0 + ber.EGO_FRONT + ber.LEAD_LENGTH / 2)
+  assert view.scene.grid[-1] >= cfg.x_max, 'the grid reaches the top edge'
+  pv = bem.view_params(RECT, cfg)
+  road = view._road_draw(view.scene, RECT, (float(RECT.x), float(RECT.y), float(RECT.width), float(RECT.height), cfg), pv)
+  reach = min(cfg.x_max, view.scene.draw_distance)  # the camera's MAX_DRAW_DISTANCE (100 m) is below this top edge
+  top = bem.car_to_widget(np.array([[reach, 0.0]]), RECT, cfg, pv)[0, 1]
+  assert min(_op_points(op)[:, 1].min() for op in _draw_ops(road.lines)) <= top + 0.5, 'the lines are not cut at 68 m'
 
 
 def test_lines_stop_at_the_camera_draw_distance_and_the_path_at_the_camera_lead_cut():

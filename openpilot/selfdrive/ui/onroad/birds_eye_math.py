@@ -33,6 +33,9 @@ class BirdsEyeConfig:
     ~43 x 18 px at 720 p (half a lane wide);
     a shorter x_max would enlarge it but cut leads off before 60 m. A 1280 px wide frame shows ~69 m either side,
     so the neighbouring lanes always fit.
+  - x_max is the highway speed preset, not a ceiling: the renderer zooms this config (zoomed_config) between
+    ZOOM_NEAR_X_MAX and far_x_max (ZOOM_FAR_X_MAX, 120 m) to keep a radar lead on screen, and its sample_grid
+    spans that widest zoom.
   - The old default (perspective 0.6) drew a 30 m radar gap as ~17.5 m of ego-car lengths at 1280x720, so the
     printed distance looked 50-100 % too large for the picture.
   """
@@ -51,9 +54,11 @@ DEFAULT_CONFIG = BirdsEyeConfig()
 
 # Speed-based zoom. The view shows roughly the next 2.3-3 s of travel: 30 m ahead at city speed (<= 10 m/s,
 # ~20 px/m at 720 p, a 3.7 m lane ~75 px) widening linearly to the default 68 m at highway speed (>= 30 m/s,
-# ~9.3 px/m). 20 m/s (72 km/h) shows 49 m. With a radar leadOne the view tightens to the lead's front bumper plus
-# ZOOM_LEAD_BUFFER (never below ZOOM_NEAR_X_MAX), so the gap fills the screen instead of a thin strip.
+# ~9.3 px/m). 20 m/s (72 km/h) shows 49 m. A radar leadOne always stays on screen: when its front bumper plus
+# ZOOM_LEAD_BUFFER is beyond the speed preset the view widens to it (up to ZOOM_FAR_X_MAX, ~5 px/m at 720 p);
+# a nearer lead never tightens the view below the preset.
 ZOOM_NEAR_X_MAX = 30.0
+ZOOM_FAR_X_MAX = 120.0  # m, the widest zoom: radar and model leads are reported out to ~100+ m
 ZOOM_SLOW_SPEED = 10.0
 ZOOM_FAST_SPEED = 30.0
 ZOOM_TAU = 1.0    # s, first-order filter time constant
@@ -71,14 +76,20 @@ def zoom_x_max(v_ego: float, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
   return near + (cfg.x_max - near) * min(1.0, max(0.0, t))
 
 
-def lead_zoom_x_max(v_ego: float, lead_front: float | None, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
-  """zoom_x_max, tightened to lead_front + ZOOM_LEAD_BUFFER (never below ZOOM_NEAR_X_MAX) when a lead is given.
+def far_x_max(cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
+  """The widest zoom: ZOOM_FAR_X_MAX (or cfg.x_max if that is further)."""
+  return max(cfg.x_max, ZOOM_FAR_X_MAX)
 
+
+def lead_zoom_x_max(v_ego: float, lead_front: float | None, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
+  """zoom_x_max, widened to lead_front + ZOOM_LEAD_BUFFER (at most far_x_max) when a lead is given beyond it.
+
+  A lead never tightens the view below the speed preset, so it widens it only.
   lead_front: the lead's front bumper ahead of the camera (m), dRel + ego front + lead length; None without a lead."""
   preset = zoom_x_max(v_ego, cfg)
   if lead_front is None or not math.isfinite(lead_front):
     return preset
-  return max(min(ZOOM_NEAR_X_MAX, cfg.x_max), min(preset, lead_front + ZOOM_LEAD_BUFFER))
+  return min(far_x_max(cfg), max(preset, lead_front + ZOOM_LEAD_BUFFER))
 
 
 def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
@@ -90,7 +101,7 @@ def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
 
 
 class ZoomFilter:
-  """First-order filtered, rate-limited, quantized x_max for the speed-based (and lead-tightened) zoom.
+  """First-order filtered, rate-limited, quantized x_max for the speed-based (and lead-widened) zoom.
 
   The filter never moves faster than max_rate (m/s) however far the target jumps (a lead appearing or vanishing),
   so the view always glides. The quantized value only moves once the filter is more than 3/4 of a step away from it, so speed noise near a
@@ -113,7 +124,7 @@ class ZoomFilter:
       delta = (target - self.value) * alpha
       self.value += max(-self.max_rate * dt, min(self.max_rate * dt, delta))
     if abs(self.value - self.x_max) >= 0.75 * self.step:
-      self.x_max = min(self.cfg.x_max, round(self.value / self.step) * self.step)
+      self.x_max = min(far_x_max(self.cfg), round(self.value / self.step) * self.step)
     return self.x_max
 
 
@@ -464,12 +475,13 @@ def std_end(grid: np.ndarray, y_std: np.ndarray | None, limit: float = LINE_STD_
   return float(grid[over[0]]) if over.size else math.inf
 
 
-def line_rows(grid: np.ndarray, ys: np.ndarray, end: float, start: float, step: float = 0.75):
+def line_rows(grid: np.ndarray, ys: np.ndarray, end: float, start: float, step: float = 0.75, top: float = math.inf):
   """Rows to draw a resampled line up to `end` with a soft end: its grid rows before the fade, then every `step`
   metres over the fade (bem.end_fade_length from `start`, the view's bottom), the last row exactly at the end.
 
   Returns (xs, lateral, valid, end, fade length) or None with nothing to draw. The end is also cut at the line's
-  own data (no fade when that is the grid's end); rows inside a gap of the line are invalid."""
+  own data (no fade when that is the grid's end, or when the whole fade is beyond `top`, the view's top edge);
+  rows inside a gap of the line are invalid."""
   ok = np.isfinite(ys)
   if np.count_nonzero(ok) < 2:
     return None
@@ -480,6 +492,8 @@ def line_rows(grid: np.ndarray, ys: np.ndarray, end: float, start: float, step: 
     return None
   # A line running to the grid's end runs off the widest view: no soft end there.
   fade = 0.0 if end >= grid[-1] - 1e-6 else end_fade_length(max(start, first), end)
+  if end - fade >= top:  # the soft end is off the top of the view
+    fade = 0.0
   body = grid[(grid >= first) & (grid < end - fade)]
   xs = np.concatenate((body, np.arange(end - fade, end, step), [end]))
   lateral = np.interp(xs, gx, ys[ok])
