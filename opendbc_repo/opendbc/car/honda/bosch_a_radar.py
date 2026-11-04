@@ -122,7 +122,7 @@ def _create_bosch_a_can_parser(CP):
   return CANParser(DBC[CP.carFingerprint][Bus.radar], messages, CanBus(CP).camera)
 
 
-VERIFIED_BOSCH_A_CARS = frozenset((CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+VERIFIED_BOSCH_A_CARS = frozenset((CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
 
 
 class BoschARadar(RadarInterfaceBase):

@@ -5,6 +5,7 @@ from opendbc.can.dbc import DBC as CANDBC
 from opendbc.car import Bus, get_safety_config, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.disable_ecu import disable_ecu
+from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.values import CarControllerParams, HondaFlags, CAR, HondaSafetyFlags, MANUAL_TRANS_CARS, MODIFIED_EPS_FW, DBC, \
                                      is_accord_eps_angle_loop_fw
@@ -50,7 +51,7 @@ class CarInterface(CarInterfaceBase):
         cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
       ret.safetyConfigs = cfgs
 
-      ret.radarUnavailable = docs or candidate not in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G)
+      ret.radarUnavailable = docs or candidate not in VERIFIED_BOSCH_A_CARS
       # Disable the radar and let openpilot control longitudinal
       # WARNING: THIS DISABLES AEB!
       # If Bosch radarless, this blocks ACC messages from the camera

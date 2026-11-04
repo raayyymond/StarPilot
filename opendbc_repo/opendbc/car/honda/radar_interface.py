@@ -2,7 +2,8 @@
 from opendbc.can import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.interfaces import RadarInterfaceBase
-from opendbc.car.honda.values import CAR, DBC
+from opendbc.car.honda.values import DBC
+from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS
 
 
 def _create_nidec_can_parser(car_fingerprint):
@@ -18,7 +19,7 @@ class RadarInterface(RadarInterfaceBase):
     self.radar_wrong_config = False
     self.radar_off_can = CP.radarUnavailable
     self.bosch_a = None
-    if not self.radar_off_can and CP.carFingerprint in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G):
+    if not self.radar_off_can and CP.carFingerprint in VERIFIED_BOSCH_A_CARS:
       from opendbc.car.honda.bosch_a_radar import BoschARadar
       self.bosch_a = BoschARadar(CP)
       self.rcp = self.bosch_a.rcp

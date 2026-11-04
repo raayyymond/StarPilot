@@ -67,7 +67,7 @@ def sweep(bus, index, timestamp, with_aux=True):
   return [(timestamp, frames)]
 
 
-@pytest.mark.parametrize("identity", (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+@pytest.mark.parametrize("identity", (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
 def test_actual_parser_points_silence_retires_and_new_track_recovers(identity):
   cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], False, False, False)
   assert not cp.radarUnavailable
@@ -86,7 +86,7 @@ def test_actual_parser_points_silence_retires_and_new_track_recovers(identity):
   assert len(ri.update(sweep(bus, 3, 1_533_333_334)).points) == 1
 
 
-@pytest.mark.parametrize("identity", (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+@pytest.mark.parametrize("identity", (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
 def test_wrong_bus_cannot_create_radar_points(identity):
   cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], False, False, False)
   ri = RadarInterface(cp)
@@ -95,14 +95,14 @@ def test_wrong_bus_cannot_create_radar_points(identity):
   assert not ri.bosch_a.pts
 
 
-@pytest.mark.parametrize("identity", (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH_DIESEL, CAR.HONDA_CIVIC_2022, CAR.HONDA_ACCORD_11G))
+@pytest.mark.parametrize("identity", (CAR.HONDA_CIVIC_BOSCH_DIESEL, CAR.HONDA_CIVIC_2022, CAR.HONDA_ACCORD_11G))
 def test_unverified_bosch_factory_has_no_radar_decoder(identity):
   cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], False, False, False)
   assert cp.radarUnavailable
   assert RadarInterface(cp).rcp is None
 
 
-@pytest.mark.parametrize("identity", (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+@pytest.mark.parametrize("identity", (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
 @pytest.mark.parametrize("saved_raw,available", ((None, True), (b"1", True), (b"0", False), (b"broken", False)))
 def test_actual_card_startup_publishes_radar_preference_before_construction(identity, saved_raw, available, monkeypatch):
   from opendbc.car import car_helpers
@@ -162,7 +162,7 @@ def test_actual_card_startup_publishes_radar_preference_before_construction(iden
       gc.collect()
 
 
-@pytest.mark.parametrize("candidate", (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+@pytest.mark.parametrize("candidate", (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
 def test_selected_bosch_a_direct_update_uses_its_actual_protocol(candidate):
   cp = CarInterface.get_params(candidate, gen_empty_fingerprint(), [], False, False, False)
   cp.radarUnavailable = False
