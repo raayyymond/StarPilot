@@ -55,6 +55,8 @@ UNAVAILABLE_AFTER = 1.0      # focused but no fresh UI frame for this long -> "u
 SDP_SETTLE = (1.5, 2.2, 3.0)
 TCP_ATTEMPTS = 6
 MAX_LOG_FILES = 20
+DAEMON_LOG = "daemon.jsonl"   # events logged between sessions (what held an auto-connect start); rolls to daemon.1.jsonl
+DAEMON_LOG_BYTES = 256 << 10
 LOG_QUEUE_MAX = 1000          # session log records waiting for the writer; past this they are dropped and counted
 ENCODER_RECOVERIES = 3       # hardware encoder reopens allowed per window before the session is torn down
 ENCODER_RECOVERY_WINDOW = 10.0
@@ -261,6 +263,7 @@ class EventLog:
 
   def __init__(self, directory: Path | None = None):
     self.directory = directory or identity_store.LOG_DIR
+    self.daemon_path = self.directory / DAEMON_LOG
     self.recent: deque[dict] = deque(maxlen=40)
     self.lock = threading.Lock()
     self._queue: queue.Queue = queue.Queue(maxsize=LOG_QUEUE_MAX)
@@ -326,11 +329,29 @@ class EventLog:
   def _line(self, record: dict) -> str:
     return json.dumps(record, default=str) + "\n"
 
+  def _daemon(self, record: dict) -> None:
+    """Between sessions, records go to a small rolling file beside the session logs.
+
+    2026-11-03: a cold boot's start was held 23 s by pre-session Bluetooth paging, and nothing in the bundle showed
+    it; the device journal misses the first ~50 s after a boot and these records only lived in ``recent``.
+    """
+    try:
+      self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+      path = self.daemon_path
+      if path.is_file() and path.stat().st_size >= DAEMON_LOG_BYTES:
+        os.replace(path, path.with_name("daemon.1.jsonl"))
+      fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+      with os.fdopen(fd, "a") as handle:
+        handle.write(self._line(record))
+    except OSError:
+      pass
+
   def __call__(self, name: str, **values) -> None:
     record = {"t": datetime.now(UTC).isoformat(timespec="milliseconds"), "event": name, "mono_s": time.monotonic(), **values}
     with self.lock:
       self.recent.append(record)
       if self._writer is None:
+        self._daemon(record)
         return
       try:
         if self._dropped:
@@ -832,10 +853,14 @@ class Supervisor:
       adapter_ready, device = False, None  # Bluetooth still starting (or restarting)
     car_device = device
     companion = config.get('companion_address', '')
+    # 2026-11-03: with the hands-free gate the session's keeper owns the car's link. Paging the car from here instead
+    # ran every 15 s all day while parked (218 page timeouts an hour) and, after a cold boot, a page whose service
+    # lookup hung held the start 23 s and left the keeper's first attempt "busy".
+    keeper_owns_link = bool(car_profiles.tuning(config)["hfp_gate"])
     if companion and adapter_ready and device and device['paired'] and self._shared_bluetooth_owner is not None:
       try:
         car_device = self._shared_bluetooth_owner.prepare_companion(companion, lambda: self.config.get('companion_address', ''))
-        if not running and not car_device['connected'] and now >= self._companion_retry_at:
+        if not keeper_owns_link and not running and not car_device['connected'] and now >= self._companion_retry_at:
           self._companion_retry_at = now + 15.0
           car_device = self._shared_bluetooth_owner.prepare_companion(
             companion, lambda: self.config.get('companion_address', ''), connect=True)
@@ -844,9 +869,17 @@ class Supervisor:
         self._set(error=f'Waiting for selected car: {error}'[:300])
     car_link = bool(car_device and car_device["connected"]) or now - self._car_seen_at < CAR_LINK_HOLD
     onroad = self._onroad()
-    ready = adapter_ready and bool(device and device["paired"]) and (not companion or car_link) and self._wifi_ready(now)
+    paired = bool(device and device["paired"])
+    ready = adapter_ready and paired and (not companion or car_link or keeper_owns_link) and self._wifi_ready(now)
+    self._note_gate(onroad=onroad, car_link=car_link, adapter=adapter_ready, paired=paired, ready=ready, running=running)
     action = self.auto.decide(now, enabled=True, onroad=onroad, car_link=car_link, ready=ready, running=running)
     self._apply_auto_action(now, action, onroad)
+
+  def _note_gate(self, **gate) -> None:
+    """Log the auto-connect gate whenever it changes: between sessions this is what a bundle has to show why a start waited."""
+    if gate != getattr(self, "_auto_gate", None):
+      self._auto_gate = gate
+      self.log("auto_connect_gate", **gate)
 
   def _wifi_ready(self, now: float) -> bool:
     """NetworkManager manages the Wi-Fi radio. After a cold boot it takes the radio ~25 s after StarPort starts
@@ -1055,6 +1088,17 @@ class Supervisor:
     if address.upper() in (self.config["receiver_address"].upper(), self.config.get("companion_address", "").upper()):
       self._car_seen_at = time.monotonic()
       self._hfp_link.set()
+
+  def _admit_companion(self, tuning: dict) -> None:
+    """Admit the saved car to the lease. Without the hands-free gate its link is opened here, before the adapter; with
+    the gate the session's keeper opens it beside the projection (2026-11-03: opening it here cost a cold boot ~25 s)."""
+    if self._shared_bluetooth_owner is None:
+      raise RuntimeError('Shared Bluetooth owner required for the selected car')
+    companion = self.config.get('companion_address', '')
+    connect = not tuning["hfp_gate"]
+    self._shared_bluetooth_owner.prepare_companion(companion, lambda: self.config.get('companion_address', ''), connect=connect)
+    self._check_cancel()
+    self.log('companion_car_connected' if connect else 'companion_car_admitted', address=companion)
 
   def _companion_link_up(self) -> bool:
     """The saved car's own hands-free link to the comma is open (not merely some BlueZ profile of it)."""
@@ -1370,16 +1414,12 @@ class Supervisor:
     device = bluez.device(address)
     if device is None or not device["paired"]:
       raise RuntimeError("The car is not paired with this comma; pair it in Bluetooth settings")
+    tuning = car_profiles.tuning(config)
     companion = config.get('companion_address', '')
     if companion:
-      if self._shared_bluetooth_owner is None:
-        raise RuntimeError('Shared Bluetooth owner required for the selected car')
-      self._shared_bluetooth_owner.prepare_companion(companion, lambda: self.config.get('companion_address', ''), connect=True)
-      self._check_cancel()
-      self.log('companion_car_connected', address=companion)
+      self._admit_companion(tuning)
     elif device.get('starport') and '0000111e-0000-1000-8000-00805f9b34fb' not in device.get('uuids', []):
       raise RuntimeError('Connect your paired car in Galaxy Bluetooth first to select it for this Android Auto adapter')
-    tuning = car_profiles.tuning(config)
     if delay := tuning["connect_delay_s"]:
       self.log("car_profile_connect_delay", seconds=delay)
       self._wait(delay)
