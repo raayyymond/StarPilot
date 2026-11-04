@@ -348,6 +348,7 @@ class ProjectionOnroad:
     rect = hud.view_rect(self.width, self.height) if hud is not None else (0, 0, self.width, self.height)
     view.render(self.native.rl.Rectangle(*rect))
     if hud is not None:
+      hud.metric = view.metric
       hud.render(self.width, self.height)
 
   @staticmethod

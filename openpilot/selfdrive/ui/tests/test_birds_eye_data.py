@@ -288,7 +288,7 @@ def test_poll_reads_curve_and_speed_limit_through_the_qualified_readers():
   assert view.scene.curve is None and view.scene.speed_limit_mps is None
 
 
-def test_lead_labels_add_the_closing_speed_and_pulse_on_hard_brake(monkeypatch):
+def test_lead_labels_show_the_distance_only_and_pulse_on_hard_brake(monkeypatch):
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   drawn, pills = [], []
   view, radar = _renderer_with_scene()
@@ -300,9 +300,23 @@ def test_lead_labels_add_the_closing_speed_and_pulse_on_hard_brake(monkeypatch):
   monkeypatch.setattr(ber.rl, 'draw_circle_v', lambda *a: None)
   pv = bem.view_params(RECT, view.config)
   view._leads(view.scene, RECT, pv)
-  assert drawn == ['33 yd', '-4 mph'] and not pills
+  assert drawn == ['33 yd'] and not pills, 'no closing-speed line under the distance'
   view.scene.hard_brake = True
-  view.scene.leads[0].v_rel = 0.2
   drawn.clear()
   view._leads(view.scene, RECT, pv)
-  assert drawn == ['33 yd'] and len(pills) == 1, 'no closing line under 0.5 m/s; the pill border pulses'
+  assert drawn == ['33 yd'] and len(pills) == 1, 'the pill border pulses'
+
+
+def test_curve_mark_is_hidden_but_still_ingested(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  assert ber.SHOW_CURVE_MARK is False
+  drawn, bars = [], []
+  view, _ = _renderer_with_scene()
+  view.text = SimpleNamespace(measure=lambda text, size: (0.5 * size * len(text), size), draw=lambda text, size, *a: drawn.append(text))
+  view.ingest(curve=ber.CurveMark(18.0, 40.0, True, True))
+  assert view.scene.curve == ber.CurveMark(18.0, 40.0, True, True)
+  monkeypatch.setattr(view, '_bar', lambda *a: bars.append(a))
+  view.scene.should_stop = True
+  path = SimpleNamespace(end=(20.0, 0.0, 0.0))
+  view._marks(view.scene, RECT, bem.view_params(RECT, view.config), path)
+  assert len(bars) == 1 and drawn == [], 'only the shouldStop bar; no curve bar or tag'

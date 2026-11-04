@@ -324,6 +324,7 @@ def test_label_font_is_about_twice_the_first_version():
   assert view._font_size(stream) == pytest.approx(2 * old, rel=0.05)
   assert view._font_size(SimpleNamespace(height=200.0)) >= 30.0
   assert view._font_size(SimpleNamespace(height=4000.0)) <= 54.0
+  assert view._font_size(stream) == bem.label_font_size(stream.height)
 
 
 def test_ego_lane_lines_follow_the_lateral_state():
@@ -488,6 +489,38 @@ def test_zoom_filter_is_smooth_and_quantized():
   for i in range(300):
     zoom.update(29.8 if i % 2 else 30.2, 1 / 30)
   assert zoom.x_max == bem.DEFAULT_CONFIG.x_max, 'speed noise under a step does not move the view'
+
+
+def test_zoom_tightens_to_a_radar_lead():
+  cfg = bem.DEFAULT_CONFIG
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import EGO_FRONT, LEAD_LENGTH
+  def front(d_rel):
+    return d_rel + EGO_FRONT + LEAD_LENGTH
+  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max, 'no lead: the speed preset'
+  assert bem.lead_zoom_x_max(30.0, front(20.0)) == pytest.approx(20.0 + EGO_FRONT + LEAD_LENGTH + bem.ZOOM_LEAD_BUFFER)
+  assert bem.lead_zoom_x_max(30.0, front(55.0)) == pytest.approx(67.1), 'a far lead still fits under the preset'
+  assert bem.lead_zoom_x_max(30.0, front(80.0)) == cfg.x_max, 'never wider than the preset'
+  assert bem.lead_zoom_x_max(30.0, front(5.0)) == bem.ZOOM_NEAR_X_MAX, 'never tighter than the city view'
+  assert bem.lead_zoom_x_max(5.0, front(20.0)) == bem.ZOOM_NEAR_X_MAX
+  zoom = bem.ZoomFilter()
+  assert zoom.update(30.0, 0.0, front(20.0)) == 32.0, 'quantized to ZOOM_STEP'
+  assert zoom.update(30.0, 0.0, None) == 32.0, 'the change is filtered, not a jump'
+  for _ in range(300):
+    zoom.update(30.0, 1 / 30, None)
+  assert zoom.x_max == cfg.x_max, 'the lead gone: back to the preset'
+
+
+def test_renderer_zoom_follows_the_radar_lead_one():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  view = BirdsEyeRenderer(text=object())
+  view.clock = lambda: 0.0
+  view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
+  view.scene.lead_one_d = 20.0
+  assert view.view_config().x_max == 32.0
+  view = BirdsEyeRenderer(text=object())
+  view.clock = lambda: 0.0
+  view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
+  assert view.view_config().x_max == view.config.x_max, 'no lead: the preset'
 
 
 def test_renderer_zoom_rebuilds_the_view_only_on_a_step():

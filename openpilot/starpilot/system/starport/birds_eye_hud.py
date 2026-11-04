@@ -1,14 +1,16 @@
-"""HUD over the birds-eye-only car screen: an acceleration bar on the left edge, a flat torque bar at the bottom and
-large blinking turn-signal arrows in the top corners.
+"""HUD over the birds-eye-only car screen: an acceleration bar on the left edge, a flat torque bar at the bottom, large
+blinking turn-signal arrows at the side edges and a speed / set-speed readout at the top left.
 
 Acceleration bar: a vertical track hugging the left edge, zero at its middle, accelerating up, braking down. Only while
-carControl.longActive is it coloured: the fill is the commanded accel (carControl.actuators.accel), green accelerating,
-neutral below zero, red while braking (commanded below BRAKE_ACCEL, or the brake pedal). The scale then puts the
+carControl.longActive is it coloured: the fill is the planner's target (longitudinalPlan.aTarget; the 100 Hz
+carControl.actuators.accel adds the long PID on measured aEgo and jitters, so it is only the fallback while the plan is
+unseen or older than PLAN_MAX_AGE_NS), green accelerating, neutral below zero, red while braking (target below
+BRAKE_ACCEL, or the brake pedal). The scale then puts the
 planner's published cruise limits (starpilotLongitudinalPlan.accelLimitMin/Max, the floor and ceiling the StarPilot
 profile toggles and overrides leave in force) at LIMIT_FRACTION of each half, with a tick at each; as the command
 reaches a limit the bar grows thicker and may pass the tick up to the bar's end. Disengaged, the track is neutral
 grey, the setpoint stays at zero (the plan's accel is not shown) and the scale is +/-ACCEL_RANGE. A white tick is
-always the measured carState.aEgo.
+always the measured carState.aEgo, lightly filtered (AEGO_RC).
 
 Torque bar: a flat, rounded bar centred at the bottom, LENGTH_FRACTION of the frame width, always visible. Its
 indicator runs from the centre toward the sign of the same caller-qualified utilization as the full composition's arc
@@ -17,10 +19,15 @@ starpilot/ui/torque_feedback.py). Thickness and colour follow the arc: 2x its ba
 maximum as |utilization| passes 0.5, warming toward orange past 0.75. Grey with the indicator at centre while lateral
 is not active.
 
-Turn signals: carState.leftBlinker/rightBlinker pulse the comma's turn_signal_left icon, scaled up, in the top-left /
-top-right corner with the comma screen's period; a filled arrow when the texture cannot be loaded.
+Turn signals: carState.leftBlinker/rightBlinker pulse the comma's turn_signal_left icon, scaled up, at the left / right
+edge of the view, centred vertically on the frame, with the comma screen's period; a filled arrow when the texture
+cannot be loaded.
 
-Per frame this is a handful of rectangles, one cached-text draw and at most one texture quad; nothing allocates.
+Speed readout: top left of the view, carState.vEgo and right of it the cruise set speed (the onroad HUD's rule:
+vCruiseCluster, else vCruise, valid in (0, SET_SPEED_NA), "--" otherwise), mph or km/h by `metric`. The numbers are
+twice the birds-eye lead label's size (birds_eye_math.label_font_size over the view rect), with small unit captions.
+
+Per frame this is a handful of rectangles, a few cached-text draws and at most two texture quads; nothing allocates.
 """
 from dataclasses import dataclass
 import math
@@ -33,8 +40,10 @@ BRAKE_ACCEL = -0.2         # commanded accel below this while longActive counts 
 BRAKE_RELEASE = -0.15      # hysteresis: braking ends above this
 FPS = 30.0                 # the stream's frame rate; filters are tuned for it
 ACCEL_RC = 0.12            # seconds; enough to calm 30 fps jitter without visible lag
+AEGO_RC = 0.15             # seconds; the measured-accel tick's light filter
 TORQUE_RC = 0.1            # the full composition's torque filter time constant
 LIMITS_MAX_AGE_NS = 1_000_000_000  # starpilotLongitudinalPlan older than this falls back to +/-ACCEL_RANGE
+PLAN_MAX_AGE_NS = 1_000_000_000    # longitudinalPlan older than this falls back to carControl.actuators.accel
 
 ACCEL_WIDTH, ACCEL_GROWN = 28, 56              # logical px at 1080 rows: 2x the former bar, doubling at the limit
 TORQUE_MIN, TORQUE_MAX = 2 * 14, 2 * 56        # 2x the arc's MIN_HEIGHT / MAX_HEIGHT (onroad_torque_geometry)
@@ -42,6 +51,10 @@ TORQUE_MARGIN = 14                             # gap under the torque bar and ab
 LENGTH_FRACTION = 0.75                         # torque bar length over the frame width
 SIGNAL_HEIGHT = 260                            # turn-signal arrow height at 1080 rows (the icon has glow padding)
 SIGNAL_MARGIN = 28
+READOUT_SCALE = 2.0                            # readout numbers over the birds-eye lead label size
+CAPTION_SCALE = 0.3                            # unit captions over the readout numbers
+SET_SPEED_NA = 255                             # onroad hud_renderer: a set speed at or above this is not set
+MPH_PER_MPS, KPH_PER_MPS = 2.2369362921, 3.6
 TURN_SIGNAL_BLINK_PERIOD = 1 / (80 / 60)       # the comma screen's period (mici alert_renderer)
 TURN_SIGNAL_RC = 0.3                           # its pulse filter: jumps bright each period, then decays to 20 %
 TURN_SIGNAL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons_mici/onroad/turn_signal_left.png'
@@ -171,11 +184,25 @@ def torque_color(utilization: float, alpha: float) -> tuple[int, int, int, int]:
   return 255, round(255 * green), round(255 * (1 - warmth)), round(255 * 0.9 * alpha)
 
 
-def read_accel(sm) -> AccelReading | None:
-  """The commanded and measured accel from the SubMaster; None before carState has been seen.
+def _current(sm, name: str, now_ns: int | None, max_age_ns: int):
+  """sm[name] when seen, alive and received within max_age_ns of now_ns (when recv_time is known); else None."""
+  if not sm.seen[name]:
+    return None
+  alive = getattr(sm, 'alive', None)
+  if isinstance(alive, dict) and alive.get(name) is False:
+    return None
+  received = getattr(sm, 'recv_time', None)
+  if isinstance(received, dict) and now_ns is not None and received.get(name):
+    if now_ns - int(received[name] * 1e9) > max_age_ns:
+      return None
+  return sm[name]
 
-  The setpoint is carControl.actuators.accel while longActive and 0.0 otherwise: the plan's accel is not shown
-  while openpilot is not commanding.
+
+def read_accel(sm, now_ns: int | None = None) -> AccelReading | None:
+  """The planner's target and measured accel from the SubMaster; None before carState has been seen.
+
+  The setpoint is longitudinalPlan.aTarget while longActive (carControl.actuators.accel while the plan is unseen or
+  stale) and 0.0 otherwise: the plan's accel is not shown while openpilot is not commanding.
   """
   seen = sm.seen
   if not seen['carState']:
@@ -186,24 +213,21 @@ def read_accel(sm) -> AccelReading | None:
     control = sm['carControl']
     long_active = bool(control.longActive)
     if long_active:
-      desired = _finite(control.actuators.accel)
+      try:
+        plan = _current(sm, 'longitudinalPlan', now_ns, PLAN_MAX_AGE_NS)
+        target = _finite(plan.aTarget) if plan is not None else None
+      except (AttributeError, KeyError, TypeError):
+        target = None
+      desired = target if target is not None else _finite(control.actuators.accel)
   return AccelReading(desired, _finite(car_state.aEgo), long_active, bool(car_state.brakePressed))
 
 
 def read_limits(sm, now_ns: int | None = None) -> AccelScale | None:
   """The planner's cruise floor and ceiling from starpilotLongitudinalPlan; None when absent, stale or implausible."""
-  name = 'starpilotLongitudinalPlan'
   try:
-    if not sm.seen[name]:
+    plan = _current(sm, 'starpilotLongitudinalPlan', now_ns, LIMITS_MAX_AGE_NS)
+    if plan is None:
       return None
-    alive = getattr(sm, 'alive', None)
-    if isinstance(alive, dict) and alive.get(name) is False:
-      return None
-    received = getattr(sm, 'recv_time', None)
-    if isinstance(received, dict) and now_ns is not None and received.get(name):
-      if now_ns - int(received[name] * 1e9) > LIMITS_MAX_AGE_NS:
-        return None
-    plan = sm[name]
     lower, upper = _finite(plan.accelLimitMin), _finite(plan.accelLimitMax)
   except (AttributeError, KeyError, TypeError, ValueError):
     return None
@@ -220,6 +244,35 @@ def read_blinkers(sm) -> tuple[bool, bool]:
     return bool(getattr(car_state, 'leftBlinker', False)), bool(getattr(car_state, 'rightBlinker', False))
   except (AttributeError, KeyError, TypeError):
     return False, False
+
+
+def set_speed_kph(car_state) -> float | None:
+  """The cruise set speed in km/h by the onroad HUD's rule (vCruiseCluster, else vCruise); None when not set."""
+  cluster = _finite(getattr(car_state, 'vCruiseCluster', None), 0.0)
+  speed = cluster if cluster != 0.0 else _finite(getattr(car_state, 'vCruise', None))
+  return speed if speed is not None and 0 < speed < SET_SPEED_NA else None
+
+
+def read_speeds(sm, metric: bool) -> tuple[str, str] | None:
+  """(current speed, set speed or '--') as displayed in mph or km/h; None before carState with a finite vEgo."""
+  try:
+    if not sm.seen['carState']:
+      return None
+    car_state = sm['carState']
+    v_ego = _finite(getattr(car_state, 'vEgo', None))
+    if v_ego is None:
+      return None
+    cruise = set_speed_kph(car_state)
+  except (AttributeError, KeyError, TypeError):
+    return None
+  speed = f"{round(max(0.0, v_ego) * (KPH_PER_MPS if metric else MPH_PER_MPS)):d}"
+  return speed, '--' if cruise is None else f"{round(cruise if metric else cruise / KPH_PER_MPS * MPH_PER_MPS):d}"
+
+
+def readout_size(width: float, height: float) -> float:
+  """The readout numbers' size: READOUT_SCALE x the birds-eye lead label's size over the same view rect."""
+  from openpilot.selfdrive.ui.onroad.birds_eye_math import label_font_size
+  return READOUT_SCALE * label_font_size(view_rect(width, height)[3])
 
 
 def braking(reading: AccelReading | None, was_braking: bool = False) -> bool:
@@ -276,7 +329,7 @@ class BirdsEyeHud:
     self._clock = clock
     self._icon_path = icon_path
     self._desired = _Filter(ACCEL_RC)
-    self._actual = _Filter(ACCEL_RC)
+    self._actual = _Filter(AEGO_RC)
     self._grow = _Filter(ACCEL_RC)
     self._lower = _Filter(ACCEL_RC)
     self._upper = _Filter(ACCEL_RC)
@@ -290,6 +343,9 @@ class BirdsEyeHud:
     self._signal_since = None
     self._icon = None
     self._icon_failed = False
+    self.metric = False   # km/h when set (the owner copies ui_state.is_metric); mph by default
+    self._readout_key = None
+    self._readout = None
 
   @staticmethod
   def view_rect(width: float, height: float) -> tuple[float, float, float, float]:
@@ -304,9 +360,11 @@ class BirdsEyeHud:
     sm, car_params = self.source()
     geometry = self.geometry(height)
     self._draw_dock(width, height, geometry.strip)
-    self._draw_accel(geometry, read_accel(sm), read_limits(sm, time.monotonic_ns()), height)
+    now_ns = time.monotonic_ns()
+    self._draw_accel(geometry, read_accel(sm, now_ns), read_limits(sm, now_ns), height)
     self._draw_torque(sm, car_params, width, height)
     self._draw_signals(sm, width, height, geometry.strip)
+    self._draw_readout(sm, width, height, geometry.strip)
 
   def _draw_dock(self, width, height, strip) -> None:
     """The torque dock continues the view's own background; the view's last rows fade into it."""
@@ -452,7 +510,34 @@ class BirdsEyeHud:
     margin = SIGNAL_MARGIN * k
     for on, x, flip in ((left, strip + margin, False), (right, width - margin - w, True)):
       if on:
-        self._draw_arrow(icon, x, margin, w, h, flip, alpha)
+        self._draw_arrow(icon, x, height / 2 - h / 2, w, h, flip, alpha)
+
+  # --- speed readout ---
+  def _draw_readout(self, sm, width, height, strip) -> None:
+    """Current speed, then the set speed, at the top left of the view; numbers bottom-aligned, captions under them."""
+    if self.text is None:
+      return
+    speeds = read_speeds(sm, self.metric)
+    if speeds is None:
+      return
+    key = (speeds, self.metric, width, height)
+    if key != self._readout_key:
+      k = height / 1080
+      size = readout_size(width, height)
+      caption = size * CAPTION_SCALE
+      x, y = strip + SIGNAL_MARGIN * k, SIGNAL_MARGIN * k
+      items = []
+      for value, unit, gap in ((speeds[0], 'km/h' if self.metric else 'mph', 0.0), (speeds[1], 'SET', 0.6 * size)):
+        x += gap
+        w, h = self.text.measure(value, size)
+        cw, _ = self.text.measure(unit, caption)
+        items.append((value, size, round(x), round(y), unit, caption, round(x + (w - cw) / 2), round(y + h)))
+        x += w
+      self._readout, self._readout_key = items, key
+    rl = self.rl
+    for (value, size, x, y, unit, caption, cx, cy), rgb in zip(self._readout, (ACTUAL, TICK), strict=True):
+      self.text.draw(value, size, x, y, rl.Color(*rgb, 255))
+      self.text.draw(unit, caption, cx, cy, rl.Color(*TICK, 230))
 
   def _draw_arrow(self, icon, x, y, w, h, flip, alpha) -> None:
     rl = self.rl

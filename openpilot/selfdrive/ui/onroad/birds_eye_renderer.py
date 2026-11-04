@@ -55,7 +55,8 @@ LABEL_BG = (10, 12, 18)
 LABEL_BG_ALPHA = 0.85
 LABEL_SMOOTHING = 0.5   # per frame, toward the glyph-attached label position
 LABEL_SNAP_PX = 80.0    # a jump larger than this (side flip, a new lead) is taken directly
-SUBLABEL_SCALE = 0.62   # closing-speed line and curve tag, relative to the distance label
+SUBLABEL_SCALE = 0.62   # curve tag, relative to the distance label
+SHOW_CURVE_MARK = False  # the curve-speed bar and tag on the path (scene.curve is still ingested)
 
 LANE_HEADING_PROB = 0.3  # an ego lane line needs this probability to steer the lead glyph's heading
 LAT_ACTIVE_LANE = (52, 216, 104)  # ego lane lines while lateral control is active
@@ -588,13 +589,16 @@ class BirdsEyeRenderer(Widget):
     self.draw(rect)
 
   def view_config(self) -> bem.BirdsEyeConfig:
-    """self.config zoomed for the current speed (filtered and quantized: see bem.ZoomFilter)."""
+    """self.config zoomed for the current speed, tightened to a radar leadOne (filtered and quantized: see
+    bem.ZoomFilter)."""
     if self._zoom.cfg is not self.config:
       self._zoom = bem.ZoomFilter(self.config)
     now = self.clock()
     dt = 0.0 if self._zoom_clock is None else now - self._zoom_clock
     self._zoom_clock = now
-    return bem.zoomed_config(self.config, self._zoom.update(self.scene.v_ego, dt))
+    lead = self.scene.lead_one_d
+    lead_front = lead + EGO_FRONT + LEAD_LENGTH if lead is not None else None
+    return bem.zoomed_config(self.config, self._zoom.update(self.scene.v_ego, dt, lead_front))
 
   def draw(self, rect: rl.Rectangle) -> None:
     from openpilot.starpilot.ui import clip
@@ -1016,8 +1020,8 @@ class BirdsEyeRenderer(Widget):
   # ---- marks on the path ------------------------------------------------------------------------
 
   def _font_size(self, rect) -> float:
-    """Label size: ~2x the first version (unreadable on a car screen), ~37 px at 720 p."""
-    return max(30.0, min(54.0, rect.height * 0.052))
+    """Label size: bem.label_font_size (the stream HUD's readout is a multiple of it)."""
+    return bem.label_font_size(rect.height)
 
   def _bar(self, rect, view, x: float, y: float, heading: float, along: float, across: float, rgba) -> np.ndarray:
     """A bar across the path drawn as one fan; returns its screen corners."""
@@ -1026,14 +1030,15 @@ class BirdsEyeRenderer(Widget):
     return pts
 
   def _marks(self, scene, rect, view, path: PathDraw) -> None:
-    """action.shouldStop: a red bar at the path's end. Curve speed: a bar at the binding distance with its speed."""
+    """action.shouldStop: a red bar at the path's end. Curve speed (only with SHOW_CURVE_MARK): a bar at the binding
+    distance with its speed."""
     a = self.opacity
     if scene.should_stop and path.end is not None:
       x, y, heading = path.end
       self._bar(rect, view, x, y, heading, max(0.6, 4.0 / float(bem.depth_scale_at(x, view))), PATH_WIDTH * 1.5,
                 _rgba(STOP_RED, 235 * a))
     curve = scene.curve
-    if curve is None:
+    if curve is None or not SHOW_CURVE_MARK:
       return
     x = float(np.clip(curve.distance, EGO_FRONT + 3.0, view.x_max - 3.0))
     y, heading = self._lateral_at(scene, x), self._heading_at(scene, x)
@@ -1140,11 +1145,7 @@ class BirdsEyeRenderer(Widget):
 
   def _lead_label(self, lead, rgb, screen, rect, size, previous, hard_brake: bool) -> None:
     text = bem.distance_label(lead.d_rel, self.metric)
-    sub = bem.closing_speed_label(lead.v_rel, self.metric) if lead.radar else None
-    w, h = self.text.measure(text, size)
-    sub_size = size * SUBLABEL_SCALE
-    sw, sh = self.text.measure(sub, sub_size) if sub else (0.0, 0.0)
-    box_w, box_h = max(w, sw), h + sh
+    box_w, box_h = self.text.measure(text, size)
     pad = LABEL_PAD
     x = float(screen[:, 0].max()) + 10 + pad
     if x + box_w + pad > rect.x + rect.width - 8:
@@ -1154,14 +1155,12 @@ class BirdsEyeRenderer(Widget):
     # An opaque pill instead of a drop shadow: the stream encoder smears thin text over a changing background,
     # and the pill keeps the digits on one steady colour so a changed number leaves no residue around it.
     pill = rl.Rectangle(x - pad, y - pad, box_w + 2 * pad, box_h + 2 * pad)
-    roundness = 1.0 if not sub else min(1.0, 2 * 18 / (box_h + 2 * pad))
+    roundness = 1.0
     rl.draw_rectangle_rounded(pill, roundness, 8, _color(LABEL_BG, 255 * LABEL_BG_ALPHA * self.opacity))
     if hard_brake:  # modelV2.meta.hardBrakePredicted: the nearest lead's pill border pulses red
       pulse = 0.5 + 0.5 * math.sin(2 * math.pi * HARD_BRAKE_HZ * self.clock())
       rl.draw_rectangle_rounded_lines_ex(pill, roundness, 8, 3.0, _color(STOP_RED, (110 + 145 * pulse) * self.opacity))
-    self.text.draw(text, size, x + (box_w - w) / 2 if sub else x, y, _color(rgb, 255 * self.opacity))
-    if sub:
-      self.text.draw(sub, sub_size, round(x + (box_w - sw) / 2), y + h, _color((200, 206, 218), 255 * self.opacity))
+    self.text.draw(text, size, x, y, _color(rgb, 255 * self.opacity))
 
   def _label_position(self, previous: list[tuple[float, float]], x: float, y: float) -> tuple[float, float]:
     """Follow the glyph with a light filter, then snap to whole pixels, so a label neither jitters nor slides

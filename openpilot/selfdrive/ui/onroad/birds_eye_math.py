@@ -51,12 +51,14 @@ DEFAULT_CONFIG = BirdsEyeConfig()
 
 # Speed-based zoom. The view shows roughly the next 2.3-3 s of travel: 30 m ahead at city speed (<= 10 m/s,
 # ~20 px/m at 720 p, a 3.7 m lane ~75 px) widening linearly to the default 68 m at highway speed (>= 30 m/s,
-# ~9.3 px/m). 20 m/s (72 km/h) shows 49 m.
+# ~9.3 px/m). 20 m/s (72 km/h) shows 49 m. With a radar leadOne the view tightens to the lead's front bumper plus
+# ZOOM_LEAD_BUFFER (never below ZOOM_NEAR_X_MAX), so the gap fills the screen instead of a thin strip.
 ZOOM_NEAR_X_MAX = 30.0
 ZOOM_SLOW_SPEED = 10.0
 ZOOM_FAST_SPEED = 30.0
 ZOOM_TAU = 1.0    # s, first-order filter time constant
 ZOOM_STEP = 0.5   # m, x_max quantum: the view (and every cached layer) only changes when the zoom moves a step
+ZOOM_LEAD_BUFFER = 6.0  # m shown beyond a lead's front bumper
 
 
 def zoom_x_max(v_ego: float, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
@@ -68,6 +70,16 @@ def zoom_x_max(v_ego: float, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
   return near + (cfg.x_max - near) * min(1.0, max(0.0, t))
 
 
+def lead_zoom_x_max(v_ego: float, lead_front: float | None, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
+  """zoom_x_max, tightened to lead_front + ZOOM_LEAD_BUFFER (never below ZOOM_NEAR_X_MAX) when a lead is given.
+
+  lead_front: the lead's front bumper ahead of the camera (m), dRel + ego front + lead length; None without a lead."""
+  preset = zoom_x_max(v_ego, cfg)
+  if lead_front is None or not math.isfinite(lead_front):
+    return preset
+  return max(min(ZOOM_NEAR_X_MAX, cfg.x_max), min(preset, lead_front + ZOOM_LEAD_BUFFER))
+
+
 def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
   """cfg showing x_max ahead: same x_min (the ego stays put), lateral_range scaled with the span (same aspect)."""
   if x_max == cfg.x_max:
@@ -77,7 +89,7 @@ def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
 
 
 class ZoomFilter:
-  """First-order filtered, quantized x_max for the speed-based zoom.
+  """First-order filtered, quantized x_max for the speed-based (and lead-tightened) zoom.
 
   The quantized value only moves once the filter is more than 3/4 of a step away from it, so speed noise near a
   step boundary does not toggle the view (and rebuild the cached layers) back and forth."""
@@ -86,10 +98,10 @@ class ZoomFilter:
     self.value: float | None = None
     self.x_max = cfg.x_max
 
-  def update(self, v_ego: float | None, dt: float) -> float:
+  def update(self, v_ego: float | None, dt: float, lead_front: float | None = None) -> float:
     if v_ego is None or not math.isfinite(v_ego):
       return self.x_max
-    target = zoom_x_max(v_ego, self.cfg)
+    target = lead_zoom_x_max(v_ego, lead_front, self.cfg)
     if self.value is None:
       self.value = target
     else:
@@ -564,6 +576,12 @@ def lead_prediction(d_rel: float, y: float, tracks, front: float, gap: float = 6
 
 MPH_PER_MPS = 2.2369362921
 KPH_PER_MPS = 3.6
+
+
+def label_font_size(view_height: float) -> float:
+  """The birds-eye lead label's text size for a view rect this tall: ~2x the first version (unreadable on a car
+  screen), ~37 px at 720 p. The stream HUD's speed readout is a multiple of it."""
+  return max(30.0, min(54.0, view_height * 0.052))
 
 
 def speed_text(mps: float, metric: bool) -> str:

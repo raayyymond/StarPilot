@@ -8,8 +8,9 @@ import pytest
 from openpilot.starpilot.system.starport import birds_eye_hud as hud_module
 from openpilot.starpilot.system.starport.birds_eye_hud import (DEFAULT_SCALE, LIMIT_FRACTION, AccelReading, AccelScale,
                                                                BirdsEyeHud, RED, accel_geometry, braking, dock_height,
-                                                               fill_color, read_accel, read_limits, signal_alpha,
-                                                               torque_color, torque_geometry, torque_strength, view_rect)
+                                                               fill_color, read_accel, read_limits, read_speeds,
+                                                               readout_size, signal_alpha, torque_color, torque_geometry,
+                                                               torque_strength, view_rect)
 from openpilot.starpilot.ui.torque_feedback import TorqueFeedback
 
 LOGICAL_720P = (1860, 1080)  # projection_geometry's logical canvas for a 1280x720 head unit
@@ -61,10 +62,17 @@ class FakeSM:
     return self.messages[name]
 
 
-def sm(*, desired=0.0, actual=0.0, long_active=True, brake=False, plan=0.5, limits=None, left=False, right=False):
-  messages = {'carState': SimpleNamespace(aEgo=actual, brakePressed=brake, leftBlinker=left, rightBlinker=right),
-              'carControl': SimpleNamespace(longActive=long_active, actuators=SimpleNamespace(accel=desired)),
-              'longitudinalPlan': SimpleNamespace(accels=[plan], aTarget=plan)}
+def sm(*, desired=0.0, actual=0.0, long_active=True, brake=False, plan=None, limits=None, left=False, right=False,
+       v_ego=None, v_cruise=255.0):
+  """plan=None: no longitudinalPlan, so the bar falls back to the actuators' accel (`desired`)."""
+  car_state = SimpleNamespace(aEgo=actual, brakePressed=brake, leftBlinker=left, rightBlinker=right,
+                              vCruise=v_cruise, vCruiseCluster=v_cruise)
+  if v_ego is not None:
+    car_state.vEgo = v_ego
+  messages = {'carState': car_state,
+              'carControl': SimpleNamespace(longActive=long_active, actuators=SimpleNamespace(accel=desired))}
+  if plan is not None:
+    messages['longitudinalPlan'] = SimpleNamespace(accels=[plan], aTarget=plan)
   if limits is not None:
     messages['starpilotLongitudinalPlan'] = SimpleNamespace(accelLimitMin=limits[0], accelLimitMax=limits[1])
   return FakeSM(**messages)
@@ -86,11 +94,27 @@ def torque_rects(rl):
   return [call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][0] > g.strip]
 
 
-def test_reading_shows_actuators_only_while_long_active():
-  assert read_accel(sm(desired=-1.0)).desired == -1.0
+def test_reading_shows_the_plan_target_only_while_long_active():
+  assert read_accel(sm(desired=-1.0, plan=-0.6)).desired == -0.6, 'longitudinalPlan.aTarget, not the PID output'
+  assert read_accel(sm(desired=-1.0)).desired == -1.0, 'no plan yet: the actuators fall back'
   reading = read_accel(sm(desired=-1.0, long_active=False, plan=0.7))
   assert reading.desired == 0.0 and not reading.long_active, 'the plan is not shown while disengaged'
   assert read_accel(FakeSM()) is None
+
+
+def test_reading_falls_back_to_the_actuators_on_a_stale_plan():
+  messages = sm(desired=-1.0, plan=-0.6)
+  messages.recv_time = {'longitudinalPlan': 10.0}
+  assert read_accel(messages, now_ns=int(10.5e9)).desired == -0.6
+  assert read_accel(messages, now_ns=int(11.2e9)).desired == -1.0, 'older than 1 s'
+  messages.alive = {'longitudinalPlan': False}
+  assert read_accel(messages, now_ns=int(10.5e9)).desired == -1.0, 'not alive'
+
+
+def test_measured_accel_tick_is_lightly_filtered():
+  view, _, _ = hud(lambda: (sm(actual=0.0), None))
+  assert view._actual.alpha == pytest.approx((1 / 30) / (hud_module.AEGO_RC + 1 / 30))
+  assert hud_module.AEGO_RC == pytest.approx(0.15)
 
 
 @pytest.mark.parametrize('reading, expected', [
@@ -299,8 +323,10 @@ def test_turn_signal_arrows_in_the_corners_with_the_fallback_polygon():
   xs = [point[0] for point in triangles[0][1:4]]
   ys = [point[1] for point in triangles[0][1:4]]
   g = accel_geometry(LOGICAL_720P[1])
-  assert g.strip < min(xs) and max(xs) < LOGICAL_720P[0] / 4, 'top-left, right of the accel strip'
-  assert max(ys) - min(ys) == pytest.approx(0.6 * hud_module.SIGNAL_HEIGHT) and max(ys) < 0.25 * LOGICAL_720P[1]
+  assert g.strip < min(xs) and max(xs) < LOGICAL_720P[0] / 4, 'left edge, right of the accel strip'
+  assert max(ys) - min(ys) == pytest.approx(0.6 * hud_module.SIGNAL_HEIGHT)
+  assert (max(ys) + min(ys)) / 2 == pytest.approx(LOGICAL_720P[1] / 2), 'centred vertically on the frame'
+
   (ax, ay), (bx, by), (cx, cy) = triangles[0][1:4]
   assert (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) < 0, 'counter-clockwise for raylib'
   bright = triangles[0][-1][3]
@@ -312,7 +338,9 @@ def test_turn_signal_arrows_in_the_corners_with_the_fallback_polygon():
   view, rl, _ = hud(lambda: (sm(right=True), None))
   view.render(*LOGICAL_720P)
   (triangle,) = [call for call in rl.calls if call[0] == 'draw_triangle']
-  assert min(point[0] for point in triangle[1:4]) > LOGICAL_720P[0] * 3 / 4, 'top-right'
+  assert min(point[0] for point in triangle[1:4]) > LOGICAL_720P[0] * 3 / 4, 'right edge'
+  ys = [point[1] for point in triangle[1:4]]
+  assert (max(ys) + min(ys)) / 2 == pytest.approx(LOGICAL_720P[1] / 2)
   (ax, ay), (bx, by), (cx, cy) = triangle[1:4]
   assert (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) < 0
 
@@ -360,12 +388,46 @@ def test_turn_signal_texture_is_loaded_once_flipped_for_the_right_and_unloaded()
   assert left[2][2] > 0 and right[2][2] < 0, 'right side flipped horizontally'
   assert left[3][3] == pytest.approx(hud_module.SIGNAL_HEIGHT) and left[3][0] > accel_geometry(LOGICAL_720P[1]).strip
   assert right[3][0] + right[3][2] < LOGICAL_720P[0]
+  for quad in (left[3], right[3]):
+    assert quad[1] + quad[3] / 2 == pytest.approx(LOGICAL_720P[1] / 2), 'centred vertically on the frame'
   view.close()
   assert rl.unloaded == [7]
 
 
+class SizedText(FakeText):
+  def draw(self, text, size, x, y, color):
+    self.drawn.append((text, size, x, y))
+
+
+def test_speed_readout_shows_speed_and_set_speed_at_twice_the_lead_label():
+  from openpilot.selfdrive.ui.onroad.birds_eye_math import label_font_size
+  assert read_speeds(sm(v_ego=26.8224, v_cruise=112.654), metric=False) == ('60', '70')
+  assert read_speeds(sm(v_ego=26.8224, v_cruise=112.654), metric=True) == ('97', '113')
+  assert read_speeds(sm(v_ego=10.0, v_cruise=255.0), metric=False) == ('22', '--'), 'cruise not set'
+  assert read_speeds(sm(v_ego=10.0, v_cruise=0.0), metric=False)[1] == '--'
+  assert read_speeds(sm(), metric=False) is None, 'no vEgo'
+  for width, height in (LOGICAL_720P, (1280, 720), (3840, 2160)):
+    lead_label = label_font_size(view_rect(width, height)[3])
+    assert readout_size(width, height) == pytest.approx(2 * lead_label)
+
+  text = SizedText()
+  view = BirdsEyeHud(FakeRl(), text, lambda: (sm(v_ego=26.8224, v_cruise=112.654, long_active=False), None),
+                     feedback=lambda sm, cp: TorqueFeedback(), clock=lambda: 0.0)
+  view.render(*LOGICAL_720P)
+  (speed, speed_size, sx, sy), (mph, cap_size, _, cy), (cruise, cruise_size, cx, _), (unit, _, _, _) = text.drawn
+  assert (speed, mph, cruise, unit) == ('60', 'mph', '70', 'SET')
+  assert speed_size == cruise_size == pytest.approx(2 * label_font_size(view_rect(*LOGICAL_720P)[3]))
+  assert cap_size < speed_size / 2
+  g = accel_geometry(LOGICAL_720P[1])
+  assert g.strip < sx < cx and sy < 0.1 * LOGICAL_720P[1] and cy > sy, 'top left of the view, set speed to the right'
+  view.metric = True
+  text.drawn.clear()
+  view.render(*LOGICAL_720P)
+  assert [entry[0] for entry in text.drawn] == ['97', 'km/h', '113', 'SET']
+
+
 def test_cpu_cost_per_frame_is_small():
-  view, _, _ = hud(lambda: (sm(desired=-0.6, actual=-0.4, limits=(-1.2, 1.6), left=True), None))
+  view, _, _ = hud(lambda: (sm(desired=-0.6, actual=-0.4, limits=(-1.2, 1.6), left=True, v_ego=20.0, v_cruise=100.0), None))
   view.render(*LOGICAL_720P)
   start = time.perf_counter()
   for _ in range(300):
