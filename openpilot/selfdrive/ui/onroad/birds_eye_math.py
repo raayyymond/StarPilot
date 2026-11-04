@@ -57,6 +57,7 @@ ZOOM_NEAR_X_MAX = 30.0
 ZOOM_SLOW_SPEED = 10.0
 ZOOM_FAST_SPEED = 30.0
 ZOOM_TAU = 1.0    # s, first-order filter time constant
+ZOOM_MAX_RATE = 12.0  # m/s, the most x_max may move per second: a lead appearing 20 m ahead on the highway takes ~3 s
 ZOOM_STEP = 0.5   # m, x_max quantum: the view (and every cached layer) only changes when the zoom moves a step
 ZOOM_LEAD_BUFFER = 6.0  # m shown beyond a lead's front bumper
 
@@ -89,12 +90,14 @@ def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
 
 
 class ZoomFilter:
-  """First-order filtered, quantized x_max for the speed-based (and lead-tightened) zoom.
+  """First-order filtered, rate-limited, quantized x_max for the speed-based (and lead-tightened) zoom.
 
-  The quantized value only moves once the filter is more than 3/4 of a step away from it, so speed noise near a
+  The filter never moves faster than max_rate (m/s) however far the target jumps (a lead appearing or vanishing),
+  so the view always glides. The quantized value only moves once the filter is more than 3/4 of a step away from it, so speed noise near a
   step boundary does not toggle the view (and rebuild the cached layers) back and forth."""
-  def __init__(self, cfg: BirdsEyeConfig = DEFAULT_CONFIG, tau: float = ZOOM_TAU, step: float = ZOOM_STEP):
-    self.cfg, self.tau, self.step = cfg, tau, step
+  def __init__(self, cfg: BirdsEyeConfig = DEFAULT_CONFIG, tau: float = ZOOM_TAU, step: float = ZOOM_STEP,
+               max_rate: float = ZOOM_MAX_RATE):
+    self.cfg, self.tau, self.step, self.max_rate = cfg, tau, step, max_rate
     self.value: float | None = None
     self.x_max = cfg.x_max
 
@@ -105,8 +108,10 @@ class ZoomFilter:
     if self.value is None:
       self.value = target
     else:
-      alpha = 1.0 - math.exp(-max(0.0, min(dt, 0.5)) / self.tau)
-      self.value += (target - self.value) * alpha
+      dt = max(0.0, min(dt, 0.5))
+      alpha = 1.0 - math.exp(-dt / self.tau)
+      delta = (target - self.value) * alpha
+      self.value += max(-self.max_rate * dt, min(self.max_rate * dt, delta))
     if abs(self.value - self.x_max) >= 0.75 * self.step:
       self.x_max = min(self.cfg.x_max, round(self.value / self.step) * self.step)
     return self.x_max

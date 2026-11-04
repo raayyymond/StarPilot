@@ -479,7 +479,7 @@ def test_zoom_filter_is_smooth_and_quantized():
   assert zoom.update(5.0, 0.0) == bem.ZOOM_NEAR_X_MAX, 'the first speed is taken directly'
   values = [zoom.update(30.0, 1 / 30) for _ in range(30)]
   assert values[0] < bem.ZOOM_NEAR_X_MAX + 2.0, 'a speed step does not jump the view'
-  assert 50.0 < values[-1] < 60.0, '~1 s time constant: ~63 % of the way after 1 s'
+  assert 40.0 < values[-1] <= bem.ZOOM_NEAR_X_MAX + bem.ZOOM_MAX_RATE, 'a 38 m step glides at the rate limit: ~12 m after 1 s'
   assert all(v % bem.ZOOM_STEP == 0 for v in values) and values == sorted(values)
   # A real acceleration (1.5 m/s^2 from 10 to 30 m/s) changes the view on a minority of frames.
   zoom = bem.ZoomFilter()
@@ -489,6 +489,24 @@ def test_zoom_filter_is_smooth_and_quantized():
   for i in range(300):
     zoom.update(29.8 if i % 2 else 30.2, 1 / 30)
   assert zoom.x_max == bem.DEFAULT_CONFIG.x_max, 'speed noise under a step does not move the view'
+
+
+def test_zoom_rate_is_limited():
+  cfg = bem.DEFAULT_CONFIG
+  zoom = bem.ZoomFilter()
+  assert zoom.update(30.0, 0.0) == cfg.x_max
+  dt = 1 / 30
+  previous, values = cfg.x_max, []
+  for _ in range(300):
+    values.append(zoom.update(30.0, dt, 20.0))
+    assert previous - values[-1] <= bem.ZOOM_MAX_RATE * dt + bem.ZOOM_STEP + 1e-9, 'x_max never drops faster than the limit'
+    previous = values[-1]
+  assert values[-1] == bem.ZOOM_NEAR_X_MAX
+  first_at_floor = next(i for i, v in enumerate(values) if v == bem.ZOOM_NEAR_X_MAX)
+  assert first_at_floor * dt >= (cfg.x_max - bem.ZOOM_NEAR_X_MAX) / bem.ZOOM_MAX_RATE - dt, 'the glide takes its time'
+  for _ in range(60):
+    zoom.update(30.0, dt, None)
+  assert zoom.value - bem.ZOOM_NEAR_X_MAX <= bem.ZOOM_MAX_RATE * 2 + 0.01, 'widening is limited the same way'
 
 
 def test_zoom_tightens_to_a_radar_lead():
