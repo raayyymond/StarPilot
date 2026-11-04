@@ -390,3 +390,87 @@ def test_the_radio_probe_fails_open():
   sup.config = {"connection": "wired", "wifi_interface": "wlan0"}
   sup._wifi_probe_at, sup._wifi_ready_state = -10.0, False
   assert sup._wifi_ready(0.0) is True  # wired sessions never wait for the radio
+
+
+# ------------------------------------------------------------------ cold boot: the keeper owns the link, nothing pages before a session
+
+def _auto_connect_unit(events, profile):
+  from openpilot.starpilot.system.starport.tests.test_car_first_restart import fixture
+  unit = fixture()
+  unit.config["car_profile_override"] = profile
+  unit.log = lambda name, **values: events.append((name, values))
+  return unit
+
+
+def test_with_the_gate_ignition_starts_the_adapter_without_waiting_for_the_car():
+  # 2026-11-03 cold boot: the start waited 23 s on a page of the car whose service lookup hung; the keeper then
+  # brought the link up 32 s into the session and the car handed over a second later.
+  events = []
+  unit = _auto_connect_unit(events, "ottocast")
+  unit._onroad = lambda: True
+  unit._shared_bluetooth_owner.prepare_companion.return_value = {"connected": False}
+  unit._auto_connect(100)
+  assert [call.kwargs for call in unit._shared_bluetooth_owner.prepare_companion.call_args_list] == [{}]  # admitted, never paged
+  unit.start.assert_called_once_with(trigger="onroad")
+  gate = next(values for name, values in events if name == "auto_connect_gate")
+  assert (gate["onroad"], gate["car_link"], gate["ready"]) == (True, False, True)
+
+
+def test_with_the_gate_a_parked_comma_never_pages_the_car_but_still_answers_it():
+  # The 11-02 journal: 218 page timeouts an hour, all day, from the 15 s retry while the car was in the garage.
+  events = []
+  unit = _auto_connect_unit(events, "ottocast")
+  unit._shared_bluetooth_owner.prepare_companion.return_value = {"connected": False}
+  for now in (100, 101, 115, 130, 200, 400):
+    unit._auto_connect(now)
+  assert all(call.kwargs == {} for call in unit._shared_bluetooth_owner.prepare_companion.call_args_list)
+  unit.start.assert_not_called()
+  assert [name for name, _ in events].count("auto_connect_gate") == 1  # unchanged gate: logged once
+  unit._car_seen_at = 405.0  # the car opened hands-free to the comma by itself
+  unit._auto_connect(410)
+  unit.start.assert_called_once_with(trigger="car_connected")
+
+
+def test_without_the_gate_the_car_is_still_paged_before_the_adapter():
+  events = []
+  unit = _auto_connect_unit(events, "default")
+  unit._onroad = lambda: True
+  unit._shared_bluetooth_owner.prepare_companion.return_value = {"connected": False}
+  unit._auto_connect(100)
+  assert [call.kwargs for call in unit._shared_bluetooth_owner.prepare_companion.call_args_list] == [{}, {"connect": True}]
+  unit.start.assert_not_called()
+
+
+def test_the_attempt_only_admits_the_car_under_the_gate():
+  events = []
+  unit = supervisor.Supervisor.__new__(supervisor.Supervisor)
+  unit.config = {"companion_address": CAR}
+  unit.log = lambda name, **values: events.append((name, values))
+  unit._check_cancel = lambda: None
+  calls = []
+  unit._shared_bluetooth_owner = SimpleNamespace(prepare_companion=lambda address, selected, *, connect: calls.append((address, connect)))
+  unit._admit_companion({**car_profiles.DEFAULTS, "hfp_gate": True})
+  unit._admit_companion({**car_profiles.DEFAULTS, "hfp_gate": False})
+  assert calls == [(CAR, False), (CAR, True)]
+  assert [name for name, _ in events] == ["companion_car_admitted", "companion_car_connected"]
+  unit._shared_bluetooth_owner = None
+  with pytest.raises(RuntimeError):
+    unit._admit_companion(car_profiles.DEFAULTS)
+
+
+def test_events_between_sessions_go_to_a_rolling_daemon_log(tmp_path, monkeypatch):
+  import json
+  log = supervisor.EventLog(tmp_path)
+  log("auto_connect_gate", onroad=False)
+  log.open()
+  log("session_start")
+  log.close()
+  daemon = tmp_path / "daemon.jsonl"
+  assert [json.loads(line)["event"] for line in daemon.read_text().splitlines()] == ["auto_connect_gate"]
+  session = next(path for path in tmp_path.glob("session-*.jsonl"))
+  assert [json.loads(line)["event"] for line in session.read_text().splitlines()] == ["session_start"]
+  monkeypatch.setattr(supervisor, "DAEMON_LOG_BYTES", 1)
+  log("wifi_radio_waiting")
+  assert [json.loads(line)["event"] for line in (tmp_path / "daemon.1.jsonl").read_text().splitlines()] == ["auto_connect_gate"]
+  assert [json.loads(line)["event"] for line in daemon.read_text().splitlines()] == ["wifi_radio_waiting"]
+  assert log.recent[-1]["event"] == "wifi_radio_waiting"
