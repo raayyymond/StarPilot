@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import threading
 import time
 
+import numpy as np
+
 from openpilot.cereal import log, messaging
 from opendbc.car.structs import car
 from openpilot.cereal.visionipc import VisionStreamType
@@ -23,7 +25,7 @@ from openpilot.tools.simhil.scenario import LEAD_T_IDXS, SCENARIOS, T_IDXS, Scen
 RATES: dict[str, float] = {
   "carState": 100., "controlsState": 100., "selfdriveState": 100., "carControl": 100., "carOutput": 100.,
   "starpilotSelfdriveState": 100., "starpilotLateralState": 100.,
-  "modelV2": 20., "radarState": 20., "longitudinalPlan": 20., "narrowRoadCameraState": 20.,
+  "modelV2": 20., "radarState": 20., "longitudinalPlan": 20., "starpilotLongitudinalPlan": 20., "narrowRoadCameraState": 20.,
   "driverMonitoringState": 20., "driverStateV2": 20.,
   "pandaStates": 10., "starpilotCarState": 10.,
   "extrinsicsCalibration": 4., "lateralDelay": 4.,
@@ -269,6 +271,15 @@ class SimPublisher:
     lp.aTarget = f.a_ego
     lp.shouldStop = f.v_ego < 0.3 and lp.hasLead
     lp.allowThrottle = lp.allowBrake = True
+    return msg
+
+  def _starpilotLongitudinalPlan(self, f: ScenarioFrame):
+    # Synthetic cruise limits: the stock speed-based ceiling (longitudinal_planner A_CRUISE_MAX) and a standard 1.2 floor.
+    msg = messaging.new_message("starpilotLongitudinalPlan", valid=True)
+    plan = msg.starpilotLongitudinalPlan
+    plan.version = 1
+    plan.accelLimitMin = -1.2
+    plan.accelLimitMax = float(np.interp(f.v_ego, [0., 10., 25., 40.], [1.6, 1.2, 0.8, 0.6]))
     return msg
 
   def _driverMonitoringState(self, f: ScenarioFrame):

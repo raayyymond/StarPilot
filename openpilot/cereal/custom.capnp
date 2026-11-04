@@ -270,6 +270,8 @@ struct StarPilotLongitudinalPlan @0xda96579883444c35 {
   modelMonoTime @2 :UInt64;
   driveStartMonoTime @3 :UInt64;
   forceStopHolding @4 :Bool;
+  accelLimitMin @5 :Float32;  # m/s^2, the cruise accel floor in force this cycle (post profile/toggle overrides)
+  accelLimitMax @6 :Float32;  # m/s^2, the cruise accel ceiling in force this cycle
 }
 
 struct SlcState @0xa1680744031fdb2d {

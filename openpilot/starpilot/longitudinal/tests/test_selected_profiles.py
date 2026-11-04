@@ -253,6 +253,18 @@ class SelectedProfilesTests(unittest.TestCase):
       self.assertEqual(planner.mpc.params[:, [0, 1, 4, 5]].tolist(),
                        ordinary.mpc.params[:, [0, 1, 4, 5]].tolist())
 
+  def test_published_accel_limits_are_the_post_override_cruise_limits(self):
+    """starpilotLongitudinalPlan.accelLimitMin/Max carry the floor and ceiling get_cruise_accel clipped to."""
+    ordinary, _ = self.run_planner()
+    self.assertAlmostEqual(ordinary.cruise_accel_min, planner_module.A_CRUISE_MIN)
+    selected, cruise = self.run_planner(SelectedProfileTuning(acceleration_max=0.2, cruise_brake_magnitude=2.4,
+                                                              braking_style='sport'))
+    self.assertAlmostEqual(selected.cruise_accel_min, -2.4)
+    self.assertAlmostEqual(selected.cruise_accel_max, 0.2)
+    self.assertEqual(cruise['selected_acceleration_max'], 0.2)
+    self.assertGreaterEqual(selected.a_cruise, selected.cruise_accel_min)
+    self.assertLessEqual(selected.a_cruise, selected.cruise_accel_max)
+
   def test_selected_braking_retains_native_hazard_priority(self):
     for kwargs in ({'lead': True}, {'force': True}):
       with self.subTest(kwargs=kwargs):

@@ -63,10 +63,25 @@ def get_max_accel(v_ego):
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
-def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
-                     profile: AppliedProfile | None = None,
-                     base_brake_floor: float = A_CRUISE_MIN, selected_acceleration_max: float | None = None, faster_takeoffs: bool = False,
-                     *, a_target_prev: float | None = None):
+def cruise_accel_limits(e2e, v_ego, angle_steers, CP, accel_coast, allow_throttle, profile: AppliedProfile | None = None,
+                        base_brake_floor: float = A_CRUISE_MIN, selected_acceleration_max: float | None = None,
+                        faster_takeoffs: bool = False) -> tuple[float, float]:
+  """(cruise_min, max_accel): the floor and ceiling get_cruise_accel clips the cruise target to, in m/s^2.
+
+  Trace of the StarPilot toggles and overrides that reach these numbers (all resolved by LongitudinalPlanner.update
+  before the call, so both values are post-override):
+  - ceiling: get_max_accel(v_ego) (ACCEL_MAX in experimental/e2e), replaced by the selected acceleration profile
+    (LongitudinalPersonalityProfiles selectedAccelerationProfile / per-personality acceleration override ->
+    resolve_selected_profiles -> selected_acceleration_max, further capped by the Tesla pre-AP adaptive cap), capped
+    by the smoothed legacy CustomPersonalities / Traffic-mode profile (profile_runtime.resolve -> ProfileSmoother ->
+    AppliedProfile.acceleration_max, itself replaced by the selected curve when one is chosen) and ACCEL_MAX; outside
+    e2e also by the lateral-accel budget (faster lead takeoffs widen it at low speed) and the coast limit when the
+    model withholds throttle.
+  - floor: -AppliedProfile.cruise_brake_magnitude (legacy braking curve, Traffic braking, or the global
+    selectedDecelerationProfile / selected braking response eco 0.6, standard 1.2, sport 2.4 when it applies; at
+    least A_CRUISE_MIN while a speed/curve ceiling is active), else base_brake_floor (the same global response, or
+    A_CRUISE_MIN, or a wheel-coast plan's brake floor); never below ACCEL_MIN. forceDecel drops the profile.
+  """
   max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
   if selected_acceleration_max is not None and not e2e:
     max_accel = selected_acceleration_max
@@ -87,6 +102,15 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
       max_accel = min(max_accel, coast_limit)
 
   cruise_min = max(ACCEL_MIN, -profile.cruise_brake_magnitude) if profile is not None else max(ACCEL_MIN, base_brake_floor)
+  return float(cruise_min), float(max_accel)
+
+
+def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
+                     profile: AppliedProfile | None = None,
+                     base_brake_floor: float = A_CRUISE_MIN, selected_acceleration_max: float | None = None, faster_takeoffs: bool = False,
+                     *, a_target_prev: float | None = None):
+  cruise_min, max_accel = cruise_accel_limits(e2e, v_ego, angle_steers, CP, accel_coast, allow_throttle, profile,
+                                              base_brake_floor, selected_acceleration_max, faster_takeoffs)
   target_accel = np.clip(v_cruise - v_ego, cruise_min, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
   decel_start = a_cruise_prev if a_target_prev is None else min(a_cruise_prev, a_target_prev)
@@ -115,6 +139,7 @@ class LongitudinalPlanner:
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
+    self.cruise_accel_min, self.cruise_accel_max = A_CRUISE_MIN, ACCEL_MAX  # published on starpilotLongitudinalPlan
     self.output_a_target = init_a
     self.output_should_stop = False
 
@@ -394,6 +419,11 @@ class LongitudinalPlanner:
                                      accel_coast, self.allow_throttle, cruise_profile,
                                      base_brake_floor=global_floor, selected_acceleration_max=selected_acceleration, faster_takeoffs=faster_takeoffs,
                                      a_target_prev=self.output_a_target)
+    # The same limits get_cruise_accel just clipped to (kept outside it so its float return and patches stay intact).
+    self.cruise_accel_min, self.cruise_accel_max = cruise_accel_limits(
+      sm['selfdriveState'].experimentalMode, v_ego, steer_angle_without_offset, self.CP, accel_coast, self.allow_throttle,
+      cruise_profile, base_brake_floor=global_floor, selected_acceleration_max=selected_acceleration,
+      faster_takeoffs=faster_takeoffs)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     encouraged_model = self.encouragement.update(
@@ -510,5 +540,7 @@ class LongitudinalPlanner:
     hold.modelMonoTime = longitudinalPlan.modelMonoTime
     hold.driveStartMonoTime = self.plan_drive_id
     hold.forceStopHolding = bool(self.force_stop_plan.manual_hold)
+    hold.accelLimitMin = float(self.cruise_accel_min)
+    hold.accelLimitMax = float(self.cruise_accel_max)
     pm.send('longitudinalPlan', plan_send)
     pm.send('starpilotLongitudinalPlan', companion)

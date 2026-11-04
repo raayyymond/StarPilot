@@ -61,6 +61,16 @@ class LongitudinalPlanValidityTest(unittest.TestCase):
         self.assertEqual(published.companion.logMonoTime, plan.logMonoTime)
         self.assertEqual(published.companion.starpilotLongitudinalPlan.sourcePlanMonoTime, plan.logMonoTime)
 
+  def test_companion_carries_the_cruise_accel_limits(self):
+    cp = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+    planner = LongitudinalPlanner(cp)
+    planner.cruise_accel_min, planner.cruise_accel_max = -2.4, 1.25
+    published = Capture()
+    planner.publish(Sources(), published)
+    hold = published.companion.starpilotLongitudinalPlan
+    self.assertAlmostEqual(hold.accelLimitMin, -2.4, places=5)
+    self.assertAlmostEqual(hold.accelLimitMax, 1.25, places=5)
+
   def test_optional_vision_frequency_and_dashboard_absence_do_not_invalidate_native_plan(self):
     cp = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
     planner = LongitudinalPlanner(cp)

@@ -132,7 +132,7 @@ def test_lead_colour_shifts_to_red_with_ttc():
 
 def test_labels_and_wheel_angle():
   assert bem.distance_label(32.4) == '32 m'
-  assert bem.distance_label(10, metric=False) == '33 ft'
+  assert bem.distance_label(10, metric=False) == '11 yd'
   assert bem.ego_wheel_angle(90.0) < 0 < bem.ego_wheel_angle(-90.0), 'left steering turns the glyph wheels left'
   assert abs(bem.ego_wheel_angle(1e4)) == pytest.approx(math.radians(35))
   assert bem.ego_wheel_angle(float('nan')) == 0.0
@@ -241,28 +241,61 @@ def _renderer_with_scene():
 
 
 def _layers(view, rect=RECT):
+  """(road, path) draws for the current scene, as draw() would fetch them."""
   key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), view.config)
-  return view._scene_layers(view.scene, rect, key, bem.view_params(rect, view.config))
+  pv = bem.view_params(rect, view.config)
+  return view._road_draw(view.scene, rect, key, pv), view._path_draw(view.scene, rect, key, pv)
+
+
+def _op_points(op) -> np.ndarray:
+  """The (n, 2) points a DrawTriangleStrip/Fan op passes to C."""
+  return np.array([(op[1][i].x, op[1][i].y) for i in range(op[2])])
+
+
+def _draw_ops(ops):
+  """The C draw ops of an op list (without the trailing buffer keep-alive entry)."""
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  return [op for op in ops if op[0] is not ber._keep]
 
 
 def test_scene_geometry_is_cached_until_an_input_changes():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   view, radar = _renderer_with_scene()
-  road, lines, path = first = _layers(view)
-  assert road and lines and path, 'road, lines and path all produce quads'
-  assert len(road) % 6 == len(lines) % 6 == len(path) % 6 == 0, 'six raw calls per quad'
-  assert _layers(view) is first, 'an unchanged scene replays the cached call lists'
+  (road, path) = first = _layers(view)
+  assert road.road and road.lines and road.overlay and path.strips, 'road, lines, fade overlay and path all produce ops'
+  lines = _draw_ops(road.lines)
+  assert all(op[0] is ber._raw.DrawTriangleStrip for op in lines) and len(lines) == 2 + 4, 'one strip per edge and lane line'
+  assert len(_draw_ops(road.road)) == 1, 'the road fill is one strip'
+  assert all(op[0] is ber._raw.DrawRectangleGradientV for op in road.overlay)
+  assert _layers(view)[0] is first[0] and _layers(view)[1] is first[1], 'an unchanged scene replays the cached ops'
   view.ingest(None, radar, None)
-  assert _layers(view) is first, 'leads and car state alone keep the road'
+  assert _layers(view)[0] is first[0], 'leads and car state alone keep the road'
   view.opacity = 0.5
-  assert _layers(view) is not first, 'opacity is part of the key'
-  again = _layers(view)
-  assert _layers(view, SimpleNamespace(x=0.0, y=0.0, width=300.0, height=400.0)) is not again, 'so is the rect'
+  assert _layers(view)[0] is not first[0], 'opacity is part of the key'
+  again = _layers(view)[0]
+  assert _layers(view, SimpleNamespace(x=0.0, y=0.0, width=300.0, height=400.0))[0] is not again, 'so is the rect'
   again = _layers(view)
   view.ingest(_model(path_y=0.5), radar, None)
-  assert _layers(view) is not again, 'a new model frame rebuilds'
-  again = _layers(view)
+  assert _layers(view)[0] is not again[0] and _layers(view)[1] is not again[1], 'a new model frame rebuilds'
+  again = _layers(view)[0]
   view.road_style = {'laneLines': '#FF8800C0'}
-  assert _layers(view) is not again, 'so does a lane color setting'
+  assert _layers(view)[0] is not again, 'so does a lane color setting'
+
+
+def test_one_strip_per_ribbon_run_and_per_vertex_only_for_row_colour_modes():
+  view, _ = _renderer_with_scene()
+  lane = view.scene.lanes[0].copy()
+  lane[(view.scene.grid > 20) & (view.scene.grid < 30)] = np.nan  # a gap splits the line
+  view.scene.lanes = [lane, *view.scene.lanes[1:]]
+  road, path = _layers(view)
+  assert len(_draw_ops(road.lines)) == 2 + 4 + 1, 'the line with a gap is two strips'
+  assert path.strips and not path.quads, 'a single-colour path is strips'
+  assert len(_draw_ops(path.strips)) <= 30, 'the stepped fade stays a few dozen calls'
+  view.ingest(None, None, None, experimental=True)
+  view.scene.path_accel = np.full(view.scene.grid.size, 1.0)
+  _, path = _layers(view)
+  assert path.quads and not path.strips, 'the experimental accel tint keeps per-vertex colours'
+  assert len(path.quads) % 6 == 0
 
 
 def test_ego_glyph_cache_ignores_steering_jitter_below_its_resolution(monkeypatch):
@@ -305,15 +338,20 @@ def test_ego_lane_lines_follow_the_lateral_state():
 
   idle = colors()
   assert ber.LAT_ACTIVE_LANE not in idle and BLUE not in idle
-  first = _layers(view)
+  first = _layers(view)[0]
   view.ingest(None, radar, None, lat_active=True)
   assert colors()[1:3] == [ber.LAT_ACTIVE_LANE] * 2, 'the ego lane own lines turn green'
   assert colors()[0] == idle[0] and colors()[3] == idle[3], 'the outer lines keep their color'
-  green = _layers(view)
+  green = _layers(view)[0]
   assert green is not first, 'the lateral state is part of the scene cache key'
-  assert _layers(view) is green, 'and an unchanged state still replays the cache'
-  view.ingest(None, radar, None, lane_centering=True)
-  assert colors()[1:3] == [BLUE] * 2, 'blue while the lane-centering correction applies'
+  assert _layers(view)[0] is green, 'and an unchanged state still replays the cache'
+  view.ingest(None, radar, None, lane_centering_direction=-1)
+  assert colors()[1:3] == [BLUE, ber.LAT_ACTIVE_LANE], 'only the left line, the side being corrected toward, is blue'
+  left = _layers(view)[0]
+  assert left is not green, 'the direction is part of the scene cache key'
+  view.ingest(None, radar, None, lane_centering_direction=1)
+  assert colors()[1:3] == [ber.LAT_ACTIVE_LANE, BLUE], 'then only the right line'
+  assert _layers(view)[0] is not left
   view.ingest(None, radar, None, lat_active=False)
   assert colors() == idle, 'centering without lateral control is not shown'
 
@@ -335,15 +373,17 @@ def test_poll_reads_lateral_active_and_lane_centering():
   view = BirdsEyeRenderer(text=object())
   view.clock_ns = lambda: now
   view.poll(_lateral_sm(12, True, 0.0, now), started_frame=10)
-  assert view.scene.lat_active and not view.scene.lane_centering, 'active with no applied correction is green'
+  assert view.scene.lat_active and view.scene.lane_centering_direction == 0, 'active with no applied correction is green'
   view.poll(_lateral_sm(12, True, 0.001, now), started_frame=10)
-  assert view.scene.lat_active and view.scene.lane_centering
+  assert view.scene.lat_active and view.scene.lane_centering_direction == 1
+  view.poll(_lateral_sm(12, True, -0.001, now), started_frame=10)
+  assert view.scene.lat_active and view.scene.lane_centering_direction == -1, 'the sign is carried, not just on/off'
   view.poll(_lateral_sm(12, True, 0.001, now, fresh_ns=now - 1_000_000_000), started_frame=10)
-  assert view.scene.lat_active and not view.scene.lane_centering, 'a stale lane-centering message is not blue'
+  assert view.scene.lat_active and view.scene.lane_centering_direction == 0, 'a stale lane-centering message is not blue'
   view.poll(_lateral_sm(12, False, 0.0, now), started_frame=10)
-  assert not view.scene.lat_active and not view.scene.lane_centering
+  assert not view.scene.lat_active and view.scene.lane_centering_direction == 0
   view.poll(_SM({'carControl': SimpleNamespace(latActive=True)}, frame=12, updated=True), started_frame=10)
-  assert view.scene.lat_active and not view.scene.lane_centering, 'a SubMaster without the fork service is green only'
+  assert view.scene.lat_active and view.scene.lane_centering_direction == 0, 'a SubMaster without the fork service is green only'
 
 
 def test_distance_rungs_are_gone():
@@ -369,8 +409,8 @@ def test_default_forward_scale_is_linear_and_cars_are_true_to_scale():
                           leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
   lead = ber.scene_leads(radar, None)[0]
   assert lead.d_rel == 30.0
-  assert bem.distance_label(lead.d_rel) == '30 m' and bem.distance_label(lead.d_rel, metric=False) == '98 ft'
-  assert bem.distance_label(30.48, metric=False) == '100 ft'
+  assert bem.distance_label(lead.d_rel) == '30 m' and bem.distance_label(lead.d_rel, metric=False) == '33 yd'
+  assert bem.distance_label(91.44, metric=False) == '100 yd'
   # Lead and ego outlines: 4.6 x 1.9 m at the lane lines' px/m, the lead's rear bumper at dRel.
   assert (ber.EGO_LENGTH, ber.EGO_WIDTH, ber.LEAD_LENGTH, ber.LEAD_WIDTH) == (4.6, 1.9, 4.6, 1.9)
   renderer = ber.BirdsEyeRenderer(text=object())
@@ -414,3 +454,143 @@ def test_lead_heading_follows_the_lanes_not_the_planned_path():
   view = BirdsEyeRenderer(text=object())
   view.ingest(model, None, None)
   assert view._road_heading(view.scene, 30.0) == pytest.approx(math.atan(0.1), abs=1e-6), 'path only without lanes/edges'
+
+
+def test_zoom_follows_speed_and_keeps_the_view_true_to_scale():
+  cfg = bem.DEFAULT_CONFIG
+  assert bem.zoom_x_max(0.0) == bem.zoom_x_max(10.0) == bem.ZOOM_NEAR_X_MAX
+  assert bem.zoom_x_max(30.0) == bem.zoom_x_max(40.0) == cfg.x_max
+  assert bem.zoom_x_max(20.0) == pytest.approx((bem.ZOOM_NEAR_X_MAX + cfg.x_max) / 2)
+  assert bem.zoomed_config(cfg, cfg.x_max) is cfg
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  near = bem.zoomed_config(cfg, bem.ZOOM_NEAR_X_MAX)
+  far_view, near_view = bem.view_params(stream, cfg), bem.view_params(stream, near)
+  assert far_view.lateral_ppm == pytest.approx(9.3, abs=0.1) and near_view.lateral_ppm == pytest.approx(19.4, abs=0.2)
+  assert float(bem.depth_scale_at(10.0, near_view)) == pytest.approx(near_view.lateral_ppm), 'still isotropic'
+  assert near.x_min == cfg.x_min and near.lateral_range / cfg.lateral_range == pytest.approx(35 / 73)
+  ego = np.array([[cfg.x_min, 0.0]])
+  assert bem.car_to_widget(ego, stream, near)[0] == pytest.approx(bem.car_to_widget(ego, stream, cfg)[0]), 'the view is anchored at x_min'
+
+
+def test_zoom_filter_is_smooth_and_quantized():
+  zoom = bem.ZoomFilter()
+  assert zoom.update(None, 0.0) == bem.DEFAULT_CONFIG.x_max, 'no speed yet: the default view'
+  assert zoom.update(5.0, 0.0) == bem.ZOOM_NEAR_X_MAX, 'the first speed is taken directly'
+  values = [zoom.update(30.0, 1 / 30) for _ in range(30)]
+  assert values[0] < bem.ZOOM_NEAR_X_MAX + 2.0, 'a speed step does not jump the view'
+  assert 50.0 < values[-1] < 60.0, '~1 s time constant: ~63 % of the way after 1 s'
+  assert all(v % bem.ZOOM_STEP == 0 for v in values) and values == sorted(values)
+  # A real acceleration (1.5 m/s^2 from 10 to 30 m/s) changes the view on a minority of frames.
+  zoom = bem.ZoomFilter()
+  ramp = [zoom.update(min(30.0, 10.0 + 1.5 * i / 30), 1 / 30) for i in range(600)]
+  changes = sum(a != b for a, b in zip(ramp, ramp[1:], strict=False))
+  assert ramp[-1] == bem.DEFAULT_CONFIG.x_max and changes < 0.3 * len(ramp)
+  for i in range(300):
+    zoom.update(29.8 if i % 2 else 30.2, 1 / 30)
+  assert zoom.x_max == bem.DEFAULT_CONFIG.x_max, 'speed noise under a step does not move the view'
+
+
+def test_renderer_zoom_rebuilds_the_view_only_on_a_step():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  view = BirdsEyeRenderer(text=object())
+  now = [0.0]
+  view.clock = lambda: now[0]
+  assert view.view_config() == view.config, 'no carState yet'
+  view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=3.0))
+  first = view.view_config()
+  assert first.x_max == bem.ZOOM_NEAR_X_MAX and first.x_min == view.config.x_min
+  now[0] += 1 / 30
+  assert view.view_config() == first
+  assert view.scene.grid[-1] == view.config.x_max, 'the scene grid spans the widest zoom'
+
+
+def test_lines_stop_at_the_camera_draw_distance_and_the_path_at_the_camera_lead_cut():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  model = _model()
+  model.position = _xyz(np.linspace(0, 40, 33), np.zeros(33))  # a slow plan: the camera draws 40 m
+  assert ber.camera_draw_distance(model) == 40.0
+  model.position = _xyz(np.linspace(0, 3, 33), np.zeros(33))
+  assert ber.camera_draw_distance(model) == ber.MIN_DRAW_DISTANCE
+  assert ber.camera_path_end(None, 80.0) == 80.0
+  assert ber.camera_path_end(30.0, 80.0) == pytest.approx(50.0), 'lead_d = 60, minus min(21, 10)'
+  assert ber.camera_path_end(10.0, 80.0) == pytest.approx(13.0), 'lead_d = 20, minus 7'
+  assert ber.camera_path_end(60.0, 80.0) == 80.0
+  view, radar = _renderer_with_scene()  # the plan reaches 120 m, a radar lead at 30 m
+  assert view.scene.draw_distance == ber.MAX_DRAW_DISTANCE and view.scene.lead_one_d == 30.0
+  short = _model()
+  short.position = _xyz(np.linspace(0, 40, 33), np.zeros(33))
+  view.ingest(short, radar, None)
+  assert view.scene.draw_distance == 40.0
+  captured = {}
+  original = view._build_road
+
+  def spy(scene, rect, v, reach):
+    captured.update(reach=reach)
+    return original(scene, rect, v, reach)
+  view._build_road = spy
+  _, path = _layers(view)
+  assert captured['reach'] <= 40.0 and captured['reach'] > 38.0
+  assert path.end is not None and path.end[0] <= 40.0, 'the lead cut (50 m) is clipped to the draw distance'
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  pv = bem.view_params(stream, view.config)
+  road = original(view.scene, stream, pv, 40.0)
+  top = bem.car_to_widget(np.array([[40.0, 0.0]]), stream, view.config, pv)[0, 1]
+  for op in _draw_ops(road.road + road.lines):
+    assert _op_points(op)[:, 1].min() >= top - 4.0, 'nothing beyond the draw distance'
+
+
+def test_ego_lane_lines_are_at_least_three_pixels_zoomed_out():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  view, _ = _renderer_with_scene()
+  styles = view._line_styles(view.scene)
+  edges, lanes = styles[:len(view.scene.edges)], styles[len(view.scene.edges):]
+  assert all(line[2] == ber.EDGE_MIN_PX == 3.5 for line in edges)
+  assert all(line[2] == ber.LANE_MIN_PX == 3.0 for line in lanes)
+  assert not hasattr(view, '_blinkers') and not hasattr(ber, 'TRIANGLE_LAYOUT'), 'the HUD owns the blinker arrow'
+
+
+def test_radar_lead_lateral_is_radard_yrel_only():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import scene_leads
+  radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=30.0, yRel=0.0, vRel=0.0),
+                          leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
+  model = _model(lead_prob=0.9)
+  model.leadsV3[0].y = [2.5]
+  assert scene_leads(radar, model)[0].y == 0.0, 'the model never overrides the fused lead'
+  radar.leadOne.yRel = -6.0
+  assert scene_leads(radar, model)[0].y == 6.0, 'a lead two lanes over is not clamped'
+
+
+def test_lead_smoothing_follows_a_lane_change():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeLead, BirdsEyeRenderer
+  leads = [BirdsEyeLead(30.0, 0.0, 0.0)]
+  for _ in range(10):  # 0.5 s at 20 Hz after a 1.2 m step
+    leads = BirdsEyeRenderer._smooth_leads(leads, [BirdsEyeLead(30.0, 1.2, 0.0)])
+  assert leads[0].y == pytest.approx(1.2, abs=0.01), 'lateral motion is tracked, nothing clamps y'
+  jumped = BirdsEyeRenderer._smooth_leads(leads, [BirdsEyeLead(30.0, 4.9, 0.0)])
+  assert jumped[0].y == 4.9, 'a whole-lane jump is taken directly, not held back'
+
+
+def test_lead_glyph_is_drawn_at_its_own_lateral_position(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  view, radar = _renderer_with_scene()
+  poses = []
+  monkeypatch.setattr(view, '_cars', lambda v, rect, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 8, 2))))
+  monkeypatch.setattr(ber, '_run', lambda *a: None)
+  monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
+  for y_rel in (0.0, -3.0):  # the label filter follows the glyph; it never moves the glyph
+    radar.leadOne.yRel = y_rel
+    view.scene.leads = ber.scene_leads(radar, None)
+    view._leads(view.scene, RECT, bem.view_params(RECT, view.config))
+  assert [p[1] for p in poses] == [0.0, 3.0]
+
+
+def test_label_position_is_filtered_and_whole_pixels():
+  from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
+  view = BirdsEyeRenderer(text=object())
+  x, y = view._label_position([], 100.4, 200.6)
+  assert (x, y) == (100.0, 201.0)
+  prev, view._labels = view._labels, []
+  x, y = view._label_position(prev, 110.4, 200.6)
+  assert (x, y) == (105.0, 201.0), 'half way toward the glyph'
+  prev, view._labels = view._labels, []
+  assert view._label_position(prev, 400.0, 200.0) == (400.0, 200.0), 'a side flip snaps'

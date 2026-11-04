@@ -14,7 +14,7 @@ one pixels-per-meter forward and sideways at every distance, so lane widths, car
 keep their real proportions and a 30 m gap is twice a 15 m one. k > 0 is a mild chase-cam: straight
 lines stay straight, the ego region keeps its scale and distant geometry narrows by 1 / (1 + k).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import numpy as np
@@ -48,6 +48,56 @@ class BirdsEyeConfig:
 
 
 DEFAULT_CONFIG = BirdsEyeConfig()
+
+# Speed-based zoom. The view shows roughly the next 2.3-3 s of travel: 30 m ahead at city speed (<= 10 m/s,
+# ~20 px/m at 720 p, a 3.7 m lane ~75 px) widening linearly to the default 68 m at highway speed (>= 30 m/s,
+# ~9.3 px/m). 20 m/s (72 km/h) shows 49 m.
+ZOOM_NEAR_X_MAX = 30.0
+ZOOM_SLOW_SPEED = 10.0
+ZOOM_FAST_SPEED = 30.0
+ZOOM_TAU = 1.0    # s, first-order filter time constant
+ZOOM_STEP = 0.5   # m, x_max quantum: the view (and every cached layer) only changes when the zoom moves a step
+
+
+def zoom_x_max(v_ego: float, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
+  """Unfiltered top-edge distance for an ego speed: ZOOM_NEAR_X_MAX up to ZOOM_SLOW_SPEED, cfg.x_max from ZOOM_FAST_SPEED."""
+  if not math.isfinite(v_ego):
+    return cfg.x_max
+  near = min(ZOOM_NEAR_X_MAX, cfg.x_max)
+  t = (v_ego - ZOOM_SLOW_SPEED) / (ZOOM_FAST_SPEED - ZOOM_SLOW_SPEED)
+  return near + (cfg.x_max - near) * min(1.0, max(0.0, t))
+
+
+def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
+  """cfg showing x_max ahead: same x_min (the ego stays put), lateral_range scaled with the span (same aspect)."""
+  if x_max == cfg.x_max:
+    return cfg
+  ratio = (x_max - cfg.x_min) / max(1e-3, cfg.x_max - cfg.x_min)
+  return replace(cfg, x_max=x_max, lateral_range=cfg.lateral_range * ratio)
+
+
+class ZoomFilter:
+  """First-order filtered, quantized x_max for the speed-based zoom.
+
+  The quantized value only moves once the filter is more than 3/4 of a step away from it, so speed noise near a
+  step boundary does not toggle the view (and rebuild the cached layers) back and forth."""
+  def __init__(self, cfg: BirdsEyeConfig = DEFAULT_CONFIG, tau: float = ZOOM_TAU, step: float = ZOOM_STEP):
+    self.cfg, self.tau, self.step = cfg, tau, step
+    self.value: float | None = None
+    self.x_max = cfg.x_max
+
+  def update(self, v_ego: float | None, dt: float) -> float:
+    if v_ego is None or not math.isfinite(v_ego):
+      return self.x_max
+    target = zoom_x_max(v_ego, self.cfg)
+    if self.value is None:
+      self.value = target
+    else:
+      alpha = 1.0 - math.exp(-max(0.0, min(dt, 0.5)) / self.tau)
+      self.value += (target - self.value) * alpha
+    if abs(self.value - self.x_max) >= 0.75 * self.step:
+      self.x_max = min(self.cfg.x_max, round(self.value / self.step) * self.step)
+    return self.x_max
 
 
 @dataclass(frozen=True)
@@ -290,14 +340,14 @@ def lead_color(d_rel: float, v_rel: float) -> tuple[int, int, int]:
   return tuple(int(round(p + (q - p) * t)) for p, q in zip(a, b, strict=True))  # type: ignore[return-value]
 
 
-FEET_PER_METER = 3.28084
+YARDS_PER_METER = 1.09361
 
 
 def distance_label(d_rel: float, metric: bool = True) -> str:
-  """The radar gap (dRel, ego front bumper to lead rear bumper) as printed, with no offset."""
+  """The radar gap (dRel, ego front bumper to lead rear bumper) as printed, with no offset: metres or yards."""
   if metric:
     return f"{max(0.0, d_rel):.0f} m"
-  return f"{max(0.0, d_rel) * FEET_PER_METER:.0f} ft"
+  return f"{max(0.0, d_rel) * YARDS_PER_METER:.0f} yd"
 
 
 def ego_wheel_angle(steering_angle_deg: float, steer_ratio: float = 15.0, exaggerate: float = 2.0) -> float:
@@ -316,3 +366,241 @@ def smooth(previous: np.ndarray | None, current: np.ndarray, alpha: float) -> np
   fresh = ~np.isfinite(previous) | ~np.isfinite(current)
   out[fresh] = current[fresh]
   return out
+
+
+# ---- strip drawing ------------------------------------------------------------------------------
+
+def strip_points(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+  """(N, 2) left and right ribbon sides -> contiguous (2N, 2) float32 [L0, R0, L1, R1, ..]: a triangle strip."""
+  left, right = np.asarray(left), np.asarray(right)
+  out = np.empty((2 * left.shape[0], 2), dtype=np.float32)
+  out[0::2] = left
+  out[1::2] = right
+  return out
+
+
+def ring_strip(poly: np.ndarray, thickness: float) -> np.ndarray:
+  """A closed outline of a convex (or simple) polygon as one triangle strip: (2(n+1), 2) float32.
+
+  The stroke is centred on the edges and mitred at the corners, so every edge is `thickness` wide."""
+  p = np.asarray(poly, dtype=np.float64)
+  e_in = p - np.roll(p, 1, axis=0)
+  e_out = np.roll(p, -1, axis=0) - p
+  for e in (e_in, e_out):
+    n = np.hypot(e[:, 0], e[:, 1])
+    n[n < 1e-9] = 1.0
+    e /= n[:, None]
+  n_in = np.stack((e_in[:, 1], -e_in[:, 0]), axis=1)
+  n_out = np.stack((e_out[:, 1], -e_out[:, 0]), axis=1)
+  denom = np.maximum(1.0 + np.sum(n_in * n_out, axis=1), 0.25)  # caps the miter at sharp corners
+  offset = (n_in + n_out) / denom[:, None] * (thickness / 2.0)
+  out = strip_points(p + offset, p - offset)
+  return np.concatenate((out, out[:2]))
+
+
+def overlay_bands(top: float, height: float, cut_y: float | None = None, soft_y: float | None = None,
+                  hold: float = 0.6, end: float = 0.95, hold_alpha: float = 0.8) -> list[tuple[float, float, float, float]]:
+  """Background-coloured gradient bands (y_top, y_bottom, alpha_top, alpha_bottom) drawn over the road to fade it.
+
+  The far fade is 1 - the old per-row fade profile (alpha 1 at the bottom, hold_alpha at `hold`, 0 at `end`, as
+  height fractions). With cut_y, everything above cut_y is covered and the band from soft_y up to cut_y fades in,
+  so lines end softly at the draw distance. Overlays of one colour compose multiplicatively, so the two stack."""
+  bottom = top + height
+
+  def y(t):
+    return bottom - t * height
+  bands = [(y(hold), bottom, 1.0 - hold_alpha, 0.0), (y(end), y(hold), 1.0, 1.0 - hold_alpha), (top, y(end), 1.0, 1.0)]
+  if cut_y is not None and cut_y > top:
+    cut_y = min(cut_y, bottom)
+    soft_y = cut_y if soft_y is None else min(max(soft_y, cut_y), bottom)
+    clipped = []
+    for y0, y1, a0, a1 in bands:
+      if y1 <= cut_y:
+        continue
+      if y0 < cut_y:
+        a0 = a0 + (a1 - a0) * (cut_y - y0) / (y1 - y0)
+        y0 = cut_y
+      clipped.append((y0, y1, a0, a1))
+    bands = clipped + [(cut_y, soft_y, 1.0, 0.0), (top, cut_y, 1.0, 1.0)]
+  return [b for b in bands if b[1] - b[0] >= 0.5 and max(b[2], b[3]) > 0.0]
+
+
+def end_fade_length(start: float, end: float, fraction: float = 0.25, low: float = 4.0, high: float = 12.0) -> float:
+  """Length of the soft end of a line drawn from start to end: `fraction` of it, clipped to [low, high] metres and
+  never longer than the line."""
+  return max(0.0, min(max(fraction * (end - start), low), high, end - start))
+
+
+LINE_STD_LIMIT = 1.0  # m: a lane line or road edge stops where its own per-point lateral std (yStd) passes this
+
+
+def std_end(grid: np.ndarray, y_std: np.ndarray | None, limit: float = LINE_STD_LIMIT) -> float:
+  """First grid distance where a line's resampled yStd exceeds limit; inf when it never does or is not published
+  (missing, or all zero / non-finite, as when modeld leaves XYZTData.yStd empty)."""
+  if y_std is None:
+    return math.inf
+  std = np.asarray(y_std, dtype=np.float64)
+  ok = np.isfinite(std)
+  if not (std[ok] > 0).any():
+    return math.inf
+  over = np.flatnonzero(ok & (std > limit))
+  return float(grid[over[0]]) if over.size else math.inf
+
+
+def line_rows(grid: np.ndarray, ys: np.ndarray, end: float, start: float, step: float = 0.75):
+  """Rows to draw a resampled line up to `end` with a soft end: its grid rows before the fade, then every `step`
+  metres over the fade (bem.end_fade_length from `start`, the view's bottom), the last row exactly at the end.
+
+  Returns (xs, lateral, valid, end, fade length) or None with nothing to draw. The end is also cut at the line's
+  own data (no fade when that is the grid's end); rows inside a gap of the line are invalid."""
+  ok = np.isfinite(ys)
+  if np.count_nonzero(ok) < 2:
+    return None
+  gx = grid[ok]
+  end = min(end, float(gx[-1]))
+  first = float(gx[0])
+  if end - first < 1e-3:
+    return None
+  # A line running to the grid's end runs off the widest view: no soft end there.
+  fade = 0.0 if end >= grid[-1] - 1e-6 else end_fade_length(max(start, first), end)
+  body = grid[(grid >= first) & (grid < end - fade)]
+  xs = np.concatenate((body, np.arange(end - fade, end, step), [end]))
+  lateral = np.interp(xs, gx, ys[ok])
+  valid = np.interp(xs, grid, ok.astype(np.float64)) > 0.999
+  return xs, lateral, valid, end, fade
+
+
+def taper(xs, end: float, length: float) -> np.ndarray:
+  """1 up to end - length, falling linearly to 0 at end."""
+  xs = np.asarray(xs, dtype=np.float64)
+  if length <= 1e-6:
+    return (xs <= end).astype(np.float64)
+  return np.clip((end - xs) / length, 0.0, 1.0)
+
+
+def alpha_groups(alpha: np.ndarray, step: float = 0.05) -> list[tuple[int, int, float]]:
+  """Split rows with per-row alpha into strips of one alpha: (first row, last row + 1, alpha).
+
+  Each segment between consecutive rows takes the mean of its two rows; consecutive segments share a strip while
+  they fall in the same `step`-wide alpha bin, and the strip's alpha is the middle of its segments' range, so it
+  is within step / 2 of every segment it covers."""
+  a = np.asarray(alpha, dtype=np.float64)
+  if a.size < 2:
+    return []
+  seg = (a[:-1] + a[1:]) / 2
+  starts = np.concatenate(([0], np.flatnonzero(np.diff(np.floor(seg / step))) + 1))
+  values = (np.minimum.reduceat(seg, starts) + np.maximum.reduceat(seg, starts)) / 2
+  ends = np.append(starts[1:], seg.size) + 1
+  return list(zip(starts.tolist(), ends.tolist(), values.tolist(), strict=True))
+
+
+# ---- extra model data -----------------------------------------------------------------------------
+
+LANE_CHANGE_STATES = {'off': 0, 'preLaneChange': 1, 'laneChangeStarting': 2, 'laneChangeFinishing': 3}
+LANE_CHANGE_SIDES = {'none': 0, 'left': -1, 'right': 1}
+DEFAULT_LANE_WIDTH = 3.7
+
+
+def lane_change_code(state) -> int:
+  """modelV2.meta.laneChangeState (enum, its name or raw int) -> 0 off, 1 pre, 2 starting, 3 finishing."""
+  if isinstance(state, (int, np.integer)) and not isinstance(state, bool):
+    return int(state) if 0 <= state <= 3 else 0
+  return LANE_CHANGE_STATES.get(str(state), 0)
+
+
+def lane_change_side(direction) -> int:
+  """modelV2.meta.laneChangeDirection -> -1 left, +1 right (car-frame y sign), 0 none."""
+  if isinstance(direction, (int, np.integer)) and not isinstance(direction, bool):
+    return {1: -1, 2: 1}.get(int(direction), 0)
+  return LANE_CHANGE_SIDES.get(str(direction), 0)
+
+
+def lane_width(lanes, grid: np.ndarray, x: float, side: int, default: float = DEFAULT_LANE_WIDTH,
+               low: float = 2.5, high: float = 5.0) -> float:
+  """Width of the lane on `side` (-1 left, +1 right) at x from laneLines [0]/[1] or [2]/[3]; default if implausible."""
+  if side == 0 or len(lanes) < 4:
+    return default
+  a, b = (lanes[0], lanes[1]) if side < 0 else (lanes[2], lanes[3])
+  width = lateral_at(grid, b, x, math.nan) - lateral_at(grid, a, x, math.nan)
+  return width if math.isfinite(width) and low <= width <= high else default
+
+
+def std_alpha(std: float) -> float:
+  """Lane line alpha factor from its laneLineStds entry: clip(1 - std, 0.35, 1); 1 when unknown."""
+  return float(np.clip(1.0 - std, 0.35, 1.0)) if math.isfinite(std) else 1.0
+
+
+def model_lead_tracks(leads, min_prob: float) -> list[tuple[np.ndarray, np.ndarray]]:
+  """(x, y) trajectories (6 points at t = 0, 2 .. 10 s, camera frame, y right-positive) of leadsV3 entries
+  with prob >= min_prob and a finite first point."""
+  tracks = []
+  for lead in list(leads)[:3]:
+    try:
+      prob = float(lead.prob)
+      xs = np.asarray(list(lead.x), dtype=np.float64)
+      ys = np.asarray(list(lead.y), dtype=np.float64)
+    except (AttributeError, TypeError, ValueError):
+      continue
+    n = min(xs.size, ys.size)
+    if prob >= min_prob and n and math.isfinite(xs[0]) and math.isfinite(ys[0]):
+      tracks.append((xs[:n], ys[:n]))
+  return tracks
+
+
+def lead_prediction(d_rel: float, y: float, tracks, front: float, gap: float = 6.0, lateral: float = 2.0) -> np.ndarray | None:
+  """(2, 2) displacement (forward, right) of a lead at t = 2 s and 4 s from the nearest matching model track
+  (first point within `gap` m of the gap d_rel and `lateral` m of y); None without a finite match."""
+  best, best_d = None, gap
+  for xs, ys in tracks:
+    d = abs(xs[0] - front - d_rel)
+    if d < best_d and abs(ys[0] - y) < lateral and xs.size >= 3 and ys.size >= 3:
+      best, best_d = (xs, ys), d
+  if best is None:
+    return None
+  xs, ys = best
+  out = np.stack((xs[1:3] - xs[0], ys[1:3] - ys[0]), axis=1)
+  return out if np.isfinite(out).all() else None
+
+
+MPH_PER_MPS = 2.2369362921
+KPH_PER_MPS = 3.6
+
+
+def speed_text(mps: float, metric: bool) -> str:
+  return f"{round(mps * (KPH_PER_MPS if metric else MPH_PER_MPS)):d}"
+
+
+def closing_speed_label(v_rel: float, metric: bool = True, minimum: float = 0.5) -> str | None:
+  """'-5 mph' / '+8 km/h' from radar vRel (negative = closing); None below `minimum` m/s or when unknown."""
+  if not math.isfinite(v_rel) or abs(v_rel) < minimum:
+    return None
+  value = round(v_rel * (KPH_PER_MPS if metric else MPH_PER_MPS))
+  return f"{value:+d} {'km/h' if metric else 'mph'}"
+
+
+CURVE_MARK = 0.01  # 1/m: path points tighter than this get a brighter outer edge
+
+
+def path_curvature(model) -> tuple[np.ndarray, np.ndarray] | None:
+  """(position.x, signed curvature 1/m) per plan point: orientationRate.z / velocity.x, right-positive.
+
+  The curve_speed.target formula (zero below 3 m/s, magnitude capped at 0.1); None when the fields are missing."""
+  try:
+    rates = np.asarray(list(model.orientationRate.z), dtype=np.float64)
+    speeds = np.asarray(list(model.velocity.x), dtype=np.float64)
+    xs = np.asarray(list(model.position.x), dtype=np.float64)
+  except (AttributeError, TypeError, ValueError):
+    return None
+  n = min(rates.size, speeds.size, xs.size)
+  if n < 2:
+    return None
+  rates, speeds = rates[:n], speeds[:n]
+  with np.errstate(divide='ignore', invalid='ignore'):
+    kappa = np.where(speeds >= 3.0, np.clip(rates / speeds, -0.1, 0.1), 0.0)
+  return xs[:n], np.nan_to_num(kappa)
+
+
+def segment_quad(x: float, y: float, heading: float, along: float, across: float) -> np.ndarray:
+  """Car-frame corners (4, 2) of a bar centred at (x, y): `along` metres in the heading, `across` metres across it."""
+  half = np.array([(along / 2, -across / 2), (along / 2, across / 2), (-along / 2, across / 2), (-along / 2, -across / 2)])
+  return rotate_offsets(half, x, y, heading)
