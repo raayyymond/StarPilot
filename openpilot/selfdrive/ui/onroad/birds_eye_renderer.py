@@ -32,7 +32,7 @@ from openpilot.system.ui.widgets import Widget
 _ffi = rl.ffi
 
 EGO_FRONT = 1.5      # meters from the camera to the ego front bumper
-EGO_LENGTH = 4.6     # car outlines are true to scale: 4.6 x 1.9 m, the same px/m as the lane lines
+EGO_LENGTH = 4.6     # car outlines are 4.6 x 1.9 m at the lane lines' px/m (sideways x lateral_stretch)
 EGO_WIDTH = 1.9
 LEAD_LENGTH = 4.6
 LEAD_WIDTH = 1.9
@@ -1065,7 +1065,7 @@ class BirdsEyeRenderer(Widget):
     of the sizes in layout, filled with colors (C, polygons, 4) as one fan each, then a hull outline strip in
     outlines (C, 4). Returns one op list per car and the hulls (C, 8, 2) in pixels; transparent parts are skipped.
 
-    Drawn in car-frame meters through the view mapping, so with the default isotropic view they are true to scale."""
+    Drawn in car-frame meters through the view mapping, so they share the view's scale (true length, lateral_stretch wider)."""
     poses = np.asarray(poses, dtype=np.float64).reshape(-1, 3)
     cos_h, sin_h = np.cos(poses[:, 2]), np.sin(poses[:, 2])
     pts = np.empty((poses.shape[0], local.shape[0], 2))
@@ -1123,25 +1123,12 @@ class BirdsEyeRenderer(Widget):
       outlines.append(_rgba((255, 255, 255), 60 * a))
       rgbs.append(rgb)
     cars, hulls = self._cars(view, rect, poses, _car_body(LEAD_LENGTH, LEAD_WIDTH), CAR_LAYOUT, 0, colors, outlines)
-    nearest = leads[-1] if scene.hard_brake else None
-    # Far to near, each car then its label, so a nearer car covers a farther label.
+    # Far to near, so a nearer car covers a farther one.
     previous, self._labels = self._labels, []
-    for lead, pose, rgb, ops, screen in zip(leads, poses, rgbs, cars, hulls, strict=True):
-      self._predictions(scene, lead, pose, rect, view)
+    for lead, rgb, ops, screen in zip(leads, rgbs, cars, hulls, strict=True):
       _run(ops)
-      self._lead_label(lead, rgb, screen, rect, size, previous, lead is nearest)
-
-  def _predictions(self, scene, lead, pose, rect, view) -> None:
-    """Where the matching model lead (leadsV3) puts this lead at t = 2 s and 4 s: two small fading dots."""
-    if not scene.model_leads:
-      return
-    moves = bem.lead_prediction(lead.d_rel, lead.y, scene.model_leads, EGO_FRONT)
-    if moves is None:
-      return
-    pts = bem.car_to_widget(np.array([pose[0], pose[1]]) + moves, rect, self.config, view)
-    radius = max(3.0, 0.4 * float(bem.scale_at(pose[0], view)))
-    for (px, py), alpha in zip(pts, (120, 70), strict=True):
-      rl.draw_circle_v(rl.Vector2(float(px), float(py)), radius, _color((214, 219, 228), alpha * self.opacity))
+      if lead is leads[-1]:  # only the closest lead carries a distance
+        self._lead_label(lead, rgb, screen, rect, size, previous, scene.hard_brake)
 
   def _lead_label(self, lead, rgb, screen, rect, size, previous, hard_brake: bool) -> None:
     text = bem.distance_label(lead.d_rel, self.metric)

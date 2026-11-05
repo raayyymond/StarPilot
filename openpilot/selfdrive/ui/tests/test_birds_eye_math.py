@@ -18,18 +18,22 @@ def test_ego_bottom_centre_and_far_edge_top():
   assert pts[1, 1] == pytest.approx(RECT.y + RECT.height * cfg.top_pad, abs=1e-3)
 
 
-def test_default_is_isotropic_true_to_scale():
+def test_default_is_linear_and_stretched_sideways():
   cfg = bem.DEFAULT_CONFIG
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
   view = bem.view_params(stream, cfg)
   assert view.k == 0.0
-  assert float(bem.depth_scale_at(30.0, view)) == pytest.approx(view.lateral_ppm), 'one px/m forward and sideways'
-  assert view.lateral_ppm == pytest.approx(720 * (1 - cfg.top_pad - cfg.bottom_pad) / (cfg.x_max - cfg.x_min))
+  forward = float(bem.depth_scale_at(30.0, view))
+  assert cfg.lateral_stretch == 1.3
+  assert forward == pytest.approx(720 * (1 - cfg.top_pad - cfg.bottom_pad) / (cfg.x_max - cfg.x_min)), 'the forward zoom is unchanged'
+  assert view.lateral_ppm == pytest.approx(1.3 * forward), 'sideways is drawn 30 % wider'
+  true_scale = bem.view_params(stream, bem.BirdsEyeConfig(lateral_stretch=1.0))
+  assert true_scale.lateral_ppm == pytest.approx(float(bem.depth_scale_at(30.0, true_scale))) == pytest.approx(forward)
   narrow = SimpleNamespace(x=0.0, y=0.0, width=200.0, height=720.0)
   assert bem.view_params(narrow, cfg).lateral_ppm == pytest.approx(200 / (2 * cfg.lateral_range)), 'a narrow rect still fits the lanes'
-  # 3.7 m sideways is the same pixel count as 3.7 m forward.
+  # 3.7 m sideways is 1.3x the pixel count of 3.7 m forward.
   pts = bem.car_to_widget(np.array([[10.0, -1.85], [10.0, 1.85], [13.7, -1.85]]), stream, cfg)
-  assert pts[1, 0] - pts[0, 0] == pytest.approx(pts[0, 1] - pts[2, 1], rel=1e-4)
+  assert pts[1, 0] - pts[0, 0] == pytest.approx(1.3 * (pts[0, 1] - pts[2, 1]), rel=1e-4)
 
 
 def test_orthographic_is_linear_and_uniform():
@@ -403,7 +407,7 @@ def test_default_forward_scale_is_linear_and_cars_are_true_to_scale():
   ys = bem.car_to_widget(np.stack((xs, np.zeros(4)), axis=1), stream, cfg)[:, 1]
   gaps = ys[0] - ys[1:]
   assert gaps / gaps[0] == pytest.approx([1.0, 2.0, 4.0], rel=1e-5), 'twice the distance is twice the pixels'
-  ppm = view.lateral_ppm
+  ppm, wide = float(bem.depth_scale_at(0.0, view)), view.lateral_ppm
   assert gaps[1] / ppm == pytest.approx(30.0, rel=1e-4), 'the drawn gap is the printed gap'
   # The printed number is radar dRel unchanged.
   radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=30.0, yRel=0.0, vRel=0.0),
@@ -419,10 +423,10 @@ def test_default_forward_scale_is_linear_and_cars_are_true_to_scale():
   cx = lead.d_rel + front + ber.LEAD_LENGTH / 2
   _, hulls = renderer._cars(view, stream, [(cx, 0.0, 0.0)], body, ber.CAR_LAYOUT, 0, [[(1, 1, 1, 1)] * 3], [(1, 1, 1, 1)])
   hull = hulls[0]
-  assert np.ptp(hull[:, 0]) / ppm == pytest.approx(1.9, rel=1e-3)
+  assert np.ptp(hull[:, 0]) / wide == pytest.approx(1.9, rel=1e-3)
   assert np.ptp(hull[:, 1]) / ppm == pytest.approx(4.6, rel=1e-3)
   assert (ys[0] - hull[:, 1].max()) / ppm == pytest.approx(30.0, abs=0.01)
-  assert 3.7 * ppm / np.ptp(hull[:, 0]) == pytest.approx(3.7 / 1.9, rel=1e-3), 'a lane is ~2 car widths'
+  assert 3.7 * wide / np.ptp(hull[:, 0]) == pytest.approx(3.7 / 1.9, rel=1e-3), 'a lane is ~2 car widths'
   # A 60 m lead's whole outline and the whole ego fit on the stream frame.
   far = bem.car_to_widget(np.array([[60.0 + front + ber.LEAD_LENGTH, 0.0], [front - ber.EGO_LENGTH, 0.0]]), stream, cfg)
   assert far[0, 1] > 0 and far[1, 1] < stream.height
@@ -466,8 +470,9 @@ def test_zoom_follows_speed_and_keeps_the_view_true_to_scale():
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
   near = bem.zoomed_config(cfg, bem.ZOOM_NEAR_X_MAX)
   far_view, near_view = bem.view_params(stream, cfg), bem.view_params(stream, near)
-  assert far_view.lateral_ppm == pytest.approx(9.3, abs=0.1) and near_view.lateral_ppm == pytest.approx(19.4, abs=0.2)
-  assert float(bem.depth_scale_at(10.0, near_view)) == pytest.approx(near_view.lateral_ppm), 'still isotropic'
+  forward = [float(bem.depth_scale_at(10.0, v)) for v in (far_view, near_view)]
+  assert forward == pytest.approx([9.3, 19.4], abs=0.2)
+  assert [far_view.lateral_ppm, near_view.lateral_ppm] == pytest.approx([1.3 * f for f in forward]), 'one stretch at every zoom'
   assert near.x_min == cfg.x_min and near.lateral_range / cfg.lateral_range == pytest.approx(35 / 73)
   ego = np.array([[cfg.x_min, 0.0]])
   assert bem.car_to_widget(ego, stream, near)[0] == pytest.approx(bem.car_to_widget(ego, stream, cfg)[0]), 'the view is anchored at x_min'

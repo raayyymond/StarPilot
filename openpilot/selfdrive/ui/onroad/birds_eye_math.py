@@ -9,9 +9,9 @@ d = 1 + k*u, a point lands at
   px = cx + y * lateral_ppm / d
   py = bottom - (1 + k) * u / d * depth_px
 
-k = 0 is a plain orthographic top-down view. With isotropic=True (the default) it is a true-to-scale map:
-one pixels-per-meter forward and sideways at every distance, so lane widths, car outlines and gaps all
-keep their real proportions and a 30 m gap is twice a 15 m one. k > 0 is a mild chase-cam: straight
+k = 0 is a plain orthographic top-down view. With isotropic=True (the default) it is a linear map: one
+pixels-per-meter forward at every distance, so a 30 m gap is twice a 15 m one, and lateral_stretch times that
+sideways (1.0 = true to scale; the default 1.3 draws lanes, cars and the path 30 % wider). k > 0 is a mild chase-cam: straight
 lines stay straight, the ego region keeps its scale and distant geometry narrows by 1 / (1 + k).
 """
 from dataclasses import dataclass, replace
@@ -33,6 +33,9 @@ class BirdsEyeConfig:
     ~43 x 18 px at 720 p (half a lane wide);
     a shorter x_max would enlarge it but cut leads off before 60 m. A 1280 px wide frame shows ~69 m either side,
     so the neighbouring lanes always fit.
+  - lateral_stretch 1.3: those are the forward numbers. Sideways everything is drawn 30 % wider (a lane ~45 px,
+    a car ~25 px wide at 720 p) because the true-scale road read as too narrow on the display; distances ahead
+    and the zoom are unaffected.
   - x_max is the highway speed preset, not a ceiling: the renderer zooms this config (zoomed_config) between
     ZOOM_NEAR_X_MAX and far_x_max (ZOOM_FAR_X_MAX, 120 m) to keep a radar lead on screen, and its sample_grid
     spans that widest zoom.
@@ -43,7 +46,9 @@ class BirdsEyeConfig:
   x_max: float = 68.0          # meters ahead at the top edge
   lateral_range: float = 12.0  # meters either side that must fit the width (it lowers the scale if it does not)
   perspective: float = 0.0     # 0 = orthographic (linear distance), 1 = isotropic at the ego (strong chase cam)
-  isotropic: bool = True       # with perspective 0: one scale forward and sideways (true to scale)
+  isotropic: bool = True       # with perspective 0: one forward scale at every distance, sideways = lateral_stretch x it
+  lateral_stretch: float = 1.3  # isotropic only: sideways px/m over forward px/m. 1.0 is true to scale; the default
+                               # draws cars, lanes and the path 30 % wider at the same forward zoom
   max_ppm_fraction: float = 0.045  # non-isotropic only: lateral pixels-per-meter cap, as a fraction of the rect height
   top_pad: float = 0.03        # fractions of the rect height kept clear at the top and bottom
   bottom_pad: float = 0.03
@@ -145,9 +150,10 @@ def view_params(rect, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> ViewParams:
   depth_px = max(1.0, height * (1.0 - cfg.top_pad - cfg.bottom_pad))
   span = max(1e-3, cfg.x_max - cfg.x_min)
   if cfg.isotropic and cfg.perspective <= 0:
-    ppm = max(1e-3, min(depth_px / span, width / (2.0 * cfg.lateral_range)))
+    stretch = max(1e-3, cfg.lateral_stretch)
+    ppm = max(1e-3, min(depth_px / span, width / (2.0 * cfg.lateral_range * stretch)))
     return ViewParams(cx=float(rect.x) + width / 2.0, bottom=float(rect.y) + height * (1.0 - cfg.bottom_pad),
-                      depth_px=ppm * span, lateral_ppm=ppm, k=0.0, x_min=cfg.x_min, x_max=cfg.x_max)
+                      depth_px=ppm * span, lateral_ppm=ppm * stretch, k=0.0, x_min=cfg.x_min, x_max=cfg.x_max)
   lateral_ppm = max(1e-3, min(width / (2.0 * cfg.lateral_range), height * cfg.max_ppm_fraction))
   depth_ppm = depth_px / span
   # k at which the ego region is isotropic (equal lateral and forward pixels per meter).
@@ -576,21 +582,6 @@ def model_lead_tracks(leads, min_prob: float) -> list[tuple[np.ndarray, np.ndarr
     if prob >= min_prob and n and math.isfinite(xs[0]) and math.isfinite(ys[0]):
       tracks.append((xs[:n], ys[:n]))
   return tracks
-
-
-def lead_prediction(d_rel: float, y: float, tracks, front: float, gap: float = 6.0, lateral: float = 2.0) -> np.ndarray | None:
-  """(2, 2) displacement (forward, right) of a lead at t = 2 s and 4 s from the nearest matching model track
-  (first point within `gap` m of the gap d_rel and `lateral` m of y); None without a finite match."""
-  best, best_d = None, gap
-  for xs, ys in tracks:
-    d = abs(xs[0] - front - d_rel)
-    if d < best_d and abs(ys[0] - y) < lateral and xs.size >= 3 and ys.size >= 3:
-      best, best_d = (xs, ys), d
-  if best is None:
-    return None
-  xs, ys = best
-  out = np.stack((xs[1:3] - xs[0], ys[1:3] - ys[0]), axis=1)
-  return out if np.isfinite(out).all() else None
 
 
 MPH_PER_MPS = 2.2369362921

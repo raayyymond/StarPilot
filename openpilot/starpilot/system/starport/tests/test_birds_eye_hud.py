@@ -63,10 +63,11 @@ class FakeSM:
 
 
 def sm(*, desired=0.0, actual=0.0, long_active=True, brake=False, plan=None, limits=None, left=False, right=False,
-       v_ego=None, v_cruise=255.0):
+       v_ego=None, v_cruise=255.0, cruise=True):
   """plan=None: no longitudinalPlan, so the bar falls back to the actuators' accel (`desired`)."""
   car_state = SimpleNamespace(aEgo=actual, brakePressed=brake, leftBlinker=left, rightBlinker=right,
-                              vCruise=v_cruise, vCruiseCluster=v_cruise)
+                              vCruise=v_cruise, vCruiseCluster=v_cruise,
+                              cruiseState=SimpleNamespace(enabled=cruise))
   if v_ego is not None:
     car_state.vEgo = v_ego
   messages = {'carState': car_state,
@@ -405,6 +406,8 @@ def test_speed_readout_shows_speed_and_set_speed_at_twice_the_lead_label():
   assert read_speeds(sm(v_ego=26.8224, v_cruise=112.654), metric=True) == ('97', '113')
   assert read_speeds(sm(v_ego=10.0, v_cruise=255.0), metric=False) == ('22', '--'), 'cruise not set'
   assert read_speeds(sm(v_ego=10.0, v_cruise=0.0), metric=False)[1] == '--'
+  assert read_speeds(sm(v_ego=26.8224, v_cruise=112.654, cruise=False), metric=False) == ('60', '--'), \
+    'lateral-only or disengaged: the car still reports the old set speed, the readout does not'
   assert read_speeds(sm(), metric=False) is None, 'no vEgo'
   for width, height in (LOGICAL_720P, (1280, 720), (3840, 2160)):
     lead_label = label_font_size(view_rect(width, height)[3])

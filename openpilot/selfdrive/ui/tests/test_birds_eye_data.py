@@ -102,16 +102,10 @@ def test_std_alpha_and_closing_speed_label():
   assert bem.closing_speed_label(0.4) is None and bem.closing_speed_label(math.nan) is None
 
 
-def test_model_lead_tracks_and_predictions():
+def test_model_lead_tracks():
   leads = [_lead_v3(0.9, 31.5, 0.2), _lead_v3(0.3, 50.0, 0.0), SimpleNamespace(prob=0.9, x=[math.nan] * 6, y=[0.0] * 6)]
   tracks = bem.model_lead_tracks(leads, 0.5)
   assert len(tracks) == 1 and tracks[0][0][0] == 31.5
-  moves = bem.lead_prediction(30.0, 0.2, tracks, front=1.5)
-  assert np.allclose(moves, [[-4.0, 0.3], [-8.0, 0.6]]), 't = 2 s and 4 s relative to now'
-  assert bem.lead_prediction(40.0, 0.2, tracks, front=1.5) is None, 'no model lead within 6 m'
-  assert bem.lead_prediction(30.0, 3.5, tracks, front=1.5) is None, 'nor laterally'
-  tracks[0][0][2] = math.nan
-  assert bem.lead_prediction(30.0, 0.2, tracks, front=1.5) is None, 'a non-finite prediction is skipped'
 
 
 def test_path_curvature_is_signed_rate_over_speed():
@@ -297,7 +291,7 @@ def test_lead_labels_show_the_distance_only_and_pulse_on_hard_brake(monkeypatch)
   monkeypatch.setattr(ber, '_run', lambda *a: None)
   monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
   monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded_lines_ex', lambda *a: pills.append(a))
-  monkeypatch.setattr(ber.rl, 'draw_circle_v', lambda *a: None)
+  monkeypatch.setattr(ber.rl, 'draw_circle_v', lambda *a: pytest.fail('no prediction dots ahead of a lead'))
   pv = bem.view_params(RECT, view.config)
   view._leads(view.scene, RECT, pv)
   assert drawn == ['33 yd'] and not pills, 'no closing-speed line under the distance'
@@ -305,6 +299,13 @@ def test_lead_labels_show_the_distance_only_and_pulse_on_hard_brake(monkeypatch)
   drawn.clear()
   view._leads(view.scene, RECT, pv)
   assert drawn == ['33 yd'] and len(pills) == 1, 'the pill border pulses'
+  # A second car ahead of the lead is drawn, but only the closest lead carries a distance.
+  cars = []
+  monkeypatch.setattr(ber, '_run', lambda ops: cars.append(ops))
+  view.scene.leads = [*view.scene.leads, ber.BirdsEyeLead(48.0, 0.0, 0.0, radar=True)]
+  drawn.clear()
+  view._leads(view.scene, RECT, bem.view_params(RECT, bem.zoomed_config(view.config, 68.0)))
+  assert len(cars) == 2 and drawn == ['33 yd']
 
 
 def test_curve_mark_is_hidden_but_still_ingested(monkeypatch):

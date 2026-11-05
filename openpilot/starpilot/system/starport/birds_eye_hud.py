@@ -24,7 +24,8 @@ edge of the view, centred vertically on the frame, with the comma screen's perio
 cannot be loaded.
 
 Speed readout: top left of the view, carState.vEgo and right of it the cruise set speed (the onroad HUD's rule:
-vCruiseCluster, else vCruise, valid in (0, SET_SPEED_NA), "--" otherwise), mph or km/h by `metric`. The numbers are
+vCruiseCluster, else vCruise, valid in (0, SET_SPEED_NA); "--" otherwise and whenever carState.cruiseState.enabled is
+false, i.e. disengaged or lateral-only), mph or km/h by `metric`. The numbers are
 twice the birds-eye lead label's size (birds_eye_math.label_font_size over the view rect), with small unit captions.
 
 Per frame this is a handful of rectangles, a few cached-text draws and at most two texture quads; nothing allocates.
@@ -262,7 +263,8 @@ def read_speeds(sm, metric: bool) -> tuple[str, str] | None:
     v_ego = _finite(getattr(car_state, 'vEgo', None))
     if v_ego is None:
       return None
-    cruise = set_speed_kph(car_state)
+    # Only while cruise is engaged: lateral-only and disengaged show "--", not the last set speed the car still reports.
+    cruise = set_speed_kph(car_state) if getattr(getattr(car_state, 'cruiseState', None), 'enabled', False) else None
   except (AttributeError, KeyError, TypeError):
     return None
   speed = f"{round(max(0.0, v_ego) * (KPH_PER_MPS if metric else MPH_PER_MPS)):d}"
