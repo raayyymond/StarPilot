@@ -8,6 +8,7 @@ from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.can_definitions import CanData
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.interface import CarInterface
+from opendbc.car.honda.bosch_a_radar import BOSCH_A_UNITS, _bosch_a_direct_vrel
 from opendbc.car.honda.radar_interface import RadarInterface
 from opendbc.car.honda.values import CAR
 
@@ -52,18 +53,18 @@ def make_aux(frame_idx=0, rawc9=0, rawca=0, direct_vrel_raw=BOSCH_A_DIRECT_VREL_
   return bytes([B0, B1, B2, B3, B4, B5, B6, B7])
 
 
-def sweep(bus, index, timestamp, with_aux=True):
+def sweep(bus, index, timestamp, with_aux=True, range_raw=1000, vrel_raw=864, rawca=0):
   frames = []
   for slot in range(16):
     base = 0x280 + 4 * slot if slot < 4 else 0x2D0 + 4 * (slot - 4)
     valid = slot == 0
-    frames.extend((CanData(base, make_f0(index, 7 if valid else 15, 1000, 1024), bus),
+    frames.extend((CanData(base, make_f0(index, 7 if valid else 15, range_raw, 1024), bus),
                    CanData(base + 1, make_f1(index), bus),
                    CanData(base + 2, make_f2(index, 1 + index * 2), bus),
                    CanData(base + 3, make_f3(index, track_id=1 if valid else 255), bus)))
     if with_aux:
       address = 0x2C8 + slot if slot < 8 else 0x290 + slot - 8
-      frames.append(CanData(address, make_aux(index, direct_vrel_raw=864, direct_vrel_uncertainty_raw=0), bus))
+      frames.append(CanData(address, make_aux(index, rawca=rawca, direct_vrel_raw=vrel_raw, direct_vrel_uncertainty_raw=0), bus))
   return [(timestamp, frames)]
 
 
@@ -172,3 +173,37 @@ def test_selected_bosch_a_direct_update_uses_its_actual_protocol(candidate):
   result = radar._update([radar.trigger_msg])
   assert result.errors.canError
   assert not result.points
+
+
+def test_accord_units_are_0p05_kph_and_sixteenth_metre():
+  accord = BOSCH_A_UNITS[CAR.HONDA_ACCORD]
+  assert _bosch_a_direct_vrel(864 - 72, 0, accord) == pytest.approx(-1.0)
+  assert _bosch_a_direct_vrel(864 - 72, 0) == pytest.approx(-1.125)
+  # the rails are a clip, not a measurement
+  assert _bosch_a_direct_vrel(0, 0, accord) is None
+  assert _bosch_a_direct_vrel(1728, 0, accord) is None
+  assert _bosch_a_direct_vrel(1, 0, accord) == pytest.approx(-863 / 72)
+  assert _bosch_a_direct_vrel(0, 0) == pytest.approx(-13.5)
+
+
+def _accord_units_radar():
+  cp = CarInterface.get_params(CAR.HONDA_CIVIC_BOSCH, gen_empty_fingerprint(), [], False, False, False)
+  ri = RadarInterface(cp)
+  ri.bosch_a.units = BOSCH_A_UNITS[CAR.HONDA_ACCORD]
+  return ri, CanBus(cp).camera
+
+
+def test_accord_units_reach_the_published_point():
+  ri, bus = _accord_units_radar()
+  points = []
+  for i in range(3):
+    points = ri.update(sweep(bus, i, 1_000_000_000 + i * 66_666_667, vrel_raw=864 - 72, rawca=1023)).points
+  assert len(points) == 1
+  assert points[0].dRel == pytest.approx(1000 / 16 - 3.0)
+  assert points[0].vRel == pytest.approx(-1.0)
+
+
+def test_accord_clipped_relative_speed_never_becomes_a_point():
+  ri, bus = _accord_units_radar()
+  for i in range(6):
+    assert not ri.update(sweep(bus, i, 1_000_000_000 + i * 66_666_667, vrel_raw=0, rawca=1023)).points
