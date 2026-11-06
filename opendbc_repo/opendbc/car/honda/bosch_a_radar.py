@@ -351,6 +351,10 @@ class BoschARadar(RadarInterfaceBase):
           point.deprecated.measured = False
         else:
           self.pts.pop(track_id, None)
+        # The next sweep is judged against this one, not against the last accepted range. A rejected
+        # sweep costs one sweep; a frozen baseline rejected every later sweep for the life of the track.
+        track.samples.clear()
+        track.samples.append((now_s, dRel))
         track.prev_frame_idx = idx0
         track.prev_life = life
         track.last_seen_nanos = now
