@@ -14,6 +14,7 @@ from openpilot.starpilot.system.starport.projection_map_lease import MapLeaseWri
 CERTIFICATE_NOTICE_NS = 10_000_000_000  # how long the expiry heads-up stays at the start of a drive
 BOOKMARK_NOTICE_NS = 2_000_000_000  # how long "Bookmark Saved" stays after the drive is bookmarked
 MODE_NOTICE_NS = 2_000_000_000  # how long the driving-mode banner stays after the mode changes
+RECONNECT_NOTICE_NS = 8_000_000_000  # how long "why it reconnected" stays once the car screen is back
 DRIVER_MONITOR_HOLD_NS = 350_000_000
 BIRDS_EYE_SETTINGS_NS = 1_000_000_000  # birds-eye-only mode: how often road colors and longitudinal control are re-read
 CONTENTS = ('birds_eye', 'full')  # identity.STREAM_CONTENTS: what the car screen shows while driving
@@ -68,7 +69,7 @@ def apply_plain_camera_look(camera, rl):
 
 
 def native_dependencies():
-  import pyray as rl
+  from openpilot.starpilot.ui.raylib import rl
   from openpilot.cereal.visionipc import VisionStreamType
   from openpilot.common.transformations.camera import view_frame_from_device_frame
   from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView, BORDER_COLORS
@@ -139,7 +140,7 @@ def birds_eye_dependencies():
   ANDROID AUTO VIDEO PERFORMANCE GUARDRAIL (operator-requested video optimization): no camera, VisionIPC,
   model renderer, OnroadView, map, picture-in-picture, driver monitor or feeds are imported, so none is built.
   """
-  import pyray as rl
+  from openpilot.starpilot.ui.raylib import rl
   from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer, BitmapText
   from openpilot.selfdrive.ui.ui_state import ui_state
   from openpilot.starpilot.ui.onroad_customization import read_customization
@@ -178,13 +179,13 @@ def standby_logo_loader(rl):
     """The StarPilot crescent, shrunk once on the CPU to its standby size; None if it cannot be loaded."""
     image = rl.load_image(str(STANDBY_LOGO))
     try:
-      if image.data == rl.ffi.NULL or image.width <= 0 or image.height <= 0:
+      if image.data is None or image.width <= 0 or image.height <= 0:
         return None
       if image.height > height:
         rl.image_resize(image, round(image.width * height / image.height), height)
       texture = rl.load_texture_from_image(image)
     finally:
-      if image.data != rl.ffi.NULL:
+      if image.data is not None:
         rl.unload_image(image)
     if texture.id == 0:
       return None
@@ -201,7 +202,7 @@ class ProjectionOnroad:
   """
 
   def __init__(self, *, dependencies=None, viewport=None, customization=None, certificate_days=None, native_focus=None,
-               layout_watcher=None, content='full'):
+               layout_watcher=None, content='full', reconnect_notice=""):
     if content not in CONTENTS:
       raise ValueError(f'unknown projection content {content!r}')
     self.content = content
@@ -210,6 +211,8 @@ class ProjectionOnroad:
     self.customization = customization
     self._certificate_notice = certificate_notice(certificate_days)
     self._certificate_notice_until_ns: int | None = None
+    self._reconnect_notice = reconnect_notice
+    self._reconnect_notice_until_ns: int | None = None
     self._bookmark_notice_until_ns: int | None = None
     self._mode_label: str | None = None  # the drive's last known driving mode
     self._mode_engaged: bool | None = None
@@ -644,6 +647,18 @@ class ProjectionOnroad:
     return replace(state, alert=self.native.alert(size=sizes.SMALL, text1=self._certificate_notice,
                                                   alert_type='androidAutoCertificate/warning'))
 
+  def _with_reconnect_notice(self, state, now_ns):
+    """Say why the car screen just came back (the comma's Wi-Fi switched networks); a real alert always wins."""
+    if not self._reconnect_notice:
+      return state
+    if self._reconnect_notice_until_ns is None:
+      self._reconnect_notice_until_ns = now_ns + RECONNECT_NOTICE_NS
+    sizes = self.native.alert_size
+    if now_ns >= self._reconnect_notice_until_ns or state.alert.size != sizes.NONE:
+      return state
+    return replace(state, alert=self.native.alert(size=sizes.SMALL, text1=self._reconnect_notice,
+                                                  alert_type='androidAutoReconnected/info'))
+
   def bookmark_saved(self, now_ns=None):
     """A bookmark was published for this drive (from any button): confirm it on the car screen."""
     self._bookmark_notice_until_ns = (time.monotonic_ns() if now_ns is None else now_ns) + BOOKMARK_NOTICE_NS
@@ -739,7 +754,8 @@ class ProjectionOnroad:
       # Touch hit-tests read viewport_width; the view draws at the car canvas width (1920 for a 1280x720 head unit).
       if state.viewport_width != self.width:
         state = replace(state, viewport_width=self.width)
-      state = self._with_bookmark_notice(self._with_certificate_notice(state, now_ns), now_ns)
+      state = self._with_certificate_notice(self._with_reconnect_notice(state, now_ns), now_ns)
+      state = self._with_bookmark_notice(state, now_ns)
       self._state = self._with_mode_notice(state, now_ns)
       if self._slc_input is not None:
         self._state = self._slc_input.present(self._state)

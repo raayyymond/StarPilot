@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.starpilot.ui import onroad
 from openpilot.starpilot.ui.onroad import axis_status_color, clock_text, driving_mode_description
@@ -219,22 +219,24 @@ class TestOnroadAxes(unittest.TestCase):
               nativeAcknowledged=True, desiredLongitudinal=True)
     self.ui.sm.put('aolAxisState', axis)
     self.assertTrue(self.state(True, False).longitudinal_overridden)
-    for field, value in (('qualified', False), ('sessionId', ''), ('observedMonoTime', NOW + 1),
-                         ('validUntilMonoTime', NOW - 1), ('nativeAcknowledged', False)):
+    for field, value in (('qualified', False), ('sessionId', ''), ('nativeAcknowledged', False), ('desiredLongitudinal', False)):
       with self.subTest(field=field):
         original = getattr(axis, field)
         setattr(axis, field, value)
         state = self.state(True, False)
         self.assertFalse(state.longitudinal_overridden or state.driver_override_active or state.cruise_active)
         setattr(axis, field, original)
-    for stamp in (NOW + 1, NOW - 31_000_000):
+    self.ui.sm.logMonoTime['aolAxisState'] = NOW - 60_000_000
+    self.assertTrue(self.state(True, False).longitudinal_overridden,
+                    'a late UI frame past the 30 ms control window does not blink the override edge')
+    for stamp in (NOW + 1, NOW - 201_000_000):
       self.ui.sm.logMonoTime['aolAxisState'] = stamp
       self.assertFalse(self.state(True, False).longitudinal_overridden)
     self.ui.sm.logMonoTime['aolAxisState'] = NOW
     self.ui.sm.recv_frame['aolAxisState'] = self.ui.started_frame
     self.assertFalse(self.state(True, False).longitudinal_overridden)
     self.ui.sm.recv_frame['aolAxisState'] = self.ui.started_frame + 1
-    for flags in (self.ui.sm.valid, self.ui.sm.alive, self.ui.sm.seen):
+    for flags in (self.ui.sm.valid, self.ui.sm.alive):
       flags['aolAxisState'] = False
       self.assertFalse(self.state(True, False).longitudinal_overridden)
       flags['aolAxisState'] = True
@@ -281,8 +283,17 @@ class TestOnroadAxes(unittest.TestCase):
       (OnroadAlert(size=AlertSize.SMALL, text1='Steering Paused'), (10, 186, 181, 255)),
       (OnroadAlert(size=AlertSize.MID), (10, 186, 181, 255)),
       (OnroadAlert(size=AlertSize.FULL), blue), (OnroadAlert(size=AlertSize.SMALL, critical=True), blue))]
-    for lateral, longitudinal, override, alert, compact_color, latched in cases:
-      state = replace(self.state(lateral, longitudinal), driver_override_active=override, alert=alert, aol_latched=latched)
+    cases = [(*case, False) for case in cases]
+    cases += [(True, True, override, alert, color, None, True) for override, alert, color in (
+      (False, OnroadAlert(), (201, 34, 49, 255)),
+      (False, OnroadAlert(size=AlertSize.SMALL, critical=True), blue),
+      (False, OnroadAlert(), (201, 34, 49, 255)),
+      (True, OnroadAlert(), gray),
+      (False, OnroadAlert(size=AlertSize.FULL), blue),
+      (False, OnroadAlert(), (201, 34, 49, 255)))]
+    for lateral, longitudinal, override, alert, compact_color, latched, traffic in cases:
+      state = replace(self.state(lateral, longitudinal), driver_override_active=override, alert=alert,
+                      aol_latched=latched, traffic_mode=traffic)
       for layout in state.customization['layouts'].values():
         layout[MODE_WIDGET]['enabled'] = True
       for profile in (Profile.LARGE, Profile.COMPACT):
@@ -426,6 +437,34 @@ class TestOnroadAxes(unittest.TestCase):
       torque.render(rl.Rectangle(0, 0, 476, 240), stale, 536)
       self.assertFalse(gpu.frames)
     self.assertEqual(torque._alpha_filter.x, 0)
+
+  def test_banked_demand_reaches_actual_widget_and_resets_on_feedback_kind_change(self):
+    self.ui.CP.maxLateralAccel = 1.5
+    self.ui.sm["carState"].vEgo = 20
+    self.ui.sm.put("vehicleParameters", NS(valid=True, roll=.08))
+    self.ui.sm.put("controlsState", NS(longControlState="pid", lateralControlState=NS(which=lambda: "curvatureState"),
+                                        curvature=.001, desiredCurvature=.001))
+    state = self.state(True, False)
+    self.assertTrue(state.torque_is_demand and state.torque_source_available)
+    self.assertAlmostEqual(state.torque_utilization, .4 / 1.5)
+    widget = TorqueBarWidget()
+    rect = rl.Rectangle(0, 0, 476, 240)
+    with record_gpu() as gpu:
+      for _ in range(30):
+        widget.render(rect, state, 536)
+      self.assertGreater(gpu.frames[-1].uniforms['indicatorNormals'][2], 0)
+      self.assertEqual(gpu.frames[-1].uniforms['gradient'][1:], (1, 0, 1))
+      widget.render(rect, replace(state, torque_is_demand=False, torque_utilization=-1), 536)
+      self.assertLess(widget._torque_filter.x, 0, "never color retained demand as actual torque")
+      widget.render(rect, replace(state, torque_drive_frame=99, torque_utilization=-1), 536)
+      self.assertLess(widget._torque_filter.x, 0, "new drive resets prior direction")
+      self.ui.sm.logMonoTime["vehicleParameters"] = NOW - 1_000_000_000
+      stale = self.state(True, False)
+      self.assertFalse(stale.torque_source_available)
+      gpu.frames.clear()
+      widget.render(rect, stale, 536)
+      self.assertFalse(gpu.frames)
+      self.assertEqual(widget._torque_filter.x, 0)
 
   def test_missing_actual_torque_output_stays_hidden_with_active_axes(self):
     self.ui.sm.put("controlsState", NS(longControlState="pid", lateralControlState=NS(which=lambda: "torqueState")))

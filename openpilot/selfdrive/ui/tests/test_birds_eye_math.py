@@ -1,4 +1,5 @@
 """Birds-eye projection math and scene building, without a GL context."""
+import ctypes
 import math
 from types import SimpleNamespace
 
@@ -171,7 +172,7 @@ def _model(lead_prob=0.0, path_y=0.0):
 
 
 def test_scene_keeps_last_good_frame_and_merges_leads():
-  # The renderer module imports pyray but needs no window for ingest().
+  # The renderer module imports raylib but needs no window for ingest().
   from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer, scene_leads
   radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=30.0, yRel=-0.3, vRel=-2.0),
                           leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
@@ -253,7 +254,9 @@ def _layers(view, rect=RECT):
 
 def _op_points(op) -> np.ndarray:
   """The (n, 2) points a DrawTriangleStrip/Fan op passes to C."""
-  return np.array([(op[1][i].x, op[1][i].y) for i in range(op[2])])
+  pointer = op[1]  # a ctypes view of the point array, or an address inside a shared one
+  address = pointer if isinstance(pointer, int) else ctypes.addressof(pointer)
+  return np.ctypeslib.as_array((ctypes.c_float * (2 * op[2])).from_address(address)).reshape(-1, 2).copy()
 
 
 def _draw_ops(ops):

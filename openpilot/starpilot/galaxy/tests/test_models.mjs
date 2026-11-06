@@ -142,7 +142,10 @@ assert.equal(modelActionAllowed(managerPayload, "download", missing), true)
 assert.equal(modelActionAllowed(managerPayload, "delete", big), false)
 assert.equal(modelActionAllowed({ ...managerPayload, activeBigModel: "" }, "delete", big), true)
 assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true }, "favorite", small), true)
-assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true }, "select-small", small), false)
+assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true }, "select-small", small), true)
+assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true }, "select-big", big), true)
+assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true, jetlinkBig: true }, "select-big", big), false)
+assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true }, "download", missing), false)
 assert.equal(modelActionAllowed({ ...managerPayload, isOnroad: true, downloading: true }, "cancel"), true)
 assert.equal(modelActionAllowed({ ...managerPayload, capabilities: {} }, "favorite", small), false)
 assert.equal(fitsModelProfile({ ...small, profiles: ["small", "big"] }, "big"), true)
@@ -239,7 +242,7 @@ await disabledRandomizer
 randomManagement.manager.stop()
 console.log('Randomizer and exclusion interactions passed')
 
-assert.match(ModelsPage.template, /Park the vehicle before changing or downloading models/)
+assert.match(ModelsPage.template, /Selections apply next onroad cycle/)
 assert.doesNotMatch(ModelsPage.template, /Onroad: switching/)
 assert.equal((ModelsPage.template.match(/class="gx-model-control"/g) || []).length, 2)
 assert.equal(ModelsPage.data().hardwareFilter, 'both')
@@ -315,14 +318,23 @@ const refreshingCatalog = { ...managerPayload, downloading: true, refreshing: tr
 assert.equal(modelActionAllowed(refreshingCatalog, "select-small", small), true)
 assert.equal(modelActionAllowed(refreshingCatalog, "select-big", big), true)
 assert.equal(modelActionAllowed(refreshingCatalog, "select-big", missing), false)
-assert.equal(modelActionAllowed({ ...refreshingCatalog, isOnroad: true }, "select-big", big), false)
+assert.equal(modelActionAllowed({ ...refreshingCatalog, isOnroad: true }, "select-big", big), true)
 assert.equal(modelActionAllowed({ ...refreshingCatalog, randomizer: true }, "select-big", big), false)
 assert.equal(modelActionAllowed({ ...refreshingCatalog, refreshing: false }, "select-big", big), false)
 assert.equal(modelActionAllowed(refreshingCatalog, "delete", small), false)
 
+for (const series of ["Polaris", "Polaris Series", "  POLARIS SERIES  "]) {
+  for (const value of ["spz_polaris_r3a", "future-model", undefined]) assert.equal(ModelsPage.methods.isPolaris({value, series}), true)
+}
+for (const series of ["OP Series", "SP Series", "Polaris Experimental", "", undefined, null, 123]) {
+  assert.equal(ModelsPage.methods.isPolaris({value: "unrelated", label: "Polaris", series}), false)
+}
 for (const value of ["spz_polaris_r3a", "spz_polaris_r3b"]) assert.equal(ModelsPage.methods.isPolaris({value}), true)
-for (const value of ["polaris", "spz_polaris_r3a_copy", "lightspeed", undefined]) assert.equal(ModelsPage.methods.isPolaris({value, label: "Polaris"}), false)
+assert.equal(ModelsPage.methods.isPolaris({value: "spz_polaris_r3a_copy"}), false)
 assert.equal(ModelsPage.methods.isPolaris(null), false)
+assert.match(ModelsPage.template, /gx-model-card--polaris.*isPolaris\(m\)/)
+assert.match(ModelsPage.template, /v-if="isPolaris\(m\)" class="gx-chip gx-polaris-badge"/)
+assert.match(ModelsPage.template, /aria-label="About Polaris models"/)
 
 for (const label of ["Polaris R3 A ⚠️🧪", "Polaris R3 B ⚠️🧪", "Polaris R3 A", "Polaris R3 B 🚀"]) {
   const [text, emojis] = ModelsPage.methods.polarisTitleParts({label})
@@ -330,3 +342,4 @@ for (const label of ["Polaris R3 A ⚠️🧪", "Polaris R3 B ⚠️🧪", "Pola
   assert.equal(/\p{Extended_Pictographic}/u.test(text), false)
 }
 assert.deepEqual(ModelsPage.methods.polarisTitleParts({value: "spz_polaris_r3a"}), ["spz_polaris_r3a", ""])
+

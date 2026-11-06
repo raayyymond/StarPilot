@@ -13,7 +13,7 @@ import zlib
 import numpy as np
 from dataclasses import replace
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.starpilot.ui.layout_preview_transport import SCENES, validate_preview_document
 from openpilot.starpilot.ui.developer_preview import OnroadVisualPreview
@@ -74,7 +74,8 @@ def sample_state(scene: str, document: dict) -> OnroadState:
   lateral = scene not in ('long_only', 'slc_disengaged')
   longitudinal = scene not in ('aol', 'slc_disengaged')
   pending = scene in ('slc_pending', 'slc_notice')
-  state = OnroadState(engaged=lateral or longitudinal, camera_available=False,
+  from openpilot.starpilot.ui.weather import WeatherReading
+  state = OnroadState(weather=WeatherReading(21, 2, True), engaged=lateral or longitudinal, camera_available=False,
                      speed_mps=0.0 if scene in ("cem_lead", "stopped") else 22.0, cruise_kph=88.0,
                      stopped_duration_s=PREVIEW_DURATION_S if scene == "stopped" else None,
                      speed_limit=SpeedLimitObservation(kind=ObservationKind.VALID, source="dashboard",
@@ -318,7 +319,7 @@ class _Canvas:
       if scale < 1.0:
         width, height = round(width * scale), round(height * scale)
         rl.image_resize(image, width, height)
-      return _png_rgba(width, height, bytes(rl.ffi.buffer(image.data, width * height * 4)))
+      return _png_rgba(width, height, bytes(image.data[:width * height * 4]))
     finally:
       rl.unload_image(image)
 
@@ -365,7 +366,7 @@ class _Canvas:
       try:
         rl.clear_background(rl.BLANK)
         # Match the runtime's transparent cache coverage before exporting straight-alpha PNG.
-        rl.rl.rlSetBlendFactorsSeparate(0x0302, 0x0303, 1, 0x0303, 0x8006, 0x8006)
+        rl.rl_set_blend_factors_separate(0x0302, 0x0303, 1, 0x0303, 0x8006, 0x8006)
         rl.begin_blend_mode(rl.BlendMode.BLEND_CUSTOM_SEPARATE)
         try:
           if general and key == 'driver_monitor':
@@ -386,7 +387,7 @@ class _Canvas:
         rl.image_format(image, rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8)
         rl.image_flip_vertical(image)
         rl.image_crop(image, rl.Rectangle(crop_x, crop_y, width, height))
-        captures.append((key, _straight_rgba(bytes(rl.ffi.buffer(image.data, width * height * 4)))))
+        captures.append((key, _straight_rgba(bytes(image.data[:width * height * 4]))))
       finally:
         rl.unload_image(image)
     sheet_width = max(slot['x'] + slot['width'] for slot in sprites.values())
@@ -492,7 +493,9 @@ class LayoutPreviewRenderer:
     if profile == Profile.LARGE:
       from openpilot.starpilot.ui.navigation_state import NavigationDisplay
       state = replace(state, navigation=NavigationDisplay(("preview", 1), "Turn left onto Desert Inn Road", "turn", "left",
-                                                          152.0, 6800.0, 540.0))
+                                                          152.0, 6800.0, 540.0, False, "turn", "right", 300.0,
+                                                          ((True, ("left",), "left"), (True, ("left",), "left"), (False, ("straight",), ""),
+                                                           (False, ("straight",), ""), (False, ("right",), ""))))
     if not rl.is_window_ready():
       raise RuntimeError("Layout preview requires the UI graphics context")
     if self._canvas is None or self._canvas.profile != profile or self._canvas.viewport != viewport:

@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer, BitmapText
 from openpilot.starpilot.ui.presentation import BitmapFonts, Profile, default_font_directory

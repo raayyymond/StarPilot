@@ -1,4 +1,5 @@
 from dataclasses import replace
+from math import isfinite
 from opendbc.car import structs
 from opendbc.car.ford.aol import qualified, AOL_WORDS, MANUAL, temporary_restriction, aol_safety_config, profile_word
 from openpilot.starpilot.aol.intent import AolCardIntent, AOL_TOGGLE
@@ -24,6 +25,49 @@ def native_accepts_cp(cp, model, param):
 
 def native_latch_rejected(cp, native):
   return qualified(cp, marked_only=True) and native.requestedLateral and not native.lateralAllowed
+
+
+def awaiting_initial_request(cp, cs, sm, native, feedback, intent, *, now_ns, producer):
+  """Retain startup intent while request and first-grant receipts catch up."""
+  from openpilot.starpilot.aol.runtime import AXIS_MAX_AGE_NS, current_axis
+  from openpilot.starpilot.aol.transport_pause import _healthy_transport_native, cp_identity
+  try:
+    axis = current_axis(sm, now_ns=now_ns)
+    if (not qualified(cp, marked_only=True) or not intent.allowed_latch or intent.pause_lateral or
+        feedback.ever_lateral_active or feedback.failed or feedback.paused or feedback.pending_event or
+        feedback.cp != cp_identity(cp) or
+        not cs.canValid or cs.canTimeout or cs.steerFaultTemporary or cs.steerFaultPermanent or
+        cs.accFaulted or cs.vehicleSensorsInvalid or cs.steeringDisengage or cs.doorOpen or cs.seatbeltUnlatched or
+        cs.brakePressed or cs.regenBraking or not cs.cruiseState.available or
+        cs.gearShifter != structs.CarState.GearShifter.drive or
+        axis is None or str(axis.faultReason) != 'none' or not axis.sessionId or
+        cs.buttonEvents or axis.sequence <= 0 or axis.sequence < feedback.sequence or
+        axis.observedMonoTime != int(sm.logMonoTime['aolAxisState']) or
+        axis.validUntilMonoTime != axis.observedMonoTime + AXIS_MAX_AGE_NS or
+        axis.faultSessionId != axis.sessionId or axis.sessionId != feedback.session or
+        not producer or axis.intentProducerSessionId != producer or
+        feedback.signature is None or feedback.signature[14:16] != (producer, int(axis.intentIntegrityEpoch)) or
+        axis.sourceCarStateMonoTime < feedback.signature[8] or axis.observedMonoTime < feedback.signature[2] or
+        not 0 < axis.sourceCarStateMonoTime <= axis.observedMonoTime <= now_ns or
+        now_ns - axis.sourceCarStateMonoTime > AXIS_MAX_AGE_NS or
+        axis.lateralActive or
+        native is None or native.axisSessionId != axis.sessionId or not native.pandaInventory or
+        bool(native.requestedLateral) != bool(native.lateralAllowed) or
+        native.lateralAllowed and (axis.desiredLateral or native.observedMonoTime <= axis.observedMonoTime) or
+        _healthy_transport_native(sm, cp, cs, str(axis.sessionId), now_ns, native,
+                                  require_longitudinal=not cs.gasPressed) is None or
+        feedback.healthy_inventory != (native.pandaSerial, tuple(p.hardwareSerial for p in native.pandaInventory))):
+      return False
+    state = sm['selfdriveState']
+    state_ns = int(sm.logMonoTime['selfdriveState'])
+    event_ns = int(sm.logMonoTime['onroadEvents'])
+    return bool(sm.seen['selfdriveState'] and sm.valid['selfdriveState'] and sm.alive['selfdriveState'] and
+      state.enabled and state.active and 0 < state_ns <= now_ns and now_ns - state_ns <= AXIS_MAX_AGE_NS and
+      sm.seen['onroadEvents'] and sm.valid['onroadEvents'] and sm.alive['onroadEvents'] and
+      0 < axis.faultEventMonoTime <= event_ns <= now_ns and now_ns - event_ns <= 1_500_000_000 and
+      not any(e.immediateDisable or e.softDisable or e.userDisable for e in sm['onroadEvents']))
+  except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+    return False
 
 
 def ordinary_axis_request_allowed(cp, cs):
@@ -70,7 +114,7 @@ class FordCardIntent(AolCardIntent):
           axis.intentProducerSessionId != producer or stamp != axis.observedMonoTime or
           not 0 < axis.sourceCarStateMonoTime <= stamp < now_ns <= axis.validUntilMonoTime or
           now_ns - axis.sourceCarStateMonoTime > 30_000_000 or axis.validUntilMonoTime - stamp > 30_000_000 or
-          str(axis.faultReason) != 'none' or str(axis.mode) != 'off' or axis.nativeAcknowledged or
+          str(axis.faultReason) != 'none' or str(axis.mode) != 'off' or
           axis.desiredLateral or axis.desiredLongitudinal or axis.lateralActive or axis.longitudinalActive or
           not sm.seen['onroadEvents'] or not sm.valid['onroadEvents'] or not sm.alive['onroadEvents']):
         return
@@ -90,6 +134,11 @@ class FordCardIntent(AolCardIntent):
         not current.requestedLateral and not current.lateralAllowed and not current.requestedLongitudinal and not current.longitudinalAllowed)
     except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
       self.main_idle_transition_qualified = False
+
+  def _arm_from_full_engagement(self, CS, *, source_ns):
+    # Resuming cruise must not undo a deliberate lateral pause.
+    if not self.pause_lateral:
+      super()._arm_from_full_engagement(CS, source_ns=source_ns)
 
   def update(self, CS, **kwargs):
     state = structs.CarState(**CS.to_dict())
@@ -142,11 +191,11 @@ def create_intent(cp, settings):
 
 
 def temporary_eps_restriction(cp, state):
-  """Ford physical EPS pause after LONG is off; intent only, no native permission."""
+  """Ford physical EPS pause; OP-long may continue independently. Intent only."""
   try:
     return bool(qualified(cp, marked_only=True) and
       state.steerFaultTemporary and not state.steerFaultPermanent and state.canValid and not state.canTimeout and
-      state.cruiseState.available and not state.cruiseState.enabled and
+      state.cruiseState.available and (cp.openpilotLongitudinalControl or not state.cruiseState.enabled) and
       state.gearShifter == structs.CarState.GearShifter.drive and
       not state.regenBraking and
       not state.doorOpen and not state.seatbeltUnlatched and not state.accFaulted and
@@ -169,13 +218,13 @@ def temporary_eps_pedal_recovery(cp, state):
 
 
 def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previous,
-                                    source_ns, now_ns, axis_session_id) -> bool:
-  """Cruise CANCEL may retain only an already active, independently granted LAT axis."""
+                                    source_ns, now_ns, axis_session_id, allow_brake=False) -> bool:
+  """A current cruise withdrawal retains only an already active, independently granted LAT axis."""
   from openpilot.starpilot.aol.intent import ButtonType
   from openpilot.starpilot.aol.runtime import (AXIS_MAX_AGE_NS, INTENT_MAX_AGE_NS, SAFETY_MAX_AGE_NS,
                                                native_inventory_matches_cp)
   try:
-    return bool(qualified(cp, marked_only=True) and settings is not None and settings.enabled and not any(settings.cancel_actions) and
+    return bool(qualified(cp, marked_only=True) and settings is not None and settings.enabled and
       previous is not None and previous.lateral_active and previous.native_acknowledged and
       intent is not None and intent.settingsQualified and intent.allowedLatch and intent.lateralArmed and
       not intent.pauseLateral and intent.producerSessionId and intent.carStateLogMonoTime == source_ns and
@@ -185,7 +234,9 @@ def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previou
       cs.canValid and not cs.canTimeout and cs.cruiseState.available and not cs.steerFaultTemporary and
       not cs.steerFaultPermanent and not cs.accFaulted and not cs.doorOpen and not cs.seatbeltUnlatched and
       not cs.vehicleSensorsInvalid and cs.gearShifter == structs.CarState.GearShifter.drive and
-      any(event.type == ButtonType.cancel for event in cs.buttonEvents) and
+      (not any(settings.cancel_actions) and any(event.type == ButtonType.cancel for event in cs.buttonEvents) or
+       allow_brake and cs.brakePressed and not cs.gasPressed and
+       (settings.pause_brake_mps <= 0 or cs.vEgo >= settings.pause_brake_mps or cs.standstill)) and
       native is not None and native.compatible and int(native.protocolVersion) == 1 and
       axis_session_id and native.axisSessionId == axis_session_id and native.requestedLateral and native.lateralAllowed and
       native_accepts_cp(cp, native.safetyModel, native.safetyParam) and native.pandaInventory and
@@ -195,3 +246,10 @@ def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previou
       native.validUntilMonoTime - native.observedMonoTime <= SAFETY_MAX_AGE_NS)
   except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
     return False
+
+
+def brake_pause_active(cp, state, settings):
+  """A configured brake pause withdraws commands without discarding armed intent."""
+  return bool(settings is not None and qualified(cp, marked_only=True) and
+    state.brakePressed and not state.standstill and isfinite(state.vEgo) and
+    isfinite(settings.pause_brake_mps) and 0 <= state.vEgo < settings.pause_brake_mps)

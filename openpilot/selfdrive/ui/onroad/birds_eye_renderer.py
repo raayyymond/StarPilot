@@ -13,6 +13,7 @@ overlays as a handful of constant-alpha strips that step through its own fade; o
 are one DrawTriangleFan per polygon plus one outline strip.
 """
 from collections.abc import Callable
+import ctypes
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import chain, repeat, starmap
@@ -22,14 +23,45 @@ import time
 from typing import NamedTuple
 
 import numpy as np
-import pyray as rl
-from raylib import rl as _raw  # the C functions pyray wraps; per-vertex calls skip its argument conversion
 
 from openpilot.selfdrive.ui.onroad import birds_eye_math as bem
+from openpilot.starpilot.ui.raylib import native_library_path, rl
 from openpilot.system.ui.lib.shader_polygon import Gradient
 from openpilot.system.ui.widgets import Widget
 
-_ffi = rl.ffi
+
+class _CColor(ctypes.Structure):
+  _fields_ = [(channel, ctypes.c_ubyte) for channel in "rgba"]
+
+
+class _Raw:
+  """The C functions of the raylib library the UI runs on, looked up by name in that same library (as the native
+  extension does), so an op replays a point buffer and a prebuilt Color with no argument conversion. The nanobind
+  bindings have no rlColor4ub or back-face culling calls, and their strip and fan calls take a Python sequence."""
+
+  def __init__(self, path: str):
+    library = ctypes.CDLL(path)
+
+    def bind(name: str, *argtypes, restype=None):
+      function = getattr(library, name)
+      function.argtypes, function.restype = argtypes, restype
+      return function
+
+    integer, color = ctypes.c_int, _CColor
+    self.DrawTriangleStrip = bind("DrawTriangleStrip", ctypes.c_void_p, integer, color)
+    self.DrawTriangleFan = bind("DrawTriangleFan", ctypes.c_void_p, integer, color)
+    self.DrawRectangleGradientV = bind("DrawRectangleGradientV", integer, integer, integer, integer, color, color)
+    self.rlColor4ub = bind("rlColor4ub", *[ctypes.c_ubyte] * 4)
+    self.rlVertex2f = bind("rlVertex2f", ctypes.c_float, ctypes.c_float)
+    self.rlBegin = bind("rlBegin", integer)
+    self.rlEnd = bind("rlEnd")
+    self.rlSetTexture = bind("rlSetTexture", ctypes.c_uint)
+    self.rlGetTextureIdDefault = bind("rlGetTextureIdDefault", restype=ctypes.c_uint)
+    self.rlDisableBackfaceCulling = bind("rlDisableBackfaceCulling")
+    self.rlEnableBackfaceCulling = bind("rlEnableBackfaceCulling")
+
+
+_raw = _Raw(native_library_path)
 
 EGO_FRONT = 1.5      # meters from the camera to the ego front bumper
 EGO_LENGTH = 4.6     # car outlines are 4.6 x 1.9 m at the lane lines' px/m (sideways x lateral_stretch)
@@ -270,7 +302,7 @@ def _color(rgb, alpha) -> rl.Color:
 
 # ---- C-call lists -------------------------------------------------------------------------------
 # An op list is a ready-made list of raw raylib calls, (function, *args), replayed by _run. Strip and fan ops hold
-# their float32 points through ffi.from_buffer (which keeps the array alive) and a prebuilt Color struct, so a
+# their float32 points as a ctypes view of the array (which keeps it alive) and a prebuilt Color struct, so a
 # replay converts nothing.
 
 _call = getattr(operator, 'call', lambda function, *args: function(*args))
@@ -284,12 +316,12 @@ def _ccolor(rgba) -> object:
 @lru_cache(maxsize=1024)
 def _ccolor_cached(r: int, g: int, b: int, a: int) -> object:
   """A Color struct, shared: ops only read it."""
-  return _ffi.new('Color *', (r, g, b, a))[0]
+  return _CColor(r, g, b, a)
 
 
 def _points(pts: np.ndarray):
-  arr = np.ascontiguousarray(pts, dtype=np.float32)
-  return _ffi.from_buffer('Vector2[]', arr), arr.shape[0]
+  arr = np.require(pts, dtype=np.float32, requirements=('C', 'W'))
+  return (ctypes.c_float * arr.size).from_buffer(arr), arr.shape[0]
 
 
 def _strip(pts: np.ndarray, rgba) -> tuple:
@@ -310,9 +342,10 @@ def _strips(points: np.ndarray, runs, colors) -> list:
   as a trailing no-op entry so the pointers stay valid as long as the op list lives."""
   if not runs:
     return []
-  base = _ffi.from_buffer('Vector2[]', np.ascontiguousarray(points, dtype=np.float32))
-  ops: list = [(_raw.DrawTriangleStrip, base + 2 * lo, 2 * (hi - lo), _ccolor(rgba)) for (lo, hi), rgba in zip(runs, colors, strict=True)]
-  ops.append((_keep, base))
+  arr = np.require(points, dtype=np.float32, requirements=('C', 'W'))
+  base, vector2 = arr.ctypes.data, 2 * arr.itemsize
+  ops: list = [(_raw.DrawTriangleStrip, base + 2 * lo * vector2, 2 * (hi - lo), _ccolor(rgba)) for (lo, hi), rgba in zip(runs, colors, strict=True)]
+  ops.append((_keep, arr))
   return ops
 
 
@@ -351,7 +384,7 @@ def _layer(cols, verts) -> Layer:
 
 
 def _emit(*layers: Layer) -> None:
-  """All quads of the given layers in one rlBegin/rlEnd, through the raw C functions (no pyray wrapping)."""
+  """All quads of the given layers in one rlBegin/rlEnd, through the raw C functions (no binding wrappers)."""
   if not any(layers):
     return
   # Bind the 1x1 white texture the way raylib's own shapes do: a quad batch opened right after text would
@@ -607,7 +640,7 @@ class BirdsEyeRenderer(Widget):
     view = self._cached('view', rect_key, lambda: bem.view_params(rect, cfg))
     self._background(rect)
     clip.begin_scissor_mode(rect.x, rect.y, rect.width, rect.height)
-    rl.rl_disable_backface_culling()
+    _raw.rlDisableBackfaceCulling()
     try:
       scene = self.scene
       if scene.valid:
@@ -629,7 +662,7 @@ class BirdsEyeRenderer(Widget):
       self._speed_limit_sign(scene, rect)
     finally:
       rl.rl_draw_render_batch_active()
-      rl.rl_enable_backface_culling()
+      _raw.rlEnableBackfaceCulling()
       if self.parent_clip is not None:
         clip.begin_scissor_mode(self.parent_clip.x, self.parent_clip.y, self.parent_clip.width, self.parent_clip.height)
       else:

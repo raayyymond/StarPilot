@@ -14,8 +14,7 @@ CASES = [(vehicle, profile, factor) for profile, (vehicles, factor) in PROFILES.
 def test_exact_profile_defaults_and_saved_controller_selection(vehicle, profile, factor):
   cp = interfaces[vehicle].get_non_essential_params(vehicle)
   assert policy_for(cp) == profile
-  expected = (ControllerMode.STARPILOT if vehicle in (CAR.KIA_FORTE_2019_NON_SCC, CAR.KIA_FORTE_2021_NON_SCC)
-              else ControllerMode.STANDARD)
+  expected = ControllerMode.STARPILOT
   assert default_selection(cp).mode == expected
   for raw in (b'{', b'{"version":true,"vehicles":{}}', b'{"version":1,"vehicles":{},"vehicles":{}}', b'x' * 4097):
     assert selection_from_bytes(cp, raw).mode == expected
@@ -59,7 +58,8 @@ def test_unadmitted_and_cross_vehicle_choices_are_not_applied(vehicle, profile, 
   saved = replace_mode(None, cp, ControllerMode.STARPILOT)
   other = interfaces[CAR.HYUNDAI_IONIQ_5].get_non_essential_params(CAR.HYUNDAI_IONIQ_5)
   if vehicle != CAR.HYUNDAI_IONIQ_5:
-    assert selection_from_bytes(other, saved).mode == ControllerMode.STANDARD
+    assert selection_from_bytes(other, saved).mode == ControllerMode.STARPILOT
+    assert selection_from_bytes(other, saved).source == 'default'
 
 
 @pytest.mark.parametrize('vehicle,profile,factor', CASES)
@@ -136,3 +136,74 @@ def test_kona_2022_friction_does_not_change_sibling_policies(monkeypatch, vehicl
   controller = LatControlTorque(cp.as_reader(), interfaces[vehicle](cp), .01, controller_mode=ControllerMode.STARPILOT)
   threshold, scale = controller.starpilot_extension.policy.friction_context(.1, 0., 0., 120. / 3.6)
   assert threshold > 0. and scale > 0.
+
+
+@pytest.mark.parametrize('alpha', (False, True))
+@pytest.mark.parametrize('direction', (-1., 1.))
+def test_ev6_highway_center_damping_preserves_controller_and_curve_response(monkeypatch, alpha, direction):
+  from types import SimpleNamespace
+  import math
+  from openpilot.cereal import log
+  from opendbc.car.vehicle_model import VehicleModel
+  from openpilot.starpilot.lateral import hkg_vehicle_shaping as shaping
+
+  cp = interfaces[CAR.KIA_EV6].get_non_essential_params(CAR.KIA_EV6)
+  cp.openpilotLongitudinalControl, cp.pcmCruise = alpha, not alpha
+  cs = SimpleNamespace(vEgo=26., steeringAngleDeg=0., steeringPressed=False)
+  params = log.VehicleParameters.new_message(angleOffsetDeg=0., roll=0.)
+  selected = shaping.KIA_EV6_HIGHWAY_CENTER_DAMPING
+  assert selected == .08
+
+  def run(taper, turn, mode=ControllerMode.STARPILOT):
+    monkeypatch.setattr(shaping, 'KIA_EV6_HIGHWAY_CENTER_DAMPING', taper)
+    controller = LatControlTorque(cp.as_reader(), interfaces[cp.carFingerprint](cp), .01, controller_mode=mode)
+    vm = VehicleModel(cp)
+    outputs, stages = [], []
+    for tick in range(300):
+      acceleration = direction * (1.5 if turn else .12 * math.sin(2 * math.pi * .4 * tick * .01))
+      value, _, state = controller.update(True, cs, vm, params, False, acceleration / cs.vEgo**2, False, .386)
+      assert math.isfinite(value) and abs(value) <= controller.steer_max + 1e-6
+      outputs.append(value)
+      stages.append((state.p, state.i, state.d, state.f))
+    off, _, state = controller.update(False, cs, vm, params, False, 0., False, .386)
+    assert off == 0. and not state.active
+    return outputs, stages, controller.torque_params.to_dict(), (controller.pid.pos_limit, controller.pid.neg_limit, controller.steer_max)
+
+  actual, baseline = run(selected, False), run(0., False)
+  assert actual[1:] == baseline[1:]
+  assert sum(x*x for x in actual[0]) < .88 * sum(x*x for x in baseline[0])
+  assert all(a*b >= -1e-12 for a, b in zip(actual[0], baseline[0], strict=True))
+  actual_turn, baseline_turn = run(selected, True), run(0., True)
+  assert actual_turn[1:] == baseline_turn[1:]
+  assert actual_turn[0] == pytest.approx(baseline_turn[0], rel=1e-6, abs=1e-8)
+  assert run(selected, False, ControllerMode.STANDARD) == run(0., False, ControllerMode.STANDARD)
+
+
+def test_ev6_taper_keeps_low_speed_and_substantial_curve_effect_small():
+  from openpilot.starpilot.lateral import hkg_vehicle_shaping as shaping
+  for speed in (0., 3., 26., 36.):
+    for acceleration in (-2., -1., 0., 1., 2.):
+      actual = shaping.get_kia_ev6_center_output_scale(acceleration, speed)
+      speed_weight = shaping._kia_ev6_sigmoid((speed - shaping.KIA_EV6_CENTER_OUTPUT_TAPER_SPEED) /
+                                              shaping.KIA_EV6_CENTER_OUTPUT_TAPER_SPEED_WIDTH)
+      center_weight = shaping._kia_ev6_sigmoid((shaping.KIA_EV6_CENTER_OUTPUT_TAPER_LAT - abs(acceleration)) /
+                                               shaping.KIA_EV6_CENTER_OUTPUT_TAPER_LAT_WIDTH)
+      old = 1. - .14 * speed_weight * center_weight
+      assert .78 <= actual <= old <= 1.
+      if speed <= 3.:
+        assert old - actual < .002
+      if abs(acceleration) >= 1.:
+        assert old - actual < .00002
+
+
+@pytest.mark.parametrize('vehicle,profile,factor', CASES)
+@pytest.mark.parametrize('alpha_long', [False, True])
+def test_vehicle_tune_defaults_are_independent_of_longitudinal_choice(vehicle, profile, factor, alpha_long):
+  cp = interfaces[vehicle].get_non_essential_params(vehicle)
+  cp.openpilotLongitudinalControl = alpha_long
+  assert default_selection(cp).mode == ControllerMode.STARPILOT
+  raw = replace_mode(None, cp, ControllerMode.STANDARD)
+  selected = selection_from_bytes(cp, raw)
+  assert selected.mode == ControllerMode.STANDARD
+  assert selected.source == 'saved'
+  assert selected.policy == profile

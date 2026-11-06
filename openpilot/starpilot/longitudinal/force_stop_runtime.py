@@ -13,6 +13,7 @@ from openpilot.starpilot.longitudinal.force_stop import ForceStop, StopFrame, St
 from openpilot.starpilot.model_geometry import road_curvature, standstill_clear_horizon, standstill_release_speed
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.longitudinal.stop_resume import StopResume
+from openpilot.starpilot.speed_limits.vision.stop_observation import CONTROL_STOP_MAX_AGE_NS, StopConfirmation, read_stop_evidence
 
 
 KEY = 'ForceStops'
@@ -33,11 +34,23 @@ def standstill_takeoff_light(model, car) -> bool | None:
   return should_stop or horizon < FROZEN_RAW_STOP_DISTANCE_M + STOP_MODEL_RELEASE_MARGIN_M
 
 
+def dashboard_stop_sign(sm, *, now_ns: int, drive_id: int) -> bool:
+  try:
+    if not sm.seen['starpilotCarState'] or not sm.valid['starpilotCarState']:
+      return False
+    stamp = int(sm.logMonoTime['starpilotCarState'])
+    return bool(drive_id < stamp <= now_ns and now_ns - stamp <= SOURCE_AGE_NS and
+                sm['starpilotCarState'].dashboardStopSign > 0)
+  except (AttributeError, KeyError, TypeError, ValueError):
+    return False
+
+
 class ForceStopRuntime:
   def __init__(self, params):
     self.params = params
     self.policy = ForceStop()
     self.resume = StopResume()
+    self.vision_stop = StopConfirmation()
     self.light = StopLightDetector()
     self.lead = LeadDetector()
     self.plan = StopPlan()
@@ -52,6 +65,7 @@ class ForceStopRuntime:
     self.clock_offset = None
 
   def reset(self):
+    self.vision_stop.reset()
     self.resume.reset()
     self.policy.reset()
     self.light.reset()
@@ -168,12 +182,16 @@ class ForceStopRuntime:
         self.policy.reset()
         self.plan = StopPlan()
         return self.plan
+      vision_sign = self.vision_stop.observe(
+        read_stop_evidence(sm, now_ns=now_ns, now_boot_ns=now_boot_ns, drive_id=drive_id), now_ns=now_ns)
       frame = StopFrame(stamp, float(car.vEgo), horizon, light_context, horizon is not None and horizon < 50,
                         bool(model.action.shouldStop), bool(car.standstill), True, bool(car.gasPressed),
                         tracked is not None and tracked.tracked is True, bool(lead.present), float(lead.dRel), float(lead.vLead),
                         raw_curve[1] if raw_curve is not None else False, curvature[0] if curvature is not None else None,
                         bool(car.leftBlinker or car.rightBlinker), float(car.steeringAngleDeg), resume_requested=resume_requested,
-                        perception_available=perception_available)
+                        perception_available=perception_available,
+                        sign=dashboard_stop_sign(sm, now_ns=now_ns, drive_id=drive_id) or
+                        bool(vision_sign and 0 <= now_ns - vision_sign <= CONTROL_STOP_MAX_AGE_NS))
       self.plan = self.policy.step(frame, vehicle_tune(str(cp.carFingerprint)), self.offset)
       if takeoff_enabled:
         self.plan = replace(self.plan, takeoff_light_observed=takeoff_observed, takeoff_light=takeoff_light)

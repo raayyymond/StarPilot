@@ -13,7 +13,7 @@ from typing import Protocol
 import hashlib
 import json
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.starpilot.ui import clip
 from openpilot.system.ui.lib.application import gui_app
@@ -25,7 +25,7 @@ from openpilot.starpilot.ui.onroad_alerts import AlertRenderer
 from openpilot.starpilot.ui.onroad_border import render_compact_half_borders, render_large_half_borders
 from openpilot.starpilot.ui.onroad_compact_widgets import CompactHudRenderer, MiciSidebarWidgets
 from openpilot.starpilot.ui.onroad_personality import PersonalityWidget
-from openpilot.starpilot.ui.onroad_curve import controlling as curve_controlling, glow_color, intensity, render_glow, status_label
+from openpilot.starpilot.ui.onroad_curve import GlowPhase, controlling as curve_controlling, glow_color, intensity, render_glow, status_label
 from openpilot.starpilot.ui.onroad_conditional import stop_active
 from openpilot.starpilot.ui.onroad_corner import CornerHintCache, render_corner_hint
 from openpilot.starpilot.ui.onroad_large_widgets import CurrentSpeedHud, UnifiedSpeedWidget, SteeringWheelWidget
@@ -126,6 +126,7 @@ class OnroadView:
     self.wall_clock = wall_clock or (lambda: datetime.now().astimezone())
     self._corner_cache = CornerHintCache()
     self.quick_select_layer = None
+    self._curve_glow_phase = GlowPhase()
     gui_app.add_render_prepare(self._corner_cache.prepare, self._corner_cache.close)
     self.fonts = fonts
     self.camera_layer = camera_layer
@@ -313,6 +314,16 @@ class OnroadView:
     self.fonts.draw(text, role, size, x + offset_px, y + offset_px, rl.Color(0, 0, 0, min(color.a, 170)))
     self.fonts.draw(text, role, size, x, y, color)
 
+  def _weather(self, state: OnroadState, center_shift: float = 0) -> None:
+    if (not placement(state.customization, self.fonts.profile, 'weather')['enabled'] or
+        state.alert.size != AlertSize.NONE or state.appearance.camera_view == CameraViewChoice.DRIVER or state.reverse_driver_camera):
+      return
+    from openpilot.starpilot.ui.weather import WeatherClient
+    from openpilot.starpilot.ui.onroad_weather import render_weather
+    if not hasattr(self, '_weather_client'):
+      self._weather_client = WeatherClient()
+    render_weather(self.fonts, state, self._weather_client, center_shift)
+
   def _ordered_widgets(self, content, state, *, driver_camera=False, stock_layer=None, only_widget=None):
     profile = str(self.fonts.profile)
     large = profile == "large"
@@ -382,6 +393,7 @@ class OnroadView:
       submit("driver_monitor", lambda: monitor(content, state))
     submit(MODE_WIDGET, lambda: self._driving_mode(state, (width - 1860) / 2 if large else 0))
     submit(CLOCK_WIDGET, lambda: self._clock(state, (width - 1860) / 2 if large else 0))
+    submit("weather", lambda: self._weather(state, (width - 1860) / 2 if large else 0))
     pending = manual_slc_confirmation(self.fonts.profile, state)
     for key in widget_order(state.customization, profile):
       if only_widget is not None and key != only_widget:
@@ -465,6 +477,7 @@ class OnroadView:
           jetlink.render(state)
         self._driving_mode(state, right_shift / 2)
         self._clock(state, right_shift / 2)
+        self._weather(state, right_shift / 2)
         if exit_layer := getattr(self, "projection_exit_layer", None):
           exit_layer(state)
       if not ordered and manual_slc_confirmation(self.fonts.profile, state):
@@ -489,7 +502,8 @@ class OnroadView:
       self.fonts.draw(label, FontRole.SEMI_BOLD, 29, 1390 + right_shift, 56,
                       curve_color)
     self._traffic_badge(state, 56 + 45 * int(label is not None))
-    render_glow(content, state, border_width=30, time_s=state.observed_ns / 1e9 if state.observed_ns else rl.get_time())
+    render_glow(content, state, border_width=30, time_s=state.observed_ns / 1e9 if state.observed_ns else rl.get_time(),
+                phase=getattr(self, "_curve_glow_phase", None))
     rl.draw_rectangle_lines_ex(frame, 30, rl.BLACK)
     rl.draw_rectangle_rounded_lines_ex(content, 0.12, 10, 30, edge)
     render_large_half_borders(state, state.observed_ns / 1e9 if state.observed_ns else rl.get_time(), content, int(height))
@@ -559,6 +573,7 @@ class OnroadView:
       if not ordered:
         self._driving_mode(state)
         self._clock(state)
+        self._weather(state)
       if not ordered and not driver_camera and manual_slc_confirmation(self.fonts.profile, state):
         self._slc_actions(state)
       signals = state.border_signals

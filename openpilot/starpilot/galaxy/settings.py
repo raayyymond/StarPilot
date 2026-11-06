@@ -27,7 +27,7 @@ from openpilot.starpilot.audio.alert_volume import SPECS as SOUND_SPECS
 from openpilot.starpilot.ui.presentation import Profile
 from openpilot.common.hardware import HARDWARE
 from openpilot.starpilot.ui.feature_settings_state import (
-  FeatureRow, FeatureSettingsRequest, FEATURE_CONFIRM_ACTIONS, is_long_confirm_action, row_change, row_default,
+  FeatureRow, FeatureSettingsRequest, FEATURE_CONFIRM_ACTIONS, is_heading, is_long_confirm_action, row_change, row_default,
 )
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.galaxy.developer_settings import CALIBRATION_RESET, DRIVER_MONITORING_RESET, DeveloperSettingsOwner
@@ -41,7 +41,7 @@ from openpilot.starpilot.ui.vasm_owner import ANNOTATION as VASM_ANNOTATION, RES
 
 PAGES = frozenset(("hub", "localization", "developer", "vehicle", "slc", "lane", "lane_change", "profiles", "personalities",
                    "traffic", "aggressive", "standard", "relaxed",
-                   "curve", "torque", "aol", "wheel", "appearance", "display", "data", "power", "sounds", "pip", "sentry", "vasm",
+                   "curve", "torque", "tuning", "torque/bluepilot", "aol", "wheel", "appearance", "display", "data", "power", "sounds", "pip", "sentry", "vasm",
                    "conditional", "conditional/cem", "conditional/ccm",
                    *(f"{name}/{category}" for name in ("traffic", "aggressive", "standard", "relaxed")
                      for category in ("acceleration", "braking", "following"))))
@@ -392,7 +392,9 @@ def _projection(row: FeatureRow) -> dict:
           "confirm": bool(row.key in CONFIRM_ACTIONS or is_long_confirm_action(row.key) or
                           row.key in (PIP_RESET, PIP_EDITOR, VASM_RESET, VASM_ANNOTATION) or row.key.startswith(PIP_FORMAT_PREFIX)),
           "repairValue": row.repair_value, "defaultValue": row.default_value, "resetAvailable": row_default(row) is not None,
-          "displayScale": "lane-strength" if row.key == "LaneCenteringStrength" else None}
+          "displayScale": "lane-strength" if row.key == "LaneCenteringStrength" else None,
+          **({"coordinate": row.key.removeprefix("torque:surface:")} if row.key.startswith("torque:surface:") and row.key != "torque:surface:reset" else {}),
+          "heading": is_heading(row.key)}
 
 
 def _question(row: FeatureRow, request: FeatureSettingsRequest) -> str:
@@ -456,6 +458,8 @@ def _question(row: FeatureRow, request: FeatureSettingsRequest) -> str:
   if key in ("profile:global_acceleration", "profile:global_braking"):
     return (f"Save {row.label.lower()} as {request.value}? Personalities set to Selected Profile follow this choice; " +
             "explicit personality overrides stay unchanged.")
+  if key == "torque:surface:reset":
+    return "Remove the thirty manual overrides for this vehicle? Saved Auto Learn history is kept."
   if key == "torque_gain_rebase":
     return "Apply the saved steering response to the selected controller and current vehicle tune? Friction and other models stay unchanged."
   if key == "torque_rebase":
@@ -787,6 +791,8 @@ class SettingsGateway:
       if direction != 0:
         raise SettingsChanged("Invalid action")
       value = ("Off" if row.value == "On" else "On") if row.key == SETUP_ACTION else "confirm"
+      if row.key == "torque:surface:reset":
+        value = "Reset"
       if row.key == VASM_ANNOTATION:
         if draft is None:
           raise SettingsChanged("Camera regions are required")

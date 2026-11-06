@@ -53,6 +53,7 @@ DESCRIPTIONS = {
   'FasterLeadTakeoff': ('Improves launches from a stop and responds sooner when a lead starts moving. ' +
                         'Selected acceleration profiles, stop detection and vehicle limits still apply.'),
   'CustomPersonalities': 'Uses your following-time and jerk settings for the selected driving personality.',
+  'profile:stopped_gap': 'Adds this distance to the following gap behind a stopped lead vehicle.',
   'profile:global_acceleration': 'Chooses the acceleration curve used by personalities set to Selected Profile.',
   'profile:global_braking': 'Chooses the braking response used by personalities set to Selected Profile.',
   'reset_profiles': 'Restores the default acceleration, braking and following curves and presets.',
@@ -67,11 +68,11 @@ DESCRIPTIONS = {
   'SLCPriority1': 'Chooses the first source checked for a fresh speed limit.',
   'SLCPriority2': 'Chooses the source used when the primary source has no fresh speed limit.',
   'slc_reset': 'Resets saved speed-limit offsets while retaining valid configured speed ranges.',
+  'reset_calibration': 'Clears saved camera and steering calibration. The device recalibrates on the next drive.',
   'reset_driver_monitoring': 'Clear saved wheel-side detection. Automatic detection restarts on the next drive.',
   'AlwaysAllowUploads': 'Allows queued full logs and videos to upload over metered networks. This uses mobile data.',
   'UseVOACC': ('Use vision-only adaptive cruise control instead of radar-assisted lead detection. ' +
                'Requires StarPilot longitudinal control. Applies next drive; radar faults and safety checks remain active.'),
-  'ToyotaRadarMode': 'Chooses the supported Toyota front radar configuration, including the optional ARS510 retrofit.',
   'ToyotaAutoHold': ('Holds the brakes after you press the brake for over one second at a complete stop ' +
     'with cruise main on and cruise disengaged. Press the accelerator to release.'),
   'GMPedalLongitudinal': 'Uses a detected compatible pedal interceptor for StarPilot acceleration control.',
@@ -88,13 +89,17 @@ DESCRIPTIONS = {
   'RemoteStartBootsComma': 'Wakes comma during GM remote start.',
   'HKGRemoteStartBootsComma': 'Wakes comma during Hyundai, Kia or Genesis remote climate operation.',
   'IgnoreIgnitionLine': 'Uses GM CAN ignition instead of the harness ignition signal.',
+  'heading:starport': 'Settings for connecting Android Auto to the car through StarPort.',
+  'StarPortNewSetup': 'Shows the guided StarPort setup with a live checklist instead of the classic setup screens.',
+  'StarPortAllowHevc': 'Lets a car that offers only H.265 video receive H.265; a car with an H.264 mode keeps H.264.',
+  'StarPortDedicatedWifi': "Joins the car's Wi-Fi on a second interface so the comma stays on its home Wi-Fi or phone hotspot.",
   'TeslaWakeOnCAN': 'Wakes comma when the Tesla wakes up, before you press the brake.',
   'RadarRecoveryAlert': 'Play a chime and show a brief message when a radar fault clears. You must re-engage manually.',
   'CameraView': 'Chooses the camera view shown on the driving screen.',
   'DeveloperSidebar': 'Shows live developer metrics on the right of the Big driving screen. Off gives that space back to the road view.',
   'DriverCamera': 'Shows the driver camera while reversing.',
   'StockConfidenceBallWidget': 'Uses StarPilot driving widgets in place of the stock confidence ball.',
-  'HidePersonalityAlerts': 'Hides the alert shown when the driving personality changes.',
+  'HidePersonalityAlerts': 'Hides the alert shown when the driving personality changes on the comma and Android Auto.',
   'ShowBrakeStatus': 'Colors the steering wheel to show braking and acceleration.',
   'HideLeadMarker': 'Shows the lead-vehicle indicator on the driving screen.',
   'LeadInfo': 'Shows the lead vehicle distance or speed beside its indicator.',
@@ -137,19 +142,13 @@ DESCRIPTIONS = {
   'conditional:mode': 'Chooses Chill, Experimental or automatic switching based on the configured driving conditions.',
   'conditional:reset': 'Restores the default conditional driving-mode settings.',
   'conditional:manual_reset': 'Returns both remembered manual driving-mode choices to Automatic.',
-  'disable_BP_lat_UI': ('Steers with the BluePilot lateral controller instead of the stock Ford curvature path: curvature or' +
-    ' angle as the primary control, with lane positioning and its own tuning. Off by default.'),
-  'FordPrefLateralControl': ('Chooses what BluePilot steers with. Curvature follows the planned curvature like the stock path;' +
-    ' Angle uses the path angle as the main actuator.'),
+  'FordPrefLateralControl': ('Chooses BluePilot Curvature, BluePilot Angle or StarPilot Controller. Mach-E and classic Explorer' +
+    ' default to StarPilot; other supported Fords default to BluePilot Curvature. Lane centering and offset use the global' +
+    ' StarPilot settings. Change while parked.'),
   'FordPrefSteerAngleCurvature': ('Measures curvature from the steering pinion angle instead of the yaw-rate sensor, in control and' +
     ' Panda safety. For Fords with a faulty yaw sensor.'),
   'enable_human_turn_detection_curv': 'Eases off steering while you turn the wheel through a turn yourself.',
   'lane_change_factor_high_curv': 'Scales steering during a lane change. Values under 1.0 soften it.',
-  'enable_lane_positioning_curv': 'Nudges the car toward the lane center, with an optional in-lane offset.',
-  'custom_path_offset_curv': "Biases the car's position inside the lane, in meters.",
-  'enable_lane_full_mode_curv': ("Centers between the lane lines when both are confidently detected, instead of following the model's" +
-    ' path.'),
-  'LC_PID_gain_UI_curv': 'Sets how strongly lane positioning pulls toward its target.',
   'custom_profile_curv': 'Uses the two predicted-curvature blend settings below instead of the built-in profile.',
   'pc_blend_ratio_low_C_UI_curv': 'Mixes predicted curvature into gentle curves: 0 follows the plan, 1 follows the prediction.',
   'pc_blend_ratio_high_C_UI_curv': 'Mixes predicted curvature into sharp curves: 0 follows the plan, 1 follows the prediction.',
@@ -158,19 +157,18 @@ DESCRIPTIONS = {
   'FordHighSpeedDampening_ang': ('Tunes the straight-road response at highway speed in angle mode: lower it if the car oversteers,' +
     ' raise it if it understeers.'),
   'lane_change_factor_high_ang': 'Scales steering during a lane change in angle mode. Values over 1.0 strengthen it.',
-  'enable_lane_positioning_ang': 'Nudges the car toward the lane-line center in angle mode, with an optional in-lane offset.',
-  'custom_path_offset_ang': "Biases the car's position inside the lane in angle mode, in meters.",
-  'lane_centering_strength_ang': "Sets how strongly lane positioning pulls against the model's own path in angle mode.",
 }
 
 # These are initialization explanations, not a second defaults table.
 INITIALIZATION = {
+  'StarPortNewSetup': 'Applies the next time the setup screen opens.',
+  'StarPortAllowHevc': 'Applies from the next StarPort connection.',
+  'StarPortDedicatedWifi': 'Applies from the next StarPort connection.',
   'LateralControllerSelection': ('Applies when driving processes next start: the controller class, vehicle policy and ' +
     'PID/filter state are constructed together.'),
   'UseStarPilotLongitudinalPlanner': 'Applies when the planner next starts: each choice runs a different planner process with its own subscriptions and state.',
   'TurnAssist': ('Applies when driving processes next start: the selected torque controller creates its ' +
     'low-speed feedback controller and filter state at initialization.'),
-  'ToyotaRadarMode': 'Chooses the supported Toyota front radar configuration, including the optional ARS510 retrofit.',
   'ToyotaAutoHold': 'Requires the next vehicle startup to configure the brake-hold permission in CarParams and Panda safety.',
   'DisableOpenpilotLongitudinal': 'Requires the next vehicle startup to rebuild cruise ownership and Panda safety configuration.',
   'GMAutoHold': 'First enable requires the next vehicle startup to configure the brake-hold safety permission. An already admitted hold can be disabled live.',
@@ -183,7 +181,6 @@ INITIALIZATION = {
   'HKGRemoteStartBootsComma': 'Requires a device restart to load the matching Panda ignition firmware.',
   'IgnoreIgnitionLine': 'Requires a device restart to load the matching Panda ignition firmware.',
   'TeslaWakeOnCAN': 'Requires a device restart to load the matching Panda ignition firmware.',
-  'disable_BP_lat_UI': 'Requires the next vehicle startup to configure Panda safety for the BluePilot steering checks.',
   'FordPrefSteerAngleCurvature': 'Requires the next vehicle startup to configure the pinion measurement in Panda safety.',
 }
 
@@ -253,6 +250,10 @@ def purpose(row):
     return 'Selects camera crop dimensions matching the source camera image.'
   if key.startswith('pip:mask:'):
     return 'Moves the camera-image crop center along the indicated axis.'
+  if key.startswith('torque:surface:'):
+    return ('Removes the thirty manual steering overrides while keeping saved Auto Learn history.'
+            if key == 'torque:surface:reset' else
+            'Adjusts this manual steering correction.')
   if key.startswith('torque:'):
     field = key.split(':')[1]
     return {'factor': 'Sets the lateral-acceleration-to-torque conversion for compatible steering controllers.',
@@ -280,6 +281,8 @@ def description(row):
   suffix = INITIALIZATION.get(row.key, '')
   if row.key.startswith('lane_change:') and row.key not in ('lane_change:close_gap', 'lane_change:close_gap_seconds', 'lane_change:reset'):
     suffix = 'Changes apply when the current signal and maneuver end; turning assistance off cancels it after the preference refresh.'
+  if row.key.startswith('torque:surface:'):
+    suffix = row.reason.strip()
   if row.key.startswith('torque:') and row.key.split(':')[1] in ('factor', 'friction', 'gain'):
     suffix = ('First activation of a manual tuning owner requires a driving-process restart. An ' +
       'already active owner refreshes saved adjustments during the drive.')

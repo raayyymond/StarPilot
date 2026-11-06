@@ -433,23 +433,23 @@ def _offer(*resolutions):
 @pytest.mark.parametrize("resolution,expected", [("auto", (1280, 720)), ("720p", (1280, 720)), ("480p", (800, 480)),
                                                  ("1080p", (1920, 1080)), ("bogus", (1280, 720))])
 def test_choose_video_mode_resolution_preference(resolution, expected):
-  mode = choose_video_mode(_offer(1, 2, 3), resolution)
+  mode = choose_video_mode(_offer(1, 2, 3), resolution=resolution)
   assert (mode.width, mode.height) == expected
 
 
 def test_choose_video_mode_resolution_only_from_the_offer():
-  assert (choose_video_mode(_offer(1, 2), "1080p").height) == 720  # not offered: next preference
-  assert (choose_video_mode(_offer(1, 3), "720p").height) == 480
-  assert (choose_video_mode(_offer(3), "480p").height) == 1080  # the only offer is still taken
+  assert (choose_video_mode(_offer(1, 2), resolution="1080p").height) == 720  # not offered: next preference
+  assert (choose_video_mode(_offer(1, 3), resolution="720p").height) == 480
+  assert (choose_video_mode(_offer(3), resolution="480p").height) == 1080  # the only offer is still taken
 
 
 def test_choose_video_mode_respects_encoder_height_limit():
-  assert choose_video_mode(_offer(1, 2, 3), "1080p", max_height=720).height == 720
-  assert choose_video_mode(_offer(1, 2, 3), "1080p", max_height=1080).height == 1080
-  assert choose_video_mode(_offer(1, 3), "1080p", max_height=720).height == 480
-  assert choose_video_mode(_offer(3), "auto", max_height=720).height == 1080  # as before: nothing else offered
+  assert choose_video_mode(_offer(1, 2, 3), resolution="1080p", max_height=720).height == 720
+  assert choose_video_mode(_offer(1, 2, 3), resolution="1080p", max_height=1080).height == 1080
+  assert choose_video_mode(_offer(1, 3), resolution="1080p", max_height=720).height == 480
+  assert choose_video_mode(_offer(3), resolution="auto", max_height=720).height == 1080  # as before: nothing else offered
   # auto with the default limit is unchanged from before the knob existed
-  assert choose_video_mode(_offer(1, 2, 3), "auto", max_height=720).height == 720
+  assert choose_video_mode(_offer(1, 2, 3), resolution="auto", max_height=720).height == 720
 
 
 def test_config_resolution_and_encoder_limit_clamps(tmp_path):
@@ -1078,8 +1078,9 @@ def test_supervisor_stop_while_waiting_for_car(identity, tmp_path, monkeypatch):
 # ------------------------------------------------------------------- network
 
 class FakeNetworkManager:
-  def __init__(self, fail_with_bssid=False):
+  def __init__(self, fail_with_bssid=False, stalled_dhcp=0):
     self.fail_with_bssid = fail_with_bssid
+    self.stalled_dhcp = stalled_dhcp
     self.active_device_connection = "/active/home"
     self.states = {}
     self.added = []
@@ -1097,6 +1098,8 @@ class FakeNetworkManager:
       active = f"/active/aa{len(self.added)}"
       locked = "bssid" in settings["802-11-wireless"]
       self.states[active] = network.ACTIVE_STATE_DEACTIVATED if (locked and self.fail_with_bssid) else network.ACTIVE_STATE_ACTIVATED
+      if len(self.added) <= self.stalled_dhcp:
+        self.states[active] = 1  # activating: the access point never answers DHCP
       self.active_device_connection = active
       return [f"/settings/aa{len(self.added)}", active]
     if member == "GetSettings":
@@ -1109,6 +1112,8 @@ class FakeNetworkManager:
     values = {"WirelessEnabled": True, "DeviceType": 2, "Interface": "wlan0", "ActiveConnection": self.active_device_connection,
               "Connection": "/settings/home", "Ip4Config": "/ip4/1", "Autoconnect": self.autoconnect,
               "ActiveAccessPoint": "/ap/1", "Frequency": 5745}
+    if name == "State" and interface.endswith("Device"):
+      return 70
     if name == "State":
       return self.states.get(path, 4)
     if name == "AddressData":
@@ -1186,7 +1191,7 @@ def test_network_lease_keeps_a_joined_network_through_slow_answers(monkeypatch):
   real_get = lease._get.side_effect
 
   def get(path, interface, name):
-    if slow.get(name):
+    if slow.get(name) and interface != network.NM_DEVICE_IFACE:  # the connection's State, not the device's before the join
       slow[name] -= 1
       raise network.NetworkTimeout(f"NetworkManager did not answer reading {name} within 5 s")
     return real_get(path, interface, name)
@@ -1230,6 +1235,22 @@ def test_network_lease_waits_for_a_slow_honda_access_point(monkeypatch):
   with pytest.raises(network.NetworkError):
     lease.acquire(credentials())
   assert budgets == [("AA:BB:CC:DD:EE:FF", 90.0), ("", 30.0)]
+
+
+def test_network_lease_restarts_a_join_whose_dhcp_goes_unanswered():
+  nm = FakeNetworkManager(stalled_dhcp=2)
+  lease = make_lease(nm)
+  assert lease.acquire(credentials(), timeout=10.0, dhcp_patience=0.3) == "192.168.50.23"
+  assert len(nm.added) == 3
+
+
+def test_network_lease_waits_for_dhcp_without_patience():
+  from openpilot.starpilot.system.starport import network
+  nm = FakeNetworkManager(stalled_dhcp=2)
+  lease = make_lease(nm)
+  with pytest.raises(network.JoinTimeout):
+    lease.acquire(credentials(), timeout=1.0)
+  assert len(nm.added) == 2  # only the SSID-only retry, never a DHCP restart
 
 
 def test_network_lease_does_not_undo_user_network_change():

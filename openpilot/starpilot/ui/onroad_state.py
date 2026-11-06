@@ -13,6 +13,7 @@ import math
 from typing import Protocol
 
 from openpilot.starpilot.ui.presentation import Profile
+from openpilot.starpilot.ui.weather import WeatherReading
 from openpilot.starpilot.ui.large_speed_geometry import ACTION_BOUNDS, LIMIT_RECTS, confirmation_bounds, confirmation_buttons
 from openpilot.starpilot.ui.appearance_preferences import CameraViewChoice, OnroadAppearance
 from openpilot.starpilot.curve_speed.status import CurveObservation
@@ -195,6 +196,7 @@ class OnroadState:
   right_hand_drive: bool = False
   switchback_mode: bool = False
   traffic_mode: bool = False
+  traffic_selected: bool = False
   traffic_display: TrafficDisplay | None = None
   aol_latched: bool | None = None
   lateral_active: bool = False
@@ -235,9 +237,15 @@ class OnroadState:
   toyota_cruise_status: str = ''
   toyota_cruise_target_kph: float | None = None
 
+  torque_is_demand: bool = False
+
   @property
   def cruise_active(self) -> bool:
     return self.longitudinal_active or self.longitudinal_overridden or self.stock_cruise_active
+
+  stop_sign_observed_ns: int = 0
+  weather_location: tuple[float, float] | None = None
+  weather: WeatherReading | None = None
 
   def __post_init__(self) -> None:
     if self.speed_mps is not None and (not math.isfinite(self.speed_mps) or self.speed_mps < 0):
@@ -246,6 +254,8 @@ class OnroadState:
       raise ValueError("Cruise speed must be finite and nonnegative")
     if not math.isfinite(self.torque_utilization) or not -1.0 <= self.torque_utilization <= 1.0:
       raise ValueError("Torque utilization must be normalized")
+    if type(self.torque_is_demand) is not bool:
+      raise ValueError("Steering demand kind must be Boolean")
     if not 0 <= self.personality <= 2:
       raise ValueError("Personality must be aggressive, standard, or relaxed")
     if self.stopped_duration_s is not None and (type(self.stopped_duration_s) is not int or self.stopped_duration_s <= 0):

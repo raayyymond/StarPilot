@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { compile } from '../web/vendor/vue/vue.esm-browser.js'
 import { FlmPage } from '../web/js/flm.js'
-import { SURFACE_NAMES, PID_UNSUPPORTED, validTrainingResults, validTrackingResults, trackingView, surfaceRows, measurementText, validTrackingValues, trackingCoordinates, validTrackingPlot, trackingPlotView, sourceSeconds } from '../web/js/flm-training-results.js'
+import { SURFACE_NAMES, PID_UNSUPPORTED, validTrainingResults, validTrackingResults, trackingView, surfaceRows, measurementText, validTrackingValues, trackingCoordinates, validTrackingPlot, trackingPlotView, sourceSeconds, tunerStatus } from '../web/js/flm-training-results.js'
 
 const coordinates = amount => SURFACE_NAMES.map((name, i) => [name, i === 0 ? amount : 0])
 const tracking = () => ({ version: 1, status: 'trial_active', reason: 'scoring_future_tracking', group: 'feedforward',
@@ -60,6 +60,24 @@ const neutralRollback = report(); neutralRollback.current.tracking.status = 'rol
 neutralRollback.current.application.applied = false
 neutralRollback.current.details['Actual full surface coordinates'] = coordinates(0)
 assert.equal(trackingView(neutralRollback, true).label, 'Correction rollback acknowledged')
+const held = structuredClone(neutralRollback)
+held.current.tracking.reason = 'original_input_regime_after_baseline_ack_required'
+held.current.tracking.futureEpisodes = 2
+assert.equal(trackingView(held, true).label, 'Baseline restored; waiting for matching road')
+assert.equal(tunerStatus(held, true).title, 'Waiting for matching road')
+assert.equal(trackingView(held, true).futureEpisodes, 2)
+assert.equal(trackingView(held, true).requiredEpisodes, 3)
+assert(!/confirmed|saved|correction applied/i.test(tunerStatus(held, true).title))
+for (const mutate of [value => value.current.tracking.applicationAcknowledged = false,
+  value => value.current.tracking.bindingCurrent = false,
+  value => value.current.fresh = false,
+  value => value.current.tracking.phase = 'trial',
+  value => delete value.current.details['Actual full surface coordinates']]) {
+  const noProof = structuredClone(held); mutate(noProof)
+  assert.equal(trackingView(noProof, true).acknowledged, false)
+  assert.notEqual(tunerStatus(noProof, true).title, 'Waiting for matching road')
+}
+assert.notEqual(tunerStatus(held, false).title, 'Waiting for matching road')
 for (const mutate of [value => value.current.tracking.applicationAcknowledged = false,
   value => value.current.tracking.bindingCurrent = false,
   value => value.current.tracking.applicationSettledMonoTime = null,
@@ -173,15 +191,14 @@ for (const mutate of [value => value.version = 'unknown', value => value.binding
   const invalid = report(); invalid.current.trackingPlot = plot(); mutate(invalid.current.trackingPlot)
   assert(!validTrackingPlot(invalid.current.trackingPlot)); assert(!validTrainingResults(invalid)); assert.equal(trackingPlotView(invalid), null)
 }
-assert.match(FlmPage.template, /Latest completed delay-paired steering episode/)
-assert.match(FlmPage.template, /not actuator-delay aligned/)
-assert.match(FlmPage.template, /Pending trial target/)
-assert.match(FlmPage.template, /Accepted baseline/)
-assert.match(FlmPage.template, /No delay-paired steering episode plot/)
+assert.match(FlmPage.template, /measured delay/)
+assert.match(FlmPage.template, /Completed window/)
+assert.match(FlmPage.template, /Applied now/)
+assert.match(FlmPage.template, /saving is separate/)
+assert.match(FlmPage.template, /No interpolation/)
 compile(FlmPage.template, { onError: error => { throw error }, decodeEntities: value => value.replaceAll('&amp;', '&') })
-assert.match(FlmPage.template, /tracking\?\.label \|\| summary/)
-assert.match(FlmPage.template, /Future trial episodes/)
-assert.match(FlmPage.template, /Passing future checks does not itself confirm/)
+assert.match(FlmPage.template, /Comparable trial windows/)
+assert.match(FlmPage.template, /not a confirmed improvement/)
 assert.doesNotMatch(FlmPage.template, /v-html/)
 console.log('Optional versioned FLM tracking report, paired observed metrics, honest trial acknowledgments and old report compatibility passed')
 
@@ -195,6 +212,64 @@ assert(!liveText.toLowerCase().includes('invalid applied output'), 'Live learner
 assert(!liveText.includes('Collection & fitting'), 'Legacy fitter cards must not describe the live empirical learner')
 delete ctx.report.current.tracking
 const legacyText = text(render.call(ctx,ctx,[]))
-assert(legacyText.toLowerCase().includes('invalid applied output'))
-assert(legacyText.includes('Collection & fitting'))
+assert(legacyText.includes('The reported steering output could not be verified'))
+assert(legacyText.includes('Collecting driving samples'))
 console.log('Actual Vue render keeps live learner progress separate and preserves legacy report fallback')
+
+const countsReport=report();countsReport.current.details['GLOBAL original source capture']={poses:1731,readyPairs:128}
+const progressContext={...FlmPage.data(),report:countsReport}
+for(const [name,get] of Object.entries(FlmPage.computed))Object.defineProperty(progressContext,name,{get:()=>get.call(progressContext)})
+assert.equal(progressContext.measurements,1731,'Live source observations are independent of legacy fitter counts')
+countsReport.current.details['GLOBAL original source capture'].poses=-1
+assert.equal(progressContext.trackingProgress,null,'Invalid original counts stay unknown')
+assert.equal(progressContext.measurements,null,'Missing live counts cannot be replaced with legacy zero')
+console.log('Live pose count uses existing producer data, without extra telemetry or an eligibility claim')
+
+// Parked analysis has a fresh report but deliberately has NO live application.
+ctx.report = {version:1,history:[],preference:{version:1,valid:true,enabled:true,parked:true,vehicle:'declared-torque-car'},
+ current:{fresh:true,ageSeconds:.1,enabled:null,status:'collecting',reason:'recorded_tracking_suggestion_not_yet_qualified_for_automatic_application',
+ progress:{samples:241573,blocks:251,requiredBlocks:6},fit:null,application:{applied:false,reason:'saved_configuration_is_not_current_application'},
+ details:{'Completed drive analyzed':'declared-drive','Recorded steering observations':241573,
+ 'Analysis decision':'recorded_tracking_suggestion_not_yet_qualified_for_automatic_application','Automatic configuration changed':false,
+ 'Recorded route suggestions':['highway_center_taper_max','turn_in_boost_left','unwind_taper_left','turn_in_boost_right','unwind_taper_right']
+ .map(name=>[name,.005,9,'controller_native_checks_not_passed'])}}}
+assert.equal(ctx.live,false,'Parked report is never a live application acknowledgement')
+assert.equal(ctx.reportFresh,true)
+assert.equal(ctx.state.title,'Completed drive analyzed')
+const offroadText=text(render.call(ctx,ctx,[]))
+for(const label of ['Highway center taper','Left turn-in boost','Left unwind taper','Right turn-in boost','Right unwind taper'])assert(offroadText.includes(label))
+assert(!offroadText.includes('Waiting for driving samples'))
+assert(!offroadText.includes('Real measurements go here'))
+assert.equal(ctx.currentApplied,false)
+const measuredWindow={version:1,domain:'lateral_acceleration',samples:2000,windows:10,error_rms:.12,route:'declared-drive',segment:0,
+ source_start_ns:1e9,source_end_ns:2.9e9,points:Array.from({length:20},(_,i)=>[1e9+i*1e8,.2,.08]),
+ sampling:'input_ordered_original_endpoints_no_interpolation'}
+ctx.report.current.details['Recorded steering response']=measuredWindow
+ctx.report.current.details['Saved route adjustment count']=0
+ctx.report.current.details['Controller and encoder check windows']=[22,24]
+ctx.report.current.details['Automatic tune refusal reasons']=[['original_scored_frame_not_eligible',1],['candidate changed an actual limiter/support',1]]
+assert.equal(ctx.offroad.observed.errorRms,.12)
+assert.equal(ctx.recordedTrackingChart.valid,true)
+assert(ctx.recordedTrackingChart.paths.every(path=>path.length===1),'Both original series render')
+const measuredText=text(render.call(ctx,ctx,[]))
+assert(measuredText.includes('Recorded baseline') && measuredText.includes(measurementText(.12)))
+assert(measuredText.includes('Saved adjustments') && measuredText.includes('Awaiting next-drive measurement'))
+assert(measuredText.includes('No interpolation or delay alignment'))
+assert(measuredText.includes('22 / 24 original controller and encoder windows passed'))
+assert(measuredText.includes('candidate triggered an encoder limiter'))
+assert.equal(ctx.currentApplied,false)
+for(const changed of [{points:measuredWindow.points.toReversed()},{error_rms:NaN},{domain:'torque'},
+ {source_end_ns:measuredWindow.source_end_ns+1}]){
+ ctx.report.current.details['Recorded steering response']={...measuredWindow,...changed}
+ assert.equal(ctx.offroad.observed,null,'Malformed recorded data cannot populate the graph')
+}
+ctx.report.current.details['Recorded steering response']={...measuredWindow,domain:'steering_angle'}
+assert.equal(ctx.offroad.observed.units,'degrees','PID observations retain their angle units')
+ctx.report.current.details['Recorded steering response']=measuredWindow
+ctx.report.current.details['Saved route configuration state']='ready_for_next_drive'
+assert.equal(ctx.state.title,'Tune saved for the next drive')
+assert.equal(ctx.currentApplied,false,'Next-drive saving never fabricates live application')
+ctx.now=3000
+assert.equal(ctx.reportFresh,false)
+assert.notEqual(ctx.state.title,'Tune saved for the next drive','Expired report cannot assert the current saved tune')
+console.log('Actual parked Vue render exposes all five route candidates, distinguishes saving/application and expires stale status')

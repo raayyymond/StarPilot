@@ -35,6 +35,15 @@ class TestProjectionLayout(unittest.TestCase):
           self.assertGreaterEqual(placed[axis], metadata['bounds'][axis])
           self.assertLessEqual(placed[axis] + widget[extent], metadata['bounds'][axis] + metadata['bounds'][extent])
 
+  def test_unsaved_layer_order_draws_the_editor_default(self):
+    document = default_layout(SCREEN)
+    self.assertNotIn('widgetOrder', document)
+    order = projection_customization(document, default_document())['widgetOrder']['large']
+    self.assertEqual(order, layout_metadata(SCREEN)['widgetOrder'])
+    self.assertLess(order.index(NAV_MAP), order.index('pip_right'))
+    saved = [NAV_MAP, *(key for key in order if key != NAV_MAP)][::-1]
+    self.assertEqual(projection_customization({**document, 'widgetOrder': saved}, default_document())['widgetOrder']['large'], saved)
+
   def test_sources_save_actual_attached_actions_inside_each_projection_screen(self):
     from openpilot.starpilot.ui.onroad_customization import default_document, placement
     for viewport in ((1860, 1080), (2880, 1080), (1920, 1440)):
@@ -216,6 +225,19 @@ class TestProjectionLayout(unittest.TestCase):
       for value in (1, 0, 'true', None, [], {}):
         with self.subTest(key=key, value=value), self.assertRaises(ValueError):
           validate_layout({**document, key: value}, SCREEN)
+
+  def test_legacy_personality_choice_cannot_override_shared_preference(self):
+    from openpilot.starpilot.system.starport.projection_layout import projection_appearance
+    from openpilot.starpilot.ui.appearance_preferences import OnroadAppearance
+    for old_value in (False, True):
+      saved = validate_layout({**default_layout(SCREEN), 'hidePersonalityAlerts': old_value,
+                               'wheelPedalFeedback': True}, SCREEN)
+      round_trip = decode_layout(json.dumps(saved).encode(), SCREEN)
+      self.assertEqual(round_trip, saved)
+      for shared_value in (False, True):
+        actual = projection_appearance(OnroadAppearance(hide_personality_alerts=shared_value), round_trip)
+        self.assertIs(actual.hide_personality_alerts, shared_value)
+        self.assertTrue(actual.wheel_pedal_feedback)
 
   def test_lead_info_starts_off_and_takes_only_known_choices(self):
     document = default_layout(SCREEN)

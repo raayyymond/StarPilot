@@ -52,6 +52,7 @@ from openpilot.starpilot.ui.conditional_feature import BUTTON_PREFIX, Conditiona
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.ui.wheel_feature import WheelFeature, PREFIX as WHEEL_PREFIX
 from openpilot.starpilot.longitudinal.output_max import KEY as OUTPUT_MAX_KEY
+from openpilot.starpilot.ui.tesla_coop_feature import TeslaCoopFeature
 from openpilot.starpilot.ui.tesla_screen_feature import TeslaScreenFeature, KEYS as TESLA_SCREEN_KEYS
 from openpilot.starpilot.ui.ford_bluepilot_feature import FordBluePilotFeature, KEYS as FORD_BLUEPILOT_KEYS
 from openpilot.starpilot.ui.ford_cluster_feature import FordClusterFeature
@@ -162,6 +163,7 @@ class FeatureSettingsOwner:
                                       configuration_longitudinal=self.configuration_longitudinal)
     self.long_profiles = LongProfileFeature(self)
     self.tesla_screen = TeslaScreenFeature(self)
+    self.tesla_coop = TeslaCoopFeature(self)
     from openpilot.starpilot.ui.gm_cancel_remap_feature import GmCancelRemapFeature
     self.gm_cancel_remap = GmCancelRemapFeature(self)
 
@@ -468,21 +470,6 @@ class FeatureSettingsOwner:
               self.authority("vehicle") and request.expected in (None, b"0", b"1"))
     return commit_exact(self.params, key="ToyotaAutoHold", max_bytes=128, raw=b"1" if request.value == "On" else b"0",
                         expected=request.expected, authorized=authorized, temp_prefix=".toyota-auto-hold-").verified
-
-  def _toyota_radar_capability(self):
-    from openpilot.starpilot.car.toyota.radar_preferences import capability
-    return capability(self.vehicle_params())
-
-  def _apply_toyota_radar(self, request: FeatureSettingsRequest) -> bool:
-    from openpilot.starpilot.car.toyota.radar_preferences import CHOICES, KEY
-    if not request.confirmation or request.value not in CHOICES or request.dependencies:
-      return False
-    def authorized():
-      return (bool(request.vehicle_fingerprint) and self.vehicle_fingerprint() == request.vehicle_fingerprint and
-              request.capability is not None and request.capability == self._toyota_radar_capability() and
-              self.authority("toyota_radar") and request.expected in (None, b"0", b"1", b"2"))
-    return commit_exact(self.params, key=KEY, max_bytes=8, raw=str(CHOICES.index(request.value)).encode(),
-                        expected=request.expected, authorized=authorized, temp_prefix=".toyota-radar-").verified
 
   def _cruise_capability(self) -> tuple | None:
     cp = self.vehicle_params()
@@ -840,11 +827,11 @@ class FeatureSettingsOwner:
               FeatureRow("", "Wheel Controls", "Assign steering-wheel buttons and cruise behavior", page=FeaturePage.WHEEL, available=True)]
       if (self._long_pitch_capability() is not None or self._bolt_disable_capability() is not None or
           self._auto_hold_capability() is not None or self._toyota_sng_capability() is not None or self._jeep_hold_capability() is not None or
-          self._toyota_radar_capability() is not None or self._pedal_setup_capability() is not None or
+          self._pedal_setup_capability() is not None or
           self.subaru_smoothing.capability() is not None or
           self._subaru_avh_capability() is not None or self._subaru_startup_capability() is not None or self._subaru_sng_capability() is not None or
           self._subaru_software_capability() is not None or self._gm_stop_capability("VoltSNG") is not None or
-          self._gm_stop_capability("GMAutoHold") is not None or self.tesla_screen.capability() is not None or
+          self._gm_stop_capability("GMAutoHold") is not None or self.tesla_screen.capability() is not None or self.tesla_coop.capability() is not None or
           self.gm_tune.capability() is not None or self.gm_truck.capability() is not None or
           self.gm_ev_preset.capability() is not None or self.volt_radar.capability() is not None or
           self.panda_wake.capability() is not None or preap_radar_capability(self.vehicle_params()) is not None):
@@ -870,16 +857,6 @@ class FeatureSettingsOwner:
                              configurable and parked and self.authority("parked_preferences"),
                              "Automatic resume for Toyota/Lexus vehicles without factory stop-and-go. Applies after the next startup.")
         rows.append(replace(row, available=row.available and self._readable("SNGHack"), capability=sng_capability))
-      radar_capability = self._toyota_radar_capability()
-      if radar_capability is not None:
-        from openpilot.starpilot.car.toyota.radar_preferences import CHOICES, KEY
-        raw, readable = read_saved(self.params, KEY, 8)
-        valid = readable and raw in (None, b"0", b"1", b"2")
-        rows.append(FeatureRow(KEY, "Continental Radar", CHOICES[int(raw or b"0")] if valid else "Invalid saved choice",
-          raw, CHOICES if valid else (), available=bool(valid and configurable and self.authority("toyota_radar")),
-          reason=("Optional RAV4 2022/2023 receiver. Off retains the original radar choice. Applies after startup; " +
-                  "native safety and ECU configuration are unchanged."),
-          capability=radar_capability, default_value="Off"))
       jeep_capability = self._jeep_hold_capability()
       if jeep_capability is not None:
         row = self._bool_row("JeepBrakeHold", "Jeep Brake Hold",
@@ -887,6 +864,7 @@ class FeatureSettingsOwner:
                              "Retains a cruise-controlled stop until you press a pedal or cancel cruise. Applies after the next startup")
         rows.append(replace(row, available=row.available and self._readable("JeepBrakeHold"), capability=jeep_capability))
       rows.extend(self.tesla_screen.rows(parked))
+      rows.extend(self.tesla_coop.rows(parked))
       rows.extend(self.gm_cancel_remap.rows(parked))
 
       rows.extend(self.preap_radar.rows())
@@ -1022,10 +1000,18 @@ class FeatureSettingsOwner:
                              reason="" if learning.resettable else "No saved learning" if learning.valid and not learning.has_samples else
                                     "Park to reset saved learning" if not parked else "Saved learning is currently in use",
                              vehicle_fingerprint=self.vehicle_fingerprint(), dependencies=learning.sources))
+    elif page == FeaturePage.BLUEPILOT:
+      title = "BluePilot Controller Options"
+      rows.extend(FordBluePilotFeature(self).rows(parked, options=True))
+      rows.extend(FordClusterFeature(self).rows(parked))
+    elif page == FeaturePage.TUNING:
+      title = "Manual steering tune"
+      capability = self._capability("torque")
+      rows.extend(self.torque.manual_rows(capability, parked and self.authority("torque") and
+                                         self.authority("parked_preferences") and capability is not None))
     elif page == FeaturePage.TORQUE:
       title = "Steering and Torque"
       rows.extend(FordBluePilotFeature(self).rows(parked))
-      rows.extend(FordClusterFeature(self).rows(parked))
       controller_row = self.controller.row()
       if controller_row is not None:
         rows.append(controller_row)
@@ -1313,6 +1299,8 @@ class FeatureSettingsOwner:
                     row.key.startswith('conditional:') and not row.key.startswith(BUTTON_PREFIX) else fingerprint)
             for row in rows]
     subtitle = (
+        "Parked changes apply after the next drive starts. These are explicit manual overrides, separate from Auto Learn."
+        if page == FeaturePage.TUNING else
         "Configure features supported by this vehicle. Restart requirements are shown with each setting."
         if page == FeaturePage.VEHICLE else
         "Configure automatic Chill and Experimental switching."
@@ -1375,6 +1363,8 @@ class FeatureSettingsOwner:
       return self._apply_pedal_setup(request)
     if key in PREAP_RADAR_KEYS:
       return self.preap_radar.apply(request)
+    if key == "TeslaCoopSteering":
+      return self.tesla_coop.apply(request)
     if key in TESLA_SCREEN_KEYS:
       return self.tesla_screen.apply(request)
     if key == GM_TUNE_KEY:
@@ -1415,8 +1405,6 @@ class FeatureSettingsOwner:
       return self._apply_toyota_sng(request)
     if key == "ToyotaAutoHold":
       return self._apply_auto_hold(request)
-    if key == "ToyotaRadarMode":
-      return self._apply_toyota_radar(request)
     if key == PLANNER_SELECTION_KEY:
       if request.value not in ("Off", "On") or not self.authority("preferences"):
         return False

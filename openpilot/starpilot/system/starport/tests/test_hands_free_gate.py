@@ -177,7 +177,7 @@ def test_setup_restarts_stay_off_unless_the_car_profile_asks():
   sup = bare_supervisor(events)
   boot = FakeBoot()
 
-  def project(result, lease, ident, link_lost):
+  def project(result, lease, ident):  # as every other adapter: no restart handling, no link watch
     assert boot.on_restart() is False
     boot.restarted.set()
     raise EOFError("Head unit disconnected after 0/4 bytes")

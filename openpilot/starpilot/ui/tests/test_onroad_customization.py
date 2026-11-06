@@ -7,7 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 import pytest
 
 from openpilot.starpilot.ui.appearance_preferences import OnroadAppearance
@@ -36,6 +36,11 @@ def road(document=None, **changes):
   return replace(OnroadState(True, True, 15.0, 80.0, SpeedLimitObservation(),
                             appearance=OnroadAppearance(show_developer_sidebar=True), viewport_width=1860),
                  customization=document or default_document(), **changes)
+
+
+def test_torque_bar_keeps_its_familiar_customization_label():
+  for profile in customization_metadata()['profiles'].values():
+    assert profile['widgets']['torque_bar']['label'] == 'Torque bar'
 
 
 def test_defaults_and_metadata_are_independent_and_valid():

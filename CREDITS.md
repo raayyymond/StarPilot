@@ -2,7 +2,7 @@
 
 ## Jetlink external inference
 
-The comma-side Jetlink client and USB transport in `jetlink_repo` are by Zeph Leggett and the [Jetlink contributors](https://github.com/zoompilot/jetlink). They are vendored from revision `a863c3801da6fd925d14eb1f5b1e250f8efcc649` under the MIT license, retained in [jetlink_repo/LICENSE](jetlink_repo/LICENSE). StarPilot's adapter (`openpilot/starpilot/models/jetlink_adapter.py`) builds on Jetlink's openpilot layer and owns its param names, Always On Lateral rule, model runner reset, settings and alerts. Companion applications and inference servers remain distributed by Jetlink.
+The comma-side Jetlink client and USB transport in `jetlink_repo` are by Zeph Leggett and the [Jetlink contributors](https://github.com/zoompilot/jetlink). They are vendored from revision `9cfde98eec1d7cc714d800504944cf1a3944513d` under the MIT license, retained in [jetlink_repo/LICENSE](jetlink_repo/LICENSE). StarPilot's adapter (`openpilot/starpilot/models/jetlink_adapter.py`) builds on Jetlink's openpilot layer and owns its param names, Always On Lateral rule, model runner reset, settings and alerts. Companion applications and inference servers remain distributed by Jetlink.
 
 ## MRR35 Hyundai angle and radar
 
@@ -38,8 +38,8 @@ The inherited source covers Subaru angle platform/firmware definitions, `ES_Stat
 
 The explicit StarPilot [jacobw Subaru adapter](opendbc_repo/opendbc/car/subaru/JACOBW.md) additionally integrates that branch's low-speed filter, target-first limiting and Crosstrek EPS envelope. Its preserved stricter guards and platform scope are documented alongside the code.
 
-## Experimental Blendful lane centering
+## StarPilot Ford demand tuning
 
-Blendful is authored by James Vecellio-Grant (Discountchubbs), with coauthors royjr <royjr96@gmail.com>, nayan <nayan8teen@gmail.com> and Jason Wen <haibin.wen3@gmail.com>. The algorithm and its tests come from commit `97135965effb3630ed55993903449edb73468d50`, “controls: Blendful lateral policy (alpha) (#2073)”. Original copyright notices and the referenced license are retained in [LICENSE.blendful.md](openpilot/starpilot/lateral/LICENSE.blendful.md). StarPilot adds the default-off developer selection and runtime compatibility guards.
+The previous optional StarPilot Controller, formerly in `openpilot/starpilot/car/ford/starpilot_tuning.py`, restored demand tuning from StarPilot `8da0c9d916^`, descended from BluePilot bp-7.0 `e1d051d7ba270261b4455068bd68f1a58db15a4a` through StarPilot `2efe6017bfe14cee4807833e05f9a7f6ba255cdb`. Contributors to that lineage include Alan Polk, John Christman, Jacob Neulight, tonesto7 and Haibin Wen. The current protocol adapter is maintained by StarPilot separately from the pinned BluePilot library; this attribution does not imply BluePilot maintains or endorses the adapted tune.
 
-This project uses software from Haibin Wen and SUNNYPILOT LLC and is licensed under a custom license requiring permission for use.
+The current StarPilot Controller replaces that historical curvature-primary tune with a separately maintained adaptation of BluePilot v0.2.1's angle strategy (`2b9dc6cc784faac47a1885d0bda0561f7b76f74d`, `core/lateral_angle_ext.py`). Alan Polk is the principal controller author; John Christman contributed angle-mode anti-stall work, Jacob Neulight the pinion/shadow measurement, Nathan Ingraham and Praeuner high-speed damping, and other contributors are retained in the pinned library's `CREDITS.md`. StarPilot adds bounded small-signal conditioning ahead of the unchanged angle limit chain. This adaptation is not maintained or endorsed by BluePilot; the pinned library and its imported hooks are unchanged.

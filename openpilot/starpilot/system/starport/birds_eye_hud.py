@@ -480,13 +480,13 @@ class BirdsEyeHud:
     try:
       image = rl.load_image(str(self._icon_path))
       try:
-        if image.data == rl.ffi.NULL or image.width <= 0 or image.height <= 0:
+        if not rl.is_image_valid(image):
           raise ValueError('turn signal icon unreadable')
         if image.height > height:
           rl.image_resize(image, round(image.width * height / image.height), round(height))
         texture = rl.load_texture_from_image(image)
       finally:
-        if image.data != rl.ffi.NULL:
+        if rl.is_image_valid(image):
           rl.unload_image(image)
       if texture.id == 0:
         raise ValueError('turn signal texture not created')

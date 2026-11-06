@@ -87,6 +87,12 @@ struct StarPilotCarControl @0x81c2f05a394cf4af {
       distanceMeters @3 :Float32;
       remainingDistanceMeters @4 :Float32;
       remainingDurationSeconds @5 :Float32;
+      lanes @6 :List(Lane);
+    }
+    struct Lane {
+      active @0 :Bool;
+      directions @1 :List(Text);
+      activeDirection @2 :Text;
     }
     version @12 :UInt16;
   }
@@ -214,6 +220,7 @@ struct StarPilotCarState @0xf35cc4560bbf6ec2 {
   fordLearningEvidence @35 :FordLearningEvidence;
   learningApplication @36 :LearningApplication;
   feedbackPublication @37 :FeedbackPublication;
+  steeringLimitInfo @39 :StarPilotCarControl.SteeringLimitInfo;
   toyotaCruise @38 :ToyotaCruise;
 
   struct ToyotaCruise {
@@ -642,6 +649,27 @@ struct StarPilotModelDataV2 @0x80ae746ee2596b11 {
     modelId @9 :Text; # exact bundled detector/classifier identity
     frameId @10 :UInt32;
     stream @11 :Stream;
+    stopSigns @12 :StopObservation;
+
+    struct StopObservation {
+      status @0 :Status;
+      observedMonoTime @1 :UInt64;
+      validUntilMonoTime @2 :UInt64;
+      cameraFrameEofBootTime @3 :UInt64;
+      frameId @4 :UInt32;
+      imageWidth @5 :UInt16;
+      imageHeight @6 :UInt16;
+      detections @7 :List(StopDetection);
+    }
+
+    struct StopDetection {
+      confidence @0 :Float32;
+      x1Pixels @1 :UInt16;
+      y1Pixels @2 :UInt16;
+      x2Pixels @3 :UInt16;
+      y2Pixels @4 :UInt16;
+    }
+
 
     enum Status @0xc97a1c56dc1427ae {
       unknown @0;

@@ -136,6 +136,9 @@ def policy_for(CP) -> str | None:
     return 'bolt'
   if corolla_supported(CP):
     return 'corolla_tss2'
+  from openpilot.starpilot.lateral.prius_policy import supported_cp as prius_supported
+  if prius_supported(CP):
+    return 'prius'
   from openpilot.starpilot.lateral.rav4_tss2_policy import supported_cp as rav4_supported
   if rav4_supported(CP):
     return 'rav4_tss2'
@@ -170,9 +173,7 @@ def model_turn_assist_supported(CP) -> bool:
 
 def default_selection(CP) -> ControllerSelection:
   policy = policy_for(CP)
-  from openpilot.starpilot.lateral.hkg_vehicle_policy import PROFILES
-  forte_non_scc = policy == 'kia_forte' and str(CP.carFingerprint) in ('KIA_FORTE_2019_NON_SCC', 'KIA_FORTE_2021_NON_SCC')
-  mode = ControllerMode.STARPILOT if policy and policy != 'generic' and (policy not in PROFILES or forte_non_scc) else ControllerMode.STANDARD
+  mode = ControllerMode.STARPILOT if policy and policy != 'generic' else ControllerMode.STANDARD
   return ControllerSelection(mode, policy, 'default')
 
 

@@ -26,7 +26,7 @@ from jeepney.low_level import MessageType
 from jeepney.wrappers import Properties
 
 from openpilot.starpilot.system.starport.bootstrap import WifiCredentials
-from openpilot.starpilot.system.starport.identity import DATA_DIR
+from openpilot.starpilot.system.starport.identity import DATA_DIR, boot_id as _boot_id
 
 NM = "org.freedesktop.NetworkManager"
 NM_PATH = "/org/freedesktop/NetworkManager"
@@ -39,8 +39,17 @@ NM_WIRELESS_IFACE = "org.freedesktop.NetworkManager.Device.Wireless"
 NM_AP_IFACE = "org.freedesktop.NetworkManager.AccessPoint"
 DEVICE_TYPE_WIFI = 2
 DEVICE_STATE_DISCONNECTED = 30
+DEVICE_STATE_PREPARE = 40
+DEVICE_STATE_IP_CONFIG = 70
+DEVICE_STATE_ACTIVATED = 100
+DHCP_RESTARTS = 3
+DEVICE_STATES_NOT_MANAGED = (10, 20)  # NM_DEVICE_STATE_UNMANAGED, NM_DEVICE_STATE_UNAVAILABLE
 DEVICE_READY_TIMEOUT_S = 5.0
 ACTIVE_STATE_ACTIVATING = 1
+# A shared interface can be briefly unmanaged (for example while the Wi-Fi mode is being switched). Bugsink showed 19 joins
+# refused with "device is strictly unmanaged"; waiting a few seconds turns a transient state into a normal join, and a
+# device that stays unmanaged is reported as such instead of as an opaque D-Bus error.
+UNMANAGED_WAIT_S = 8.0
 ACTIVE_STATE_ACTIVATED = 2
 ACTIVE_STATE_DEACTIVATED = 4
 # The car sends its Wi-Fi details ~4 s after ignition, but a Honda's access point took ~55 s from ignition to appear
@@ -78,13 +87,6 @@ class NetworkTimeout(NetworkError):
 def _boottime() -> float:
   """NetworkManager's AccessPoint.LastSeen clock."""
   return time.clock_gettime(time.CLOCK_BOOTTIME) if hasattr(time, "CLOCK_BOOTTIME") else time.monotonic()
-
-
-def _boot_id() -> str:
-  try:
-    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-  except OSError:
-    return ""
 
 
 def _paused_interface(marker: Path) -> str:
@@ -216,6 +218,7 @@ class NetworkLease:
     self.reuse_join = False  # car profile: keep a join in progress when the adapter restarts the handshake
     self.channel_memory: ChannelMemory | None = None  # car profile: pin the first join to the remembered channel
     self.pinned_from_memory = False
+    self.dhcp_patience = 0.0
     self.marker = AUTOCONNECT_MARKER
     self.scan_requested_at = -SCAN_REUSE_S
     self._lock = threading.Lock()
@@ -279,13 +282,15 @@ class NetworkLease:
     with self._lock:
       self._prepare_device(cancelled)
 
-  def acquire(self, credentials: WifiCredentials, timeout: float = JOIN_TIMEOUT_S, cancelled: Callable[[], bool] = lambda: False) -> str:
+  def acquire(self, credentials: WifiCredentials, timeout: float = JOIN_TIMEOUT_S, cancelled: Callable[[], bool] = lambda: False,
+              dhcp_patience: float = 0.0) -> str:
     """Join the projection network and return the comma's IPv4 address on it.
 
     The BSSID the car reports is tried first (fast, unambiguous); if that
     attempt fails, one retry matches the SSID alone in case the reported BSSID
     belongs to a different radio of the head unit.
     """
+    self.dhcp_patience = dhcp_patience
     attempts = [credentials]
     if credentials.bssid:
       attempts.append(replace(credentials, bssid=""))
@@ -324,6 +329,33 @@ class NetworkLease:
     self.joined = None
 
   def _acquire_once(self, credentials: WifiCredentials, timeout: float, cancelled: Callable[[], bool]) -> str:
+    deadline = time.monotonic() + timeout
+    restarts = 0
+    while True:
+      self._activate(credentials, cancelled)
+      if self._wait_activated(deadline, timeout, cancelled, restarts < DHCP_RESTARTS):
+        break
+      restarts += 1
+      self.log("wifi_dhcp_restart", interface=self.interface, patience_s=self.dhcp_patience, restarts=restarts)
+      self._drop_attempt()
+    while True:
+      if cancelled():
+        raise NetworkError("cancelled")
+      try:
+        self.local_ip = self._ipv4()
+        break
+      except NetworkTimeout as error:
+        self._slow_answer(error, deadline)  # the network is up; a slow answer must not tear it down
+    if self.dedicated:
+      self._check_overlap()
+    radio = self._radio()
+    self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **radio)
+    self.pinned_from_memory = False
+    if self.channel_memory is not None and credentials.bssid and radio.get("freq"):
+      self.channel_memory.remember(credentials.bssid, int(radio["freq"]))
+    return self.local_ip
+
+  def _activate(self, credentials: WifiCredentials, cancelled: Callable[[], bool]) -> None:
     with self._lock:
       if not self._get(NM_PATH, NM_IFACE, "WirelessEnabled"):
         raise NetworkError("Wi-Fi is turned off on the comma")
@@ -331,6 +363,7 @@ class NetworkLease:
         self._prepare_device(cancelled)
       else:
         self.device_path = self._wifi_device()
+        self._wait_managed(cancelled)
         self._pause_autoconnect()
       if not (self.reuse_join and self._reusable(credentials)):
         active = self._get(self.device_path, NM_DEVICE_IFACE, "ActiveConnection")
@@ -358,7 +391,9 @@ class NetworkLease:
         self.connection_path, self.active_path = body[0], body[1]
         self.joined = credentials
 
-    deadline = time.monotonic() + timeout
+  def _wait_activated(self, deadline: float, timeout: float, cancelled: Callable[[], bool], may_restart: bool) -> bool:
+    """True once active; False when DHCP sat unanswered past dhcp_patience and the join should start over."""
+    ip_config_since = 0.0
     while True:
       if cancelled():
         raise NetworkError("cancelled")
@@ -370,28 +405,20 @@ class NetworkLease:
       except NetworkError as error:
         raise NetworkError("The projection network connection was removed (wrong key or out of range?)") from error
       if state == ACTIVE_STATE_ACTIVATED:
-        break
+        return True
       if state == ACTIVE_STATE_DEACTIVATED:
         raise NetworkError("NetworkManager could not join the projection network")
-      if time.monotonic() >= deadline:
+      now = time.monotonic()
+      if now >= deadline:
         raise JoinTimeout(f"Timed out joining the projection network after {timeout:.0f} s")
+      if may_restart and self.dhcp_patience > 0:
+        if self._get(self.device_path, NM_DEVICE_IFACE, "State") == DEVICE_STATE_IP_CONFIG:
+          ip_config_since = ip_config_since or now
+          if now - ip_config_since >= self.dhcp_patience:
+            return False
+        else:
+          ip_config_since = 0.0
       time.sleep(0.25)
-    while True:
-      if cancelled():
-        raise NetworkError("cancelled")
-      try:
-        self.local_ip = self._ipv4()
-        break
-      except NetworkTimeout as error:
-        self._slow_answer(error, deadline)  # the network is up; a slow answer must not tear it down
-    if self.dedicated:
-      self._check_overlap()
-    radio = self._radio()
-    self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **radio)
-    self.pinned_from_memory = False
-    if self.channel_memory is not None and credentials.bssid and radio.get("freq"):
-      self.channel_memory.remember(credentials.bssid, int(radio["freq"]))
-    return self.local_ip
 
   def interface_state(self) -> int:
     """NetworkManager's state for this interface: 10 unmanaged, 20 unavailable, 30 and up usable; 0 without such a device."""
@@ -459,6 +486,22 @@ class NetworkLease:
       raise DedicatedUnavailable(failure)
     time.sleep(0.25)
 
+  def _wait_managed(self, cancelled: Callable[[], bool], timeout: float = UNMANAGED_WAIT_S) -> None:
+    """Give NetworkManager a few seconds to manage the shared interface before joining on it."""
+    deadline = time.monotonic() + timeout
+    waited = False
+    while (state := self._get(self.device_path, NM_DEVICE_IFACE, "State")) in DEVICE_STATES_NOT_MANAGED:
+      if cancelled():
+        raise NetworkError("cancelled")
+      if time.monotonic() >= deadline:
+        raise NetworkError(f"{self.interface} is unmanaged by NetworkManager (state {state}) after waiting {timeout:.0f} s")
+      if not waited:
+        waited = True
+        self.log("wifi_waiting_managed", interface=self.interface, state=state)
+      time.sleep(0.25)
+    if waited:
+      self.log("wifi_became_managed", interface=self.interface)
+
   def _prepare_device(self, cancelled: Callable[[], bool]) -> None:
     if self.device_ready:
       return
@@ -477,6 +520,23 @@ class NetworkLease:
     self.device_ready = True
     # A new interface has never scanned, so the car's BSSID would be rejected until a scan finds it.
     self._request_scan()
+
+  def hold_autoconnect(self) -> bool:
+    """Stop wlan0 hunting for a network until release(restore=True). True when held."""
+    with self._lock:
+      self.device_path = next((path for path, name in self._wifi_devices() if name == self.interface), "")
+      if not self.device_path:
+        return False
+      state = int(self._get(self.device_path, NM_DEVICE_IFACE, "State"))
+      if state == DEVICE_STATE_ACTIVATED:
+        return False  # connected again; nothing to hold
+      self._pause_autoconnect()
+      if DEVICE_STATE_PREPARE <= state < DEVICE_STATE_ACTIVATED:
+        try:
+          self._call(self.device_path, NM_DEVICE_IFACE, "Disconnect")  # a join already under way
+        except NetworkError as error:
+          self.log("wifi_hold_disconnect_failed", error=str(error))
+      return self.autoconnect_paused
 
   def _pause_autoconnect(self) -> None:
     """Keep NetworkManager from rejoining home Wi-Fi between attempts; release(restore=True) turns it back on."""

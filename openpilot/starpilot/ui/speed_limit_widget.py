@@ -3,13 +3,14 @@
 import time
 from typing import cast
 
-import pyray as rl
+from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.starpilot.ui.large_speed_geometry import LARGE_SIGN_SCALE, CONFIRMATION_SCALE, CONFIRMATION_PADDING
 from openpilot.starpilot.ui.onroad_state import OnroadState, manual_slc_confirmation, speed_limit_bounds, slc_controls, slc_accept_available
 from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile
 from openpilot.starpilot.ui.speed_limit_pulse import SpeedLimitPulse
 from openpilot.starpilot.ui.speed_limit_shapes import SpeedLimitShapes
+from openpilot.starpilot.ui.stop_sign_widget import render_stop_sign
 from openpilot.starpilot.ui.unified_speed_presentation import displayed_adjusted_limit_mps, positive, resolve_unified_speed
 
 
@@ -75,6 +76,7 @@ class SpeedLimitWidget:
     self.shapes.close()
 
   def render(self, state: OnroadState, *, defer_confirmation=False) -> None:
+    render_stop_sign(self.fonts, state)
     bounds = speed_limit_bounds(self.profile, state)
     now = state.observed_ns / 1e9 if state.observed_ns else time.monotonic()
     self.pulse.update(state, now, visible=bounds is not None)

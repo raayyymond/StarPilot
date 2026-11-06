@@ -192,7 +192,7 @@ def save_png(rgba, path: Path) -> None:
 
 class Window:
   def __init__(self, width: int, height: int, scale: float):
-    import pyray as rl
+    from openpilot.starpilot.ui.raylib import rl
     self.rl = rl
     scale = scale or min(1.0, 1280 / width)
     rl.set_config_flags(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE | rl.ConfigFlags.FLAG_VSYNC_HINT)
@@ -215,7 +215,7 @@ class Window:
     if rgba is not None:
       import numpy as np
       rgba = np.ascontiguousarray(rgba)
-      rl.update_texture(self.texture, rl.ffi.cast("void *", rl.ffi.from_buffer(rgba)))
+      rl.update_texture(self.texture, rgba)
     screen_w, screen_h = rl.get_screen_width(), rl.get_screen_height()
     scale = min(screen_w / self.width, screen_h / self.height)
     w, h = self.width * scale, self.height * scale
@@ -453,7 +453,7 @@ class FakeLink:
     # The scripted head unit always accepts configuration index 1. Put the mode the phone will choose there
     # (behind an H.265 offer the phone skips), so negotiation runs unmodified.
     max_height = None if args.hw_max_height is None else args.hw_max_height
-    chosen = choose_video_mode([{"id": 3, "video_configs": [parse_fields(c) for c in configs]}], args.resolution, max_height)
+    chosen = choose_video_mode([{"id": 3, "video_configs": [parse_fields(c) for c in configs]}], resolution=args.resolution, max_height=max_height)
     winner = configs.pop(chosen.config_index)
     configs = [field(1, 2) + field(10, 7), winner, *configs]
 

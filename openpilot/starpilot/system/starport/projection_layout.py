@@ -156,7 +156,8 @@ def layout_metadata_for_viewport(viewport):
   return profile
 
 
-# Android Auto display switches, independent of the comma screen's preferences.
+# Android Auto display switches. The legacy personality field remains in saved layouts for compatibility;
+# the shared comma preference controls that notice on every screen.
 DISPLAY_DEFAULTS = {'blindSpotBorder': False, 'signalBorder': False, 'blindSpotCamera': False,
                     'hidePersonalityAlerts': False, 'wheelPedalFeedback': False,
                     'leadIndicator': False, 'leadInfo': 'Off', 'speedSources': False,
@@ -166,7 +167,7 @@ LEAD_INFO_CHOICES = ('Off', 'Distance', 'Speed')
 
 
 def projection_appearance(appearance, document):
-  """The comma's onroad appearance with every car-screen choice taken from the AA layout instead."""
+  """Apply screen-specific choices while retaining the shared personality-alert preference."""
   from dataclasses import replace
   from openpilot.starpilot.ui.appearance_preferences import LeadInfoMode
   lead_indicator = document.get('leadIndicator', False) is True
@@ -178,7 +179,6 @@ def projection_appearance(appearance, document):
                  show_lead_indicator=lead_indicator, lead_info_mode=lead_info_mode,
                  show_blindspot_border=document.get('blindSpotBorder', False) is True,
                  show_signal_border=document.get('signalBorder', False) is True,
-                 hide_personality_alerts=document.get('hidePersonalityAlerts', False) is True,
                  wheel_pedal_feedback=document.get('wheelPedalFeedback', False) is True)
 
 
@@ -411,9 +411,9 @@ def projection_customization(document, base_customization):
   shifts['torque_bar'] = (tx - native['torque_bar']['default']['x'], ty - native['torque_bar']['default']['y'])
   result = copy.deepcopy(base_customization)
   result['clock24Hour'] = document.get('clock24Hour', False)
-  result.setdefault('widgetOrder', {}).pop('large', None)
-  if 'widgetOrder' in document:
-    result['widgetOrder']['large'] = list(document['widgetOrder'])
+  # Match the editor's default layers, keeping PiP above the map.
+  result.setdefault('widgetOrder', {})['large'] = list(document['widgetOrder'] if 'widgetOrder' in document else
+                                                       layout_metadata_for_viewport((width, height))['widgetOrder'])
   result['layouts']['large'] = {}
   for key, placement in document['widgets'].items():
     dx, dy = shifts.get(key, (0, 0))

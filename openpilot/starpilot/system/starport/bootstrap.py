@@ -30,6 +30,7 @@ import re
 import struct
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field as dataclass_field
 
@@ -53,6 +54,15 @@ NAMES = {1: "WifiStartRequest", 2: "WifiInfoRequest", 3: "WifiInfoResponse", 4: 
 
 STATUS_SUCCESS = 0
 STATUS_NETWORK_UNAVAILABLE = -1
+# WifiStartResponse status for a head unit that is busy, not unhappy with our handshake.
+STATUS_NOT_READY = -6
+# Dropping the link this soon after our version reply means the reply was rejected.
+REPLY_REJECT_SECONDS = 2.0
+# Fallback for a v4+ head unit that goes silent after our usual reply: a phone-shaped WifiVersionResponse, where 1 is
+# success (open-android-auto WifiVersionStatus) and the channel type and session info are filled in.
+MODERN_MAJOR = 4
+MODERN_VERSION_SUCCESS = 1
+CHANNEL_5GHZ, CHANNEL_24GHZ, CHANNEL_DUAL = 1, 2, 3
 
 SECURITY_OPEN = 1
 SECURITY_NAMES = {0: "unknown", 1: "open", 2: "wep64", 3: "wep128", 4: "wpa", 8: "wpa2", 12: "wpa/wpa2",
@@ -61,12 +71,22 @@ SECURITY_NAMES = {0: "unknown", 1: "open", 2: "wep64", 3: "wep128", 4: "wpa", 8:
 MAX_FRAME = 4096
 MAX_FRAMES = 64
 INITIAL_KICK_SECONDS = 2.5
+# A car that keeps answering "not ready" gets up to this many stage timeouts before the setup is abandoned.
+REFUSAL_PATIENCE = 3
 # Phone-side WifiPing while joining the receiver's Wi-Fi, so an impatient receiver (a wireless adapter) keeps the
 # idle RFCOMM link. Sent only to a receiver that pings us first: one that never pings may not expect them.
 JOIN_PING_INTERVAL = 2.0
 # A wireless adapter that sends WifiVersionRequest again while we join gave up on us (2026-10-29 OTTOCAST, ~12 s after
 # WifiStartResponse); it resets RFCOMM 8-10 s later. Answer it on the same link instead, a bounded number of times.
 MAX_HANDSHAKE_RESTARTS = 2
+# Opt-in handshake variations for dongles that stall the standard exchange; "" is the standard behavior.
+EXPERIMENTS = {
+  "start_response_first": ("Answer start request first", {"start_response_first"}),
+  "version_endpoint": ("Use version endpoint", {"version_endpoint"}),
+  "all": ("All of these", {"start_response_first", "version_endpoint"}),
+}
+# Frames that carry credentials or the vehicle identifier are never dumped as hex.
+HEX_LOG_SKIP = (WIFI_INFO_RESPONSE, WIFI_SETUP_INFO, WIFI_VERSION_REQUEST)
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
 
 
@@ -86,6 +106,10 @@ class HandshakeRestarted(BootstrapError):
   def __init__(self, stage: str, payload: bytes):
     super().__init__(stage, "head unit restarted the handshake")
     self.payload = payload
+
+
+class BootstrapClosed(BootstrapError):
+  pass
 
 
 @dataclass(frozen=True)
@@ -176,7 +200,25 @@ def parse_setup_info(payload: bytes) -> tuple[Endpoint | None, WifiCredentials |
   return endpoint, credentials
 
 
-def parse_version_request(payload: bytes) -> tuple[int, int, Endpoint | None, dict]:
+def channel_type(request: bytes) -> int:
+  """The WifiChannelType to select: the car's stated preference, else what its channel list allows."""
+  fields = parse_fields(request)
+  preference = one(fields, 3)
+  if isinstance(preference, int) and preference in (CHANNEL_5GHZ, CHANNEL_24GHZ, CHANNEL_DUAL):
+    return preference
+  channels = [value for value in fields.get(4, []) if isinstance(value, int) and value > 0]
+  if channels and all(value >= 5000 for value in channels):
+    return CHANNEL_5GHZ
+  if channels and all(value < 5000 for value in channels):
+    return CHANNEL_24GHZ
+  return CHANNEL_DUAL
+
+
+def valid_experiment(value: str) -> bool:
+  return value == "" or value in EXPERIMENTS
+
+
+def parse_version_request(payload: bytes, endpoint_fields: tuple[int, ...] = ()) -> tuple[int, int, Endpoint | None, dict]:
   """Major/minor, an optional projection endpoint, and head-unit identity strings."""
   fields = parse_fields(payload)
   major, minor = int(one(fields, 1, 1) or 1), int(one(fields, 2, 0) or 0)
@@ -196,6 +238,13 @@ def parse_version_request(payload: bytes) -> tuple[int, int, Endpoint | None, di
       labels = {1: "car_make", 2: "car_model", 3: "car_year", 5: "head_unit_make", 6: "head_unit_model",
                 7: "head_unit_software_build", 8: "head_unit_software_version"}
       head_unit.update({label: text(info, key) for key, label in labels.items() if text(info, key)})
+  for number in endpoint_fields:
+    for value in fields.get(number, []):
+      if isinstance(value, bytes):
+        try:
+          endpoint = parse_endpoint(value) or endpoint
+        except ValueError:
+          continue
   return major, minor, endpoint, head_unit
 
 
@@ -235,8 +284,22 @@ class WirelessBootstrap:
 
   def __init__(self, sock, log: Callable[..., None], *, device_serial: str = "starpilot",
                version_status: int = STATUS_SUCCESS, stage_timeout: float = 20.0, start_request_delay: float = 5.0,
-               initial_kick_delay: float = INITIAL_KICK_SECONDS, join_ping_interval: float = JOIN_PING_INTERVAL):
+               initial_kick_delay: float = INITIAL_KICK_SECONDS, join_ping_interval: float = JOIN_PING_INTERVAL,
+               experiment: str = "", modern_reply: bool = False, patience: int = REFUSAL_PATIENCE,
+               channel_override: int | None = None, phone_identity: bool = False, phone_address: str = ""):
     self.sock = sock
+    self.experiment = experiment if valid_experiment(experiment) else ""
+    self.lifetime_id = uuid.uuid4().hex
+    self.modern_reply = modern_reply
+    self.patience = patience                # stage timeouts a car that keeps saying "not ready" gets (setup ladder)
+    self.channel_override = channel_override  # Wi-Fi band to answer with inside the phone-style reply; None keeps the car's own
+    self.phone_identity = phone_identity     # answer like a phone: status 0 and this device's name and Bluetooth address
+    self.phone_address = phone_address
+    self.version_major = 0
+    self.refusals: list[int] = []           # WifiStartResponse statuses that were not success, in order
+    self.replied_at: float | None = None    # monotonic time our WifiVersionResponse went out
+    self._reply_accepted = False
+    self.flags = EXPERIMENTS[self.experiment][1] if self.experiment else set()
     self.initial_kick_delay = initial_kick_delay
     self.join_ping_interval = join_ping_interval
     self.peer_uses_pings = False
@@ -257,6 +320,17 @@ class WirelessBootstrap:
     self.restart_payload = b""
     self.on_restart: Callable[[], bool] = lambda: False  # supervisor: True while the projection connection is still being set up
 
+  def only_not_ready(self) -> bool:
+    """Every refusal so far said "not ready": the car was busy, which says nothing about the handshake."""
+    return bool(self.refusals) and all(status == STATUS_NOT_READY for status in self.refusals)
+
+  def hung_up_on_reply(self, error: BaseException) -> bool:
+    """A close immediately after the version reply, before Wi-Fi setup progressed."""
+    closed = isinstance(error, (BootstrapClosed, ConnectionResetError, BrokenPipeError))
+    return (closed and self.stage == "wifi_start" and not self._reply_accepted and self.version_major > 0
+            and self.replied_at is not None and not self.refusals
+            and 0 <= time.monotonic() - self.replied_at <= REPLY_REJECT_SECONDS)
+
   def join_is_cancelled(self) -> bool:
     """For join_wifi: stop on user cancellation or once the handshake has failed."""
     return self.join_cancelled.is_set() or self.cancelled()
@@ -266,6 +340,11 @@ class WirelessBootstrap:
       self.sock.sendall(encode_frame(message_id, payload))
     if message_id not in (WIFI_PING_REQUEST, WIFI_PING_RESPONSE):
       self.log("bootstrap_tx", message=NAMES.get(message_id, message_id), bytes=len(payload))
+      self._log_hex("tx", message_id, payload)
+
+  def _log_hex(self, direction: str, message_id: int, payload: bytes) -> None:
+    if self.experiment and message_id not in HEX_LOG_SKIP and not (self.phone_identity and message_id == WIFI_VERSION_RESPONSE):
+      self.log("bootstrap_frame_hex", direction=direction, message=NAMES.get(message_id, message_id), hex=payload.hex())
 
   def next_frame(self, timeout: float) -> tuple[int, bytes]:
     deadline = time.monotonic() + timeout
@@ -283,7 +362,7 @@ class WirelessBootstrap:
       except TimeoutError:
         continue
       if not data:
-        raise BootstrapError(self.stage, "head unit closed the RFCOMM connection")
+        raise BootstrapClosed(self.stage, "head unit closed the RFCOMM connection")
       self.queue.extend(self.reader.feed(data))
     message_id, payload = self.queue.pop(0)
     if message_id not in (WIFI_PING_REQUEST, WIFI_PING_RESPONSE):
@@ -292,7 +371,31 @@ class WirelessBootstrap:
       if self.frames_seen > MAX_FRAMES:
         raise BootstrapError(self.stage, "too many bootstrap frames")
       self.log("bootstrap_rx", message=NAMES.get(message_id, message_id), bytes=len(payload))
+      self._log_hex("rx", message_id, payload)
     return message_id, payload
+
+  def _version_response(self, major: int, minor: int, request: bytes) -> bytes:
+    self.version_major = major
+    if major < MODERN_MAJOR or not self.modern_reply:
+      return field(1, major) + field(2, minor) + field(3, self.device_serial) + field(4, self.version_status)
+    if self.phone_identity:
+      return self._phone_identity_reply(major, minor)
+    selected = self.channel_override or channel_type(request)
+    session = field(1, self.device_serial) + field(2, self.lifetime_id)
+    reply = (field(1, major) + field(2, minor) + field(3, self.device_serial) + field(4, MODERN_VERSION_SUCCESS) +
+             field(5, selected) + field(6, session))
+    self.log("bootstrap_version_reply", style="modern", channel_type=selected, hex=reply.hex())
+    return reply
+
+  def _phone_identity_reply(self, major: int, minor: int) -> bytes:
+    """What a OnePlus phone sent a Mavlou wireless dongle (Bluetooth capture): status 0, no band, and its own identity."""
+    device_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"starpilot.{self.phone_address or self.device_serial}")
+    identity = field(1, str(uuid.UUID(self.lifetime_id))) + field(2, str(device_id)) + field(3, self.device_serial)
+    if self.phone_address:
+      identity += field(4, self.phone_address)
+    reply = field(1, major) + field(2, minor) + field(3, self.lifetime_id[:8]) + field(4, 0) + field(6, identity)
+    self.log("bootstrap_version_reply", style="phone_identity", has_address=bool(self.phone_address))
+    return reply
 
   def service(self, message_id: int, payload: bytes) -> bool:
     """Handle stage-independent frames; returns True when consumed."""
@@ -334,6 +437,7 @@ class WirelessBootstrap:
     # exchange if the car has not started it; newer head units (2025 Honda) wait for it.
     start_request_at: float | None = None
     deadline = time.monotonic() + self.stage_timeout
+    latest_deadline = time.monotonic() + self.patience * self.stage_timeout
     initial_kick_at: float | None = time.monotonic() + self.initial_kick_delay
     hint_ready_at: float | None = None
     while endpoint is None:
@@ -365,12 +469,14 @@ class WirelessBootstrap:
         continue
       initial_kick_at = None  # setup messages drive the exchange; pings alone do not
       if message_id == WIFI_VERSION_REQUEST:
-        major, minor, version_endpoint, info = parse_version_request(payload)
+        major, minor, version_endpoint, info = parse_version_request(
+          payload, (6,) if "version_endpoint" in self.flags else ())
         version, head_unit = (major, minor), {**head_unit, **info}
         self.log("bootstrap_version", major=major, minor=minor, head_unit=info,
                  endpoint=version_endpoint.__dict__ if version_endpoint else None, message=describe_version_request(payload))
-        self.send(WIFI_VERSION_RESPONSE, field(1, major) + field(2, minor) + field(3, self.device_serial) +
-                  field(4, self.version_status))
+        self.send(WIFI_VERSION_RESPONSE, self._version_response(major, minor, payload))
+        self.replied_at = time.monotonic()
+        self._reply_accepted = False
         hinted = version_endpoint or hinted
         if hinted is not None and hint_ready_at is None:
           hint_ready_at = time.monotonic() + 3.0
@@ -381,6 +487,9 @@ class WirelessBootstrap:
         if parsed is None:
           raise BootstrapError(self.stage, "WifiStartRequest has no valid IPv4 endpoint")
         endpoint = parsed
+        self._reply_accepted = True
+        if "start_response_first" in self.flags:
+          self.send(WIFI_START_RESPONSE, field(3, STATUS_SUCCESS))
       elif message_id == WIFI_START_RESPONSE:
         # The car's answer to our WifiStartRequest (2025 Honda): ip=1, port=2, status=3 once it is
         # ready, or a negative status alone before then (it may follow up on its own; ask again anyway).
@@ -388,11 +497,16 @@ class WirelessBootstrap:
         parsed = parse_endpoint(payload)
         if parsed is not None and status == STATUS_SUCCESS:
           endpoint = parsed
+          self._reply_accepted = True
         else:
           self.log("bootstrap_start_refused", status=status, endpoint=parsed is not None)
+          self.refusals.append(status)
+          deadline = min(latest_deadline, max(deadline, time.monotonic() + self.stage_timeout))  # a car that answers is not gone
           start_request_at = time.monotonic() + self.start_request_delay
       elif message_id == WIFI_SETUP_INFO:
         setup_endpoint, setup_credentials = parse_setup_info(payload)
+        if setup_endpoint is not None or setup_credentials is not None:
+          self._reply_accepted = True
         hinted = setup_endpoint or hinted
         if hinted is not None and hint_ready_at is None:
           hint_ready_at = time.monotonic() + 3.0
@@ -404,6 +518,7 @@ class WirelessBootstrap:
         # One that cannot be read is ignored as before, and the network is asked for after the endpoint.
         try:
           credentials = parse_info_response(payload)
+          self._reply_accepted = True
         except ValueError as error:
           self.log("bootstrap_early_info_unreadable", error=str(error))
       else:

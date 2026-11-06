@@ -268,7 +268,7 @@ def test_torque_bar_is_flat_and_stays_visible_when_inactive():
   assert notch[1][0] < t.cx < notch[1][0] + notch[1][2]
 
   def inactive(sm, cp):
-    return TorqueFeedback(0.0, 'lateral_acceleration_estimate', 'lateral_inactive')
+    return TorqueFeedback(0.0, 'lateral_acceleration_demand', 'lateral_inactive')
   for feedback in (inactive, lambda sm, cp: TorqueFeedback()):
     view, rl, _ = hud(lambda: (sm(), 'CP'), feedback=feedback)
     view.render(*LOGICAL_720P)
@@ -287,7 +287,7 @@ def test_torque_bar_grows_and_returns_to_centre():
   track, indicator = torque_rects(rl)
   assert track[1][3] == pytest.approx(t.thick, rel=0.02)
   assert indicator[1][0] + indicator[1][2] == pytest.approx(t.cx) and indicator[1][0] < t.left + 5, 'reaches left'
-  state['feedback'] = TorqueFeedback(0.0, 'lateral_acceleration_estimate', 'lateral_inactive')
+  state['feedback'] = TorqueFeedback(0.0, 'lateral_acceleration_demand', 'lateral_inactive')
   for _ in range(60):
     view.render(*LOGICAL_720P)
   assert abs(view._torque.x) < 0.01 and view._torque_alpha.x < 0.01
@@ -354,13 +354,15 @@ def test_turn_signal_texture_is_loaded_once_flipped_for_the_right_and_unloaded()
   class TextureRl(FakeRl):
     def __init__(self):
       super().__init__()
-      self.ffi = SimpleNamespace(NULL=None)
       self.TextureFilter = SimpleNamespace(TEXTURE_FILTER_BILINEAR=1)
       self.loaded, self.unloaded = 0, []
 
     def load_image(self, path):
       assert path.endswith('icons_mici/onroad/turn_signal_left.png')
       return SimpleNamespace(data=b'x', width=208, height=192)
+
+    def is_image_valid(self, image):
+      return bool(image.data) and image.width > 0 and image.height > 0
 
     def image_resize(self, image, w, h):
       image.width, image.height = w, h

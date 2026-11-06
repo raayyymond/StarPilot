@@ -39,7 +39,8 @@ def config(**values):
 def test_aawireless_tuning_applies_only_when_chosen():
   chosen = config(car_profile_override="aawireless", receiver_name="AAWireless-4F2A")
   assert car_profiles.resolve(chosen) == ("aawireless", "override")
-  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "max_window": 30, "phone_services": True, "phone_frames": True}
+  assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "max_window": 30, "phone_services": True, "phone_frames": True,
+                                          "stay_while_projecting": True, "dhcp_patience_s": 6.0}
   assert car_profiles.summary(chosen)["car_profile_label"] == "AAWireless"
   for other in (config(receiver_name="AAWireless-4F2A"), config(car_profile_override="default")):
     assert car_profiles.tuning(other) == car_profiles.DEFAULTS
@@ -306,6 +307,7 @@ def test_pairing_request_address_comes_from_the_wrapped_bluez_phone():
     phone = Phone()
 
   sup = Supervisor.__new__(Supervisor)
+  sup.log = lambda *args, **kwargs: None  # a failed lookup is logged
   sup._bluez = Wrapped()
   assert sup._adapter_address() == "AA:BB:CC:DD:EE:FF"
   sup._bluez = Phone()
@@ -314,3 +316,10 @@ def test_pairing_request_address_comes_from_the_wrapped_bluez_phone():
   assert sup._adapter_address() == ""
   sup._bluez = None
   assert sup._adapter_address() == ""
+
+
+def test_unofficial_dongle_turns_on_the_handshake_experiments_only_when_chosen():
+  assert car_profiles.valid_override("unofficial")
+  assert car_profiles.tuning(config(car_profile_override="unofficial"))["bootstrap_experiments"] is True
+  for other in (config(), config(car_profile_override="default"), config(car_profile_override="aawireless")):
+    assert car_profiles.tuning(other)["bootstrap_experiments"] is False

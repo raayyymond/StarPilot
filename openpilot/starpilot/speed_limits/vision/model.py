@@ -267,28 +267,53 @@ class HistoryEntry:
   created_at: float
   strong_consensus: bool = False
 
+def _primary_regulatory_panel(image):
+  height, width = image.shape[:2]
+  if image.dtype != np.uint8 or width < 24 or height < 1.8 * width:
+    return image
+
+  gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+  _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+  for foreground in (mask >= 128, mask < 128):
+    occupied = foreground[:, int(width * .2):int(width * .8)].mean(1) > .8
+    edges = np.diff(np.r_[False, occupied, False].astype(np.int8))
+    runs = list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1), strict=False))
+    for (top, bottom), (next_top, next_bottom) in zip(runs, runs[1:], strict=False):
+      if (top <= .3 * width and .75 * width <= bottom - top <= 1.6 * width and
+          next_bottom - next_top >= .5 * width and .02 * width <= next_top - bottom <= .15 * width):
+        # Keep a separate lower plate, such as MINIMUM, out of the number reader.
+        return image[:min(height, int(bottom + .03 * width))]
+  return image
+
+
 class VisionModelCore:
   """The frozen active detector/classifier path, with no camera or Params ownership."""
 
   ASSET_DIR = Path(__file__).resolve().parent / "assets"
   DETECTOR_SHA256 = "82408b68c79c269296f0af942130c5383cace4ee06c78e2a4690e8488720116a"
-  CLASSIFIER_SHA256 = "07c6696e530eb940d2757d5849b4bc0f1d785cda704e5296e18c0a94959f30a5"
+  CLASSIFIER_SHA256 = "5d861067ab8f50986488f983cbc24f78527775d37af0b9740c5545d5f3173902"
   DETECTOR_SIZE = 256
   CLASSIFIER_SIZE = 128
 
-  def __init__(self, *, is_metric: bool):
+  def __init__(self, *, is_metric: bool, load_classifier: bool = True):
     if cv2 is None:
       raise RuntimeError("OpenCV DNN is unavailable")
     self.is_metric = is_metric
     self.net = self._load_net("speed_limit_us_detector.onnx", self.DETECTOR_SHA256)
-    self.classifier_net = self._load_net("speed_limit_us_value_classifier.onnx", self.CLASSIFIER_SHA256)
+    self.classifier_net = (self._load_net("speed_limit_us_value_classifier.onnx", self.CLASSIFIER_SHA256)
+                           if load_classifier else None)
+    if not load_classifier:
+      self._verified_model_path("speed_limit_us_value_classifier.onnx", self.CLASSIFIER_SHA256)
     self._validate_model_abi()
+    self.classifier_logits_layer = ("onnx_node!/model.10/linear/Gemm"
+                                    if self.classifier_net is not None and self.classifier_net.getLayerId("onnx_node!advisory/AddReject") > 0 else None)
     self.detector_input_size = self.DETECTOR_SIZE
     self.classifier_input_size = self.CLASSIFIER_SIZE
     self.last_detector_forward_count = 0
     self.last_detector_forward_duration_s = 0.0
     self.last_classifier_forward_count = 0
     self.last_classifier_forward_duration_s = 0.0
+    self.last_classifier_advisory_rejected = False
     self.temporal_tracking_enabled = False
     self.latest_detector_proposal = None
     self.history: deque[HistoryEntry] = deque()
@@ -304,6 +329,7 @@ class VisionModelCore:
   def reset(self) -> None:
     """Discard evidence from a previous camera, stream or sign-unit setting."""
     self.history.clear()
+    self.last_classifier_advisory_rejected = False
     self.latest_detector_proposal = None
     self.published_speed_limit_mph = 0
     self.published_confidence = 0.0
@@ -315,12 +341,17 @@ class VisionModelCore:
     self.episode = 0
 
   @classmethod
-  def _load_net(cls, name: str, expected_sha256: str):
+  def _verified_model_path(cls, name: str, expected_sha256: str) -> Path:
     path = cls.ASSET_DIR / name
     with path.open("rb") as stream:
       actual = hashlib.file_digest(stream, "sha256").hexdigest()
     if actual != expected_sha256:
       raise ValueError(f"Vision model identity mismatch: {name}")
+    return path
+
+  @classmethod
+  def _load_net(cls, name: str, expected_sha256: str):
+    path = cls._verified_model_path(name, expected_sha256)
     net = cv2.dnn.readNetFromONNX(str(path))
     net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
@@ -329,11 +360,13 @@ class VisionModelCore:
   def _validate_model_abi(self) -> None:
     self.net.setInput(np.zeros((1, 3, self.DETECTOR_SIZE, self.DETECTOR_SIZE), dtype=np.float32))
     detector_output = self.net.forward()
-    self.classifier_net.setInput(np.zeros((1, 3, self.CLASSIFIER_SIZE, self.CLASSIFIER_SIZE), dtype=np.float32))
-    classifier_output = self.classifier_net.forward()
-    if (detector_output.shape != (1, 5, 1344) or classifier_output.shape != (1, 19) or
-        not np.isfinite(detector_output).all() or not np.isfinite(classifier_output).all()):
+    if detector_output.shape != (1, 5, 1344) or not np.isfinite(detector_output).all():
       raise ValueError("Unsupported Vision model output shape or nonfinite output")
+    if self.classifier_net is not None:
+      self.classifier_net.setInput(np.zeros((1, 3, self.CLASSIFIER_SIZE, self.CLASSIFIER_SIZE), dtype=np.float32))
+      classifier_output = self.classifier_net.forward()
+      if classifier_output.shape != (1, 19) or not np.isfinite(classifier_output).all():
+        raise ValueError("Unsupported Vision model output shape or nonfinite output")
 
   def infer(self, frame_bgr: np.ndarray) -> Detection | None:
     if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3 or frame_bgr.size == 0:
@@ -568,11 +601,7 @@ class VisionModelCore:
       yield crop, weight
 
 
-  def _collect_detector_classifier_proposals_from_region(self, frame_bgr, origin_x, origin_y, full_frame_width, full_frame_height, min_confidence):
-    if self.net is None:
-      return []
-
-    region_height, region_width = frame_bgr.shape[:2]
+  def _forward_detector_region(self, frame_bgr):
     detector_shape = (self.detector_input_size, self.detector_input_size)
     letterboxed, ratio, pad_width, pad_height = self._letterbox(frame_bgr, shape=detector_shape)
     blob = cv2.dnn.blobFromImage(letterboxed, scalefactor=1 / 255.0, size=detector_shape, swapRB=True, crop=False)
@@ -582,6 +611,14 @@ class VisionModelCore:
     predictions = np.squeeze(self.net.forward())
     self.last_detector_forward_count += 1
     self.last_detector_forward_duration_s += time.monotonic() - forward_started_at
+    return predictions, ratio, pad_width, pad_height
+
+
+  def _collect_detector_classifier_proposals_from_region(self, frame_bgr, origin_x, origin_y, full_frame_width, full_frame_height, min_confidence):
+    if self.net is None:
+      return []
+    region_height, region_width = frame_bgr.shape[:2]
+    predictions, ratio, pad_width, pad_height = self._forward_detector_region(frame_bgr)
     if predictions.ndim != 2:
       return []
     if predictions.shape[0] < predictions.shape[1]:
@@ -667,18 +704,30 @@ class VisionModelCore:
 
 
   def _classify_speed_limit_from_model(self, sign_crop):
+    self.last_classifier_advisory_rejected = False
     if self.classifier_net is None or sign_crop.size == 0:
       return None
 
     speed_class_count = len(US_CLASSIFIER_SPEED_VALUES)
 
     input_size = self.classifier_input_size
+    sign_crop = _primary_regulatory_panel(sign_crop)
     padded_crop = self._square_resize(sign_crop, size=input_size)
     blob = cv2.dnn.blobFromImage(padded_crop, scalefactor=1 / 255.0, size=(input_size, input_size), swapRB=True, crop=False)
     self.classifier_net.setInput(blob)
 
     forward_started_at = time.monotonic()
-    scores = np.array(self.classifier_net.forward()).reshape(-1)
+    logits_layer = getattr(self, "classifier_logits_layer", None)
+    original_probabilities = None
+    if logits_layer is not None:
+      output, original_logits = self.classifier_net.forward(['output0', logits_layer])
+      original_logits = np.asarray(original_logits).reshape(-1)
+      if original_logits.size != speed_class_count + 1 or not np.isfinite(original_logits).all():
+        raise ValueError("Invalid original classifier logits")
+      original_probabilities = self._normalize_classifier_output(original_logits)
+    else:
+      output = self.classifier_net.forward()
+    scores = np.asarray(output).reshape(-1)
     self.last_classifier_forward_count += 1
     self.last_classifier_forward_duration_s += time.monotonic() - forward_started_at
     has_reject_class = scores.size == speed_class_count + 1
@@ -691,6 +740,10 @@ class VisionModelCore:
     confidence = float(speed_probabilities[class_index])
     speed_limit = US_CLASSIFIER_SPEED_VALUES[class_index]
     if has_reject_class and float(probabilities[speed_class_count]) >= max(confidence, US_CLASSIFIER_REJECT_MIN_CONFIDENCE):
+      self.last_classifier_advisory_rejected = bool(
+        original_probabilities is not None and float(np.max(original_probabilities[:speed_class_count])) >= .98 and
+        float(probabilities[speed_class_count]) >= .90
+      )
       return None
     minimum_confidence = (
       EXTENDED_CLASSIFIER_MIN_CONFIDENCE if speed_limit in EXTENDED_CLASSIFIER_SPEED_VALUES else US_CLASSIFIER_MIN_CONFIDENCE
@@ -705,10 +758,21 @@ class VisionModelCore:
     frame_height, frame_width = frame_bgr.shape[:2]
     best_detection = None
     best_score = 0.0
+    rejected_advisory_boxes: list[tuple[int, int, int, int]] = []
 
     for proposal_confidence, class_id, (x1, y1, x2, y2) in self._collect_detector_classifier_proposals(frame_bgr):
       if class_id == 1:
         continue
+      if class_id == 0:
+        duplicate_advisory = False
+        for rx1, ry1, rx2, ry2 in rejected_advisory_boxes:
+          overlap = max(0, min(x2, rx2) - max(x1, rx1)) * max(0, min(y2, ry2) - max(y1, ry1))
+          union = (x2 - x1) * (y2 - y1) + (rx2 - rx1) * (ry2 - ry1) - overlap
+          if union > 0 and overlap >= .75 * union:
+            duplicate_advisory = True
+            break
+        if duplicate_advisory:
+          continue
 
       box_width = x2 - x1
       box_height = y2 - y1
@@ -814,6 +878,12 @@ class VisionModelCore:
           is_regulatory = True
 
         model_read = self._classify_speed_limit_from_model(sign_crop)
+        if (class_id == 0 and not raw_is_regulatory and model_read is None and
+            getattr(self, "last_classifier_advisory_rejected", False)):
+          # A confident advisory veto applies to this object, not another crop of it.
+          speed_scores.clear()
+          rejected_advisory_boxes.append((x1, y1, x2, y2))
+          break
         trusted_model_read = (
           class_id == 0 and
           model_read is not None and

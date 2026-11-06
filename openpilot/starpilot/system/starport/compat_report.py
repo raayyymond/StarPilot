@@ -283,6 +283,20 @@ def _tail(path: Path, limit: int) -> bytes | None:
     return None
 
 
+def shareable_setup_state(path: Path, chosen: str = "") -> dict | None:
+  """The handshake ladder's saved state with car addresses replaced by whether each is the chosen car."""
+  try:
+    data = json.loads(read_log(path, MAX_LOG_BYTES))
+  except (OSError, ValueError, UnicodeError):
+    return None
+  cars = data.get("cars") if isinstance(data, dict) else None
+  if not isinstance(cars, dict):
+    return None
+  return {"version": data.get("version"),
+          "cars": [{"chosen": bool(chosen) and str(address).upper() == chosen.upper(), **entry}
+                   for address, entry in cars.items() if isinstance(entry, dict)]}
+
+
 def shareable_config(config: dict) -> dict:
   """The settings without the Bluetooth addresses of the car and its companion device."""
   shared = dict(config)
@@ -291,6 +305,34 @@ def shareable_config(config: dict) -> dict:
       shared[key] = "redacted"
   shared["rfcomm_cache"] = sorted((shared.get("rfcomm_cache") or {}).values())  # the channels, not whose they are
   return shared
+
+
+RECENT_DIAGNOSIS_SESSIONS = 5
+MAX_DIAGNOSIS_BYTES = 512 << 10
+
+
+def _diagnosis_report(logs: list[Path]) -> bytes:
+  """The same tags and per-session detail a Bugsink report carries (setup, offered modes, reach class, ladder, SDP...),
+  for the newest few sessions, sanitized. An addition to the bundle: if it cannot be built the bundle is unaffected."""
+  try:
+    from openpilot.starpilot.system.starport import bugsink_report
+    records = []
+    for path in logs[:RECENT_DIAGNOSIS_SESSIONS]:
+      try:
+        records.append(bugsink_report.session_record(path))
+      except (OSError, ValueError, KeyError, TypeError):
+        continue
+    if not records:
+      return b""
+    records.reverse()   # oldest first, as the drive report expects
+    event = bugsink_report.drive_event(records)
+    report = {"tags": event["tags"], "message": event["message"], "sessions": [bugsink_report._public(record) for record in records]}
+    data = json.dumps(report, indent=1, default=str).encode()
+    if len(data) > MAX_DIAGNOSIS_BYTES:
+      data = json.dumps({key: report[key] for key in ("tags", "message")}, indent=1, default=str).encode()
+    return data
+  except Exception:
+    return b""
 
 
 def bundle(log_dir: Path | None = None, config_path: Path | None = None, *,
@@ -321,8 +363,15 @@ def bundle(log_dir: Path | None = None, config_path: Path | None = None, *,
       add(f"logs/{path.name}", data)
       add(f"reports/{path.stem}.json", json.dumps(report, indent=2, default=str).encode())
     add("REPORT.txt", ("\n".join(summaries) or "No Android Auto sessions have been logged yet.\n").encode())
+    report = _diagnosis_report(logs)
+    if report:
+      add("report.json", report)
     config = identity_store.load_config(config_path)
     add("config.json", json.dumps(shareable_config(config), indent=2, default=str).encode())
+    setup_state = shareable_setup_state((config_path or identity_store.CONFIG_PATH).with_name("setup_state.json"),
+                                        config.get("receiver_address", ""))
+    if setup_state is not None:
+      add("setup_state.json", json.dumps(setup_state, indent=2, default=str).encode())
     for name in EXTRA_LOGS:
       data = _tail(directory / name, EXTRA_LOG_BYTES)
       if data is not None:
