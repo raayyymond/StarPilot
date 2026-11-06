@@ -143,6 +143,9 @@ def _create_bosch_a_can_parser(CP):
 
 
 VERIFIED_BOSCH_A_CARS = frozenset((CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+# Platforms whose object feed is a steady range but a stepwise, lagging relative speed. Lead speed and
+# acceleration come from the vision lead it matches; the feed supplies range only.
+BOSCH_A_RANGE_ONLY_CARS = frozenset((CAR.HONDA_ACCORD,))
 
 
 class BoschARadar(RadarInterfaceBase):
