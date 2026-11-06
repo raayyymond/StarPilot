@@ -82,7 +82,25 @@ class _BoschATrackState:
   last_trusted_vrel_nanos: int | None = None
 
 
-def _bosch_a_direct_vrel(raw_value: int | float | None, uncertainty_raw: int | float | None = None) -> float | None:
+@dataclass(frozen=True)
+class BoschAUnits:
+  range_scale_m: float = BOSCH_A_RANGE_SCALE_M
+  vrel_scale_mps: float = BOSCH_A_DIRECT_VREL_SCALE_MPS
+  # The relative speed clips at MIN_RAW and MAX_RAW. A clipped value is a bound, not a measurement.
+  vrel_rails_valid: bool = True
+
+
+BOSCH_A_DEFAULT_UNITS = BoschAUnits()
+# 2018-22 Accord, measured over 1349 rlog segments (2026-11-06): stationary objects close at ego speed
+# with 1/72 m/s per count (0.05 km/h), and range tracks the vision lead with 1/16 m per count.
+# 22% of samples at 13-20 m/s ego sit on the lower rail, which read as a lead doing ego - 13.5 m/s.
+BOSCH_A_UNITS = {
+  CAR.HONDA_ACCORD: BoschAUnits(range_scale_m=1.0 / 16.0, vrel_scale_mps=0.05 / 3.6, vrel_rails_valid=False),
+}
+
+
+def _bosch_a_direct_vrel(raw_value: int | float | None, uncertainty_raw: int | float | None = None,
+                         units: BoschAUnits = BOSCH_A_DEFAULT_UNITS) -> float | None:
   if raw_value is None:
     return None
   raw = int(raw_value)
@@ -90,9 +108,11 @@ def _bosch_a_direct_vrel(raw_value: int | float | None, uncertainty_raw: int | f
     return None
   if not BOSCH_A_DIRECT_VREL_MIN_RAW <= raw <= BOSCH_A_DIRECT_VREL_MAX_RAW:
     return None
+  if not units.vrel_rails_valid and raw in (BOSCH_A_DIRECT_VREL_MIN_RAW, BOSCH_A_DIRECT_VREL_MAX_RAW):
+    return None
   if uncertainty_raw is not None and int(uncertainty_raw) > BOSCH_A_DIRECT_VREL_MAX_UNCERTAINTY_RAW:
     return None
-  return (raw - BOSCH_A_DIRECT_VREL_CENTER_RAW) * BOSCH_A_DIRECT_VREL_SCALE_MPS
+  return (raw - BOSCH_A_DIRECT_VREL_CENTER_RAW) * units.vrel_scale_mps
 
 
 def _bosch_a_range_ratio(raw_value: int | float | None) -> float | None:
@@ -131,6 +151,7 @@ class BoschARadar(RadarInterfaceBase):
     if CP.carFingerprint not in VERIFIED_BOSCH_A_CARS or CP.flags & (HondaFlags.BOSCH_RADARLESS | HondaFlags.BOSCH_CANFD | HondaFlags.BOSCH_ALT_RADAR):
       raise ValueError("Honda radar requires its verified classic Bosch-A profile")
     self.rcp = _create_bosch_a_can_parser(CP)
+    self.units = BOSCH_A_UNITS.get(CP.carFingerprint, BOSCH_A_DEFAULT_UNITS)
     self.trigger_msg = BOSCH_A_TRIGGER_MSG
     self._slots = [_BoschASlotState() for _ in range(BOSCH_A_NUM_SLOTS)]
     self._tracks = {}
@@ -283,15 +304,15 @@ class BoschARadar(RadarInterfaceBase):
       v0 = self.rcp.vl[BOSCH_A_MAIN_IDS[slot][0]]
       range_raw = int(v0["RANGE_RAW"])
       angle_raw = int(v0["AZIMUTH_RAW"])
-      dRel = BOSCH_A_RANGE_SCALE_M * range_raw + BOSCH_A_RANGE_OFFSET_M
+      dRel = self.units.range_scale_m * range_raw + BOSCH_A_RANGE_OFFSET_M
       azimuth_rad = BOSCH_A_AZIMUTH_SCALE_RAD * (angle_raw - BOSCH_A_AZIMUTH_CENTER)
       lateral_projection = math.tan if BOSCH_A_USE_TAN_LATERAL_PROJECTION else math.sin
       yRel = dRel * lateral_projection(azimuth_rad)
       now_s = now * 1e-09
       direct_vrel_raw = observation["direct_vrel_raw"]
       direct_vrel_uncertainty_raw = observation["direct_vrel_uncertainty_raw"]
-      direct_vrel = _bosch_a_direct_vrel(direct_vrel_raw, direct_vrel_uncertainty_raw)
-      live_direct_vrel = _bosch_a_direct_vrel(direct_vrel_raw)
+      direct_vrel = _bosch_a_direct_vrel(direct_vrel_raw, direct_vrel_uncertainty_raw, self.units)
+      live_direct_vrel = _bosch_a_direct_vrel(direct_vrel_raw, units=self.units)
       range_ratio_raw = observation["range_ratio_raw"]
       high_u10_live_vrel = (
         direct_vrel is None
