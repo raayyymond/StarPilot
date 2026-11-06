@@ -207,3 +207,18 @@ def test_accord_clipped_relative_speed_never_becomes_a_point():
   ri, bus = _accord_units_radar()
   for i in range(6):
     assert not ri.update(sweep(bus, i, 1_000_000_000 + i * 66_666_667, vrel_raw=0, rawca=1023)).points
+
+
+def test_rejected_sweep_rebaselines_instead_of_killing_the_track():
+  ri, bus = _accord_units_radar()
+  stamp = 1_000_000_000
+  for i in range(3):
+    points = ri.update(sweep(bus, i, stamp + i * 66_666_667, rawca=1023)).points
+  assert points[0].deprecated.measured and points[0].dRel == pytest.approx(1000 / 16 - 3.0)
+  # a 12.5 m step with no matching relative speed fails the sanity gate: the point is held, unmeasured
+  points = ri.update(sweep(bus, 3, stamp + 3 * 66_666_667, range_raw=800, rawca=1023)).points
+  assert len(points) == 1 and not points[0].deprecated.measured
+  # the next sweep agrees with the rejected one, so the track is back after one sweep, at the new range
+  points = ri.update(sweep(bus, 4, stamp + 4 * 66_666_667, range_raw=800, rawca=1023)).points
+  assert len(points) == 1 and points[0].deprecated.measured
+  assert points[0].dRel == pytest.approx(800 / 16 - 3.0)
