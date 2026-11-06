@@ -106,3 +106,27 @@ def test_actual_decoder_radard_maturity_stale_retirement_and_recovery(identity):
   source_tick(sm, 5, rr)
   radar.update(sm, sm['radarTracks'])
   assert not radar.tracks
+
+
+def test_range_only_lead_takes_range_from_the_track_and_speed_from_vision():
+  # the vision lead sits at 40 m doing 20 m/s; the radar track is at 42 m with a stepped relative speed
+  def tick(sm, radar, index, relative_speed):
+    source_tick(sm, index, radar_data(True, relative_speed, 42.0), speed=20.0, probability=0.9, distance=40.0)
+    radar.update(sm, sm['radarTracks'])
+    return radar.radar_state.leadOne
+
+  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'])
+  radar = RadarD(honda_bosch_a_radar=True, honda_bosch_a_range_only=True)
+  for index, v_rel in enumerate((0.0, 0.0, -3.0, -3.0)):
+    lead = tick(sm, radar, index, v_rel)
+  assert lead.present and lead.radar and lead.radarTrackId == 1
+  assert lead.dRel == pytest.approx(42.0)
+  assert lead.vRel == pytest.approx(0.0) and lead.vLead == pytest.approx(20.0)
+  assert lead.aLeadK == pytest.approx(0.0)
+
+  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'])
+  radar = RadarD(honda_bosch_a_radar=True)
+  for index, v_rel in enumerate((0.0, 0.0, -3.0, -3.0)):
+    lead = tick(sm, radar, index, v_rel)
+  assert lead.present and lead.radar and lead.dRel == pytest.approx(42.0)
+  assert lead.vRel == pytest.approx(-3.0) and lead.aLeadK < -0.5

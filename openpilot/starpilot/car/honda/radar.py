@@ -155,6 +155,20 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
   }
 
 
+def get_RadarState_range_only(track: Track, lead_msg: capnp._DynamicStructReader, v_ego: float, model_v_ego: float, model_prob: float, vision_state):
+  """The object feed's range with the vision lead's speed and acceleration.
+
+  On a range-only platform the feed's relative speed moves in steps and lags the real closing rate; the lead
+  Kalman turned each step into a phantom lead deceleration and the planner braked on it. Range is steadier
+  than vision's, so that is what the feed contributes."""
+  lead = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego, model_prob, vision_state)
+  lead['dRel'] = float(track.dRel)
+  lead['yRel'] = float(track.yRel)
+  lead['radar'] = True
+  lead['radarTrackId'] = track.identifier
+  return lead
+
+
 def get_lead(
   v_ego: float,
   ready: bool,
@@ -167,7 +181,13 @@ def get_lead(
   preferred_track_id: int = -1,
   *,
   vision_state,
+  range_only: bool = False,
 ) -> dict[str, Any]:
+  def matched_state(matched: Track) -> dict[str, Any]:
+    if range_only:
+      return get_RadarState_range_only(matched, lead_msg, v_ego, model_v_ego, filtered_lead_prob, vision_state)
+    return matched.get_RadarState(filtered_lead_prob)
+
   lead_detection_probability = float(getattr(starpilot_toggles, 'lead_detection_probability', 0.35))
   filtered_lead_prob = float(lead_msg.prob if lead_prob is None else lead_prob)
   if len(tracks) > 0 and ready and (filtered_lead_prob > lead_detection_probability):
@@ -176,7 +196,7 @@ def get_lead(
     track = None
   lead_dict = {'present': False}
   if track is not None:
-    lead_dict = track.get_RadarState(filtered_lead_prob)
+    lead_dict = matched_state(track)
   elif track is None and ready and (filtered_lead_prob > lead_detection_probability):
     lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego, filtered_lead_prob, vision_state)
   if low_speed_override:
@@ -193,7 +213,7 @@ def get_lead(
         or (lead_dict.get('present', False) and (not lead_dict.get('radar', False)))
       )
       if preferred_is_current and preferred_matches_model:
-        lead_dict = preferred_track.get_RadarState(filtered_lead_prob)
+        lead_dict = matched_state(preferred_track) if model_lead_available else preferred_track.get_RadarState(filtered_lead_prob)
 
     def candidate_is_established(candidate: Track) -> bool:
       if candidate.cnt < HONDA_BOSCH_A_LOW_SPEED_MIN_COUNT:
@@ -295,7 +315,8 @@ class BoschALeadPolicy:
       self._was_standstill = False
       self._standstill_had_lead = False
 
-  def __init__(self):
+  def __init__(self, range_only: bool = False):
+    self.range_only = range_only
     self.starpilot_toggles = SimpleNamespace(lead_detection_probability=0.35)
     self.vision_state = SimpleNamespace(prev_aLeadK=0.0)
     self.prev_lead_track_ids = [-1, -1]
@@ -345,6 +366,7 @@ class BoschALeadPolicy:
         lead_prob=radar.lead_prob_filters[index].x,
         preferred_track_id=self.prev_lead_track_ids[index],
         vision_state=self.vision_state,
+        range_only=self.range_only,
       )
       for index in range(2)
     ]

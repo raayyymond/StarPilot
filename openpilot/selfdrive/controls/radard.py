@@ -201,13 +201,14 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
 
 class RadarD:
   def __init__(self, delay: float = 0.0, *, adjacent_enabled: bool = False, radar_available: bool = False,
-               clock_pair_fn=None, honda_bosch_a_radar: bool = False, use_voacc: bool = False):
+               clock_pair_fn=None, honda_bosch_a_radar: bool = False, use_voacc: bool = False,
+               honda_bosch_a_range_only: bool = False):
     self.use_voacc = use_voacc
     self.tracks: dict[int, Track] = {}
     self.honda_bosch_a = None
     if honda_bosch_a_radar:
       from openpilot.starpilot.car.honda.radar import BoschALeadPolicy
-      self.honda_bosch_a = BoschALeadPolicy()
+      self.honda_bosch_a = BoschALeadPolicy(range_only=honda_bosch_a_range_only)
     self.kalman_params = KalmanParams(1.0 / 15.0 if self.honda_bosch_a is not None else DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
 
@@ -412,10 +413,11 @@ def main() -> None:
   adjacent_enabled = feature_enabled(params, CP, 'conditional', os.environ) and 'REPLAY' not in os.environ
   pm = messaging.PubMaster(['radarState', 'starpilotRadarState'] if adjacent_enabled else ['radarState'])
 
-  from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS
+  from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS, BOSCH_A_RANGE_ONLY_CARS
   honda_bosch_a = CP.brand == "honda" and CP.carFingerprint in VERIFIED_BOSCH_A_CARS and not CP.radarUnavailable
   RD = RadarD(CP.radarDelay, adjacent_enabled=adjacent_enabled, radar_available=not CP.radarUnavailable,
-              honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP))
+              honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP),
+              honda_bosch_a_range_only=honda_bosch_a and CP.carFingerprint in BOSCH_A_RANGE_ONLY_CARS)
   set_core_affinity([3, 5])
 
   while 1:
