@@ -22,8 +22,16 @@ the source of truth if they drift.
 
 ## Bosch longitudinal (`bosch_longitudinal.py`)
 
-- Gas-factor learner divides by 2000 on the Accord (stock /50 wound up in the turbo spool and cycled
-  on upshifts — the launch jerk); no learning on the gas rail.
+- Gas and brake gains are per-speed tables (`SpeedTable`, Accord only; other Bosch cars keep the single
+  integrating factor). Gas knots 0/3/6/10/20/30/35 m/s = 0.64/0.64/0.55/0.52/0.50/0.49/0.37, brake
+  ratio knots 0/5/15/25/35 m/s = 0.95/1.08/1.13/1.07/1.10: medians of steady-command pid frames over
+  1,422 segments (5.7 h, 2026-11-06). The Bosch brake tracks vehicle accel itself, so grade is not
+  added back on the brake side; the gas side is open loop, so it is.
+- Each knot remembers ~30 min of driving near its speed (decay on every 50 Hz frame near the knot,
+  learning only on commands held steady 1 s: launch lag is not gain). The corpus default sits under
+  the estimate as one minute of evidence. Brake requests are divided by the ratio down to −2.0 m/s²,
+  fading to pass-through by −3.0. State lives in `/data/starpilot/honda/bosch_long_tables.json`
+  (the Params key set is a prebuilt library), written every 60 s when changed. Undriven.
 - Brake arms at force −0.45, releases at −0.20 (stock −0.12 / −0.02 was the set-speed ping-pong: the
   brake floor fired on tiny requests and the car never coasted).
 

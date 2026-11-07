@@ -1,4 +1,5 @@
 import math
+from collections import deque
 
 import numpy as np
 
@@ -63,6 +64,102 @@ def update_honda_bosch_braking(braking: bool, gas_pedal_force: float, stopping: 
   return gas_pedal_force < on
 
 
+# Platforms whose gas and brake gains are learned as per-speed tables with a memory of recent driving near each
+# knot, instead of the single integrating gas factor below.
+BOSCH_TABLE_LEARNER_CARS = frozenset((CAR.HONDA_ACCORD,))
+# Accord knot defaults: medians of steady-command pid frames over 1,422 logged segments (5.7 h of openpilot
+# longitudinal, 2026-11-06).  Gas: table force the sent gas stood for / net force the powertrain produced (aEgo +
+# grade + aero), at speeds 1-5 m/s 0.57-0.68, 5-10 0.53, 10-32 0.48-0.52, 32-36 0.37.  Brake: aEgo / commanded accel
+# while the Bosch brake was in charge; it tracks vehicle acceleration itself, so grade is NOT added back.
+ACCORD_GAS_FACTOR_BP = [0.0, 3.0, 6.0, 10.0, 20.0, 30.0, 35.0]
+ACCORD_GAS_FACTOR_V = [0.64, 0.64, 0.55, 0.52, 0.50, 0.49, 0.37]
+ACCORD_BRAKE_RATIO_BP = [0.0, 5.0, 15.0, 25.0, 35.0]
+ACCORD_BRAKE_RATIO_V = [0.95, 1.08, 1.13, 1.07, 1.10]
+TABLE_UPDATE_HZ = 50  # update() runs on every other 100 Hz control frame
+TABLE_HORIZON = 30 * 60 * TABLE_UPDATE_HZ  # each knot remembers about the last 30 minutes of driving near it
+TABLE_PRIOR_WEIGHT = 60 * TABLE_UPDATE_HZ  # the logged default counts as one minute of fresh evidence
+STEADY_FRAMES = TABLE_UPDATE_HZ  # a command held for 1 s is steady: the launch lag of the 2.0T + 10AT is not gain
+STEADY_GAS_UNITS = 60.0  # 0.08 m/s^2 of table force
+STEADY_BRAKE_MPS2 = 0.1
+BRAKE_SCALE_FULL = -2.0  # the learned brake ratio corrects requests down to here ...
+BRAKE_SCALE_NONE = -3.0  # ... and fades to a pass-through by here, where the data runs out
+GAS_FACTOR_LIMITS = (0.1, 3.0)
+BRAKE_RATIO_LIMITS = (0.7, 1.5)
+
+
+class SpeedTable:
+  """Per-speed-knot running estimate whose memory is driving time spent near each knot.
+
+  Every update() frame decays the two bracketing knots by their interpolation weight over TABLE_HORIZON, whether or
+  not that frame taught anything, so a knot forgets at the pace the car drives through its speeds.  A learnable
+  frame adds its sample with the same weight.  The logged default sits under the estimate as TABLE_PRIOR_WEIGHT of
+  evidence, so a fresh install starts on the corpus value and a knot with little data stays near it.
+  """
+
+  def __init__(self, bp, defaults, limits, horizon=TABLE_HORIZON, prior_weight=TABLE_PRIOR_WEIGHT):
+    self.bp = [float(x) for x in bp]
+    self.defaults = [float(x) for x in defaults]
+    self.limits = (float(limits[0]), float(limits[1]))
+    self.horizon = float(horizon)
+    self.prior_weight = float(prior_weight)
+    self.sums = [0.0] * len(self.bp)
+    self.weights = [0.0] * len(self.bp)
+
+  def _knots(self, v):
+    v = float(np.clip(v, self.bp[0], self.bp[-1]))
+    i = int(np.searchsorted(self.bp, v, side='right')) - 1
+    if i >= len(self.bp) - 1:
+      return ((len(self.bp) - 1, 1.0),)
+    w = (v - self.bp[i]) / (self.bp[i + 1] - self.bp[i])
+    return ((i, 1.0 - w), (i + 1, w))
+
+  def values(self):
+    return [float(np.clip((self.prior_weight * d + s) / (self.prior_weight + w), *self.limits))
+            for d, s, w in zip(self.defaults, self.sums, self.weights, strict=True)]
+
+  def value(self, v) -> float:
+    return float(np.interp(v, self.bp, self.values()))
+
+  def observe_driving(self, v):
+    for k, w in self._knots(v):
+      keep = 1.0 - w / self.horizon
+      self.sums[k] *= keep
+      self.weights[k] *= keep
+
+  def learn(self, v, sample):
+    if not math.isfinite(sample) or not self.limits[0] <= sample <= self.limits[1]:
+      return
+    for k, w in self._knots(v):
+      self.sums[k] += w * sample
+      self.weights[k] += w
+
+  def state(self):
+    return {'bp': list(self.bp), 'sums': list(self.sums), 'weights': list(self.weights)}
+
+  def load(self, state) -> bool:
+    try:
+      if [float(x) for x in state['bp']] != self.bp:
+        return False
+      sums = [float(x) for x in state['sums']]
+      weights = [float(x) for x in state['weights']]
+    except (KeyError, TypeError, ValueError):
+      return False
+    if (len(sums) != len(self.bp) or len(weights) != len(self.bp) or
+        not all(math.isfinite(x) and 0.0 <= x <= 10.0 * self.horizon for x in weights) or
+        not all(math.isfinite(x) for x in sums)):
+      return False
+    self.sums, self.weights = sums, weights
+    return True
+
+
+def brake_command(accel: float, ratio: float) -> float:
+  """Divide a brake request by the learned delivery ratio, fading to pass-through for hard braking."""
+  if accel >= 0.0 or ratio <= 0.0:
+    return accel
+  blend = float(np.clip((accel - BRAKE_SCALE_NONE) / (BRAKE_SCALE_FULL - BRAKE_SCALE_NONE), 0.0, 1.0))
+  return accel * (blend / ratio + (1.0 - blend))
+
+
 def bosch_gas_learn_speed(fingerprint) -> float:
   """Frames of unit accel error x unit force per unit of gas-factor change (50 Hz)."""
   if fingerprint == CAR.HONDA_INSIGHT:
@@ -106,7 +203,24 @@ class BoschLongitudinal:
     self.gas = 0.0
     self.bosch_braking = False
     self.bosch_last_gas = 0.0
+    self.command_accel = 0.0
+    self.gas_table = self.brake_table = None
+    if cp.carFingerprint in BOSCH_TABLE_LEARNER_CARS:
+      self.gas_table = SpeedTable(ACCORD_GAS_FACTOR_BP, ACCORD_GAS_FACTOR_V, GAS_FACTOR_LIMITS)
+      self.brake_table = SpeedTable(ACCORD_BRAKE_RATIO_BP, ACCORD_BRAKE_RATIO_V, BRAKE_RATIO_LIMITS)
+    self.gas_history = deque(maxlen=STEADY_FRAMES)
+    self.brake_history = deque(maxlen=STEADY_FRAMES)
     self.set_factors(1.0, 1.0)
+
+  def tables_state(self):
+    if self.gas_table is None:
+      return None
+    return {'gas': self.gas_table.state(), 'brake': self.brake_table.state()}
+
+  def load_tables(self, state) -> bool:
+    if self.gas_table is None or not isinstance(state, dict):
+      return False
+    return bool(self.gas_table.load(state.get('gas', {})) and self.brake_table.load(state.get('brake', {})))
 
   def set_factors(self, gas, wind):
     self.bosch_gas_factor = float(gas) if math.isfinite(gas) and 0.01 <= gas <= 3.0 else 1.0
@@ -126,11 +240,18 @@ class BoschLongitudinal:
     min_gas = self.params.BOSCH_GAS_LOOKUP_BP[0]
     self.accel = float(np.clip(accel, self.params.BOSCH_ACCEL_MIN, self.params.BOSCH_ACCEL_MAX))
     gas_pedal_force = self.accel + hill_brake
+    v_ego = CS.out.vEgo
+    if self.gas_table is not None:
+      self.gas_table.observe_driving(v_ego)
+      self.brake_table.observe_driving(v_ego)
+      self.bosch_gas_factor = self.gas_table.value(v_ego)
     if self.CP.carFingerprint not in HONDA_BOSCH_RADARLESS:
       gas_pedal_force += wind_brake_mps2 * self.bosch_wind_factor
       if actuators.longControlState == LongCtrlState.pid and (not CS.out.gasPressed):
         gas_error = self.accel - CS.out.aEgo
-        if (gas_error != 0.0 and gas_pedal_force > min_gas and
+        if self.gas_table is not None:
+          self._learn_tables(CS, gas_pedal_force, wind_brake_mps2)
+        elif (gas_error != 0.0 and gas_pedal_force > min_gas and
             bosch_gas_learning_allowed(self.bosch_last_gas, self.params.BOSCH_GAS_LOOKUP_V[-1])):
           gas_learn_speed = bosch_gas_learn_speed(self.CP.carFingerprint)
           gas_learn_force = gas_pedal_force
@@ -160,4 +281,31 @@ class BoschLongitudinal:
     brake_on, brake_release = bosch_brake_force_thresholds(self.CP.carFingerprint)
     self.bosch_braking = update_honda_bosch_braking(self.bosch_braking, gas_pedal_force, stopping, CC.longActive,
                                                     brake_on, brake_release)
-    return self.accel, self.gas, gas_pedal_force, self.bosch_braking
+    self.command_accel = self.accel
+    if self.brake_table is not None and self.bosch_braking and not stopping:
+      self.command_accel = float(np.clip(brake_command(self.accel, self.brake_table.value(v_ego)),
+                                         self.params.BOSCH_ACCEL_MIN, self.params.BOSCH_ACCEL_MAX))
+    self.gas_history.append(self.gas)
+    self.brake_history.append(self.command_accel if self.bosch_braking else 0.0)
+    return self.command_accel, self.gas, gas_pedal_force, self.bosch_braking
+
+  def _learn_tables(self, CS, gas_pedal_force, wind_brake_mps2):
+    """Teach the per-speed tables from what the last command did, on steady commands only.
+
+    Gas sample: the table force the gas sent one frame ago stood for, over the net force the powertrain produced
+    (aEgo plus grade plus aero).  Brake sample: aEgo over the accel sent while the Bosch brake was in charge.
+    """
+    v_ego = CS.out.vEgo
+    if CS.out.brakePressed or v_ego <= 1.0:
+      return
+    gas_rail = self.params.BOSCH_GAS_LOOKUP_V[-1]
+    if (len(self.gas_history) == STEADY_FRAMES and max(self.gas_history) - min(self.gas_history) < STEADY_GAS_UNITS and
+        40.0 < self.bosch_last_gas < gas_rail - 50.0 and gas_pedal_force > self.params.BOSCH_GAS_LOOKUP_BP[0]):
+      bp, lookup = self.params.BOSCH_GAS_LOOKUP_BP, self.params.BOSCH_GAS_LOOKUP_V
+      table_force = float(np.interp(self.bosch_last_gas, lookup, bp))
+      net_force = CS.out.aEgo + math.sin(self.pitch) * ACCELERATION_DUE_TO_GRAVITY + wind_brake_mps2 * self.bosch_wind_factor
+      if table_force > 0.05 and net_force > 0.15:
+        self.gas_table.learn(v_ego, table_force / net_force)
+    if (self.bosch_braking and self.bosch_last_gas <= 0.0 and len(self.brake_history) == STEADY_FRAMES and
+        max(self.brake_history) < -0.3 and max(self.brake_history) - min(self.brake_history) < STEADY_BRAKE_MPS2):
+      self.brake_table.learn(v_ego, CS.out.aEgo / self.command_accel)

@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, gen_empty_fingerprint, structs
-from opendbc.car.honda.bosch_longitudinal import BoschLongitudinal, qualified
+from opendbc.car.honda.bosch_longitudinal import (ACCORD_BRAKE_RATIO_V, ACCORD_GAS_FACTOR_BP, ACCORD_GAS_FACTOR_V,
+                                                 BRAKE_RATIO_LIMITS, GAS_FACTOR_LIMITS, STEADY_FRAMES, TABLE_PRIOR_WEIGHT,
+                                                 BoschLongitudinal, SpeedTable, brake_command, qualified)
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR, CarControllerParams
 
@@ -43,10 +45,12 @@ def test_disabled_update_preserves_original_gas_ramp_without_requesting_brakes()
   assert first[1] == 60.0
   assert second[1] == 120.0
   assert first[3] is second[3] is False
-  assert controller.bosch_gas_factor == controller.bosch_wind_factor == 1.0
+  # The Accord's gas factor is its per-speed table, read at the current speed; the wind factor is still the scalar.
+  assert controller.bosch_gas_factor == pytest.approx(ACCORD_GAS_FACTOR_V[0])
+  assert controller.bosch_wind_factor == 1.0
 
 
-@pytest.mark.parametrize("identity,rate", ((CAR.HONDA_ACCORD, 2000.0), (CAR.HONDA_CIVIC_BOSCH, 50.0), (CAR.HONDA_INSIGHT, 150.0),
+@pytest.mark.parametrize("identity,rate", ((CAR.HONDA_CIVIC_BOSCH, 50.0), (CAR.HONDA_INSIGHT, 150.0),
                                          (CAR.ACURA_RDX_3G, 300.0), (CAR.ACURA_RDX_3G_MMR, 300.0)))
 def test_learning_uses_actual_vehicle_rate_and_driver_gas_override(identity, rate):
   controller = owner(identity)
@@ -151,3 +155,123 @@ def test_gas_learner_frozen_while_the_last_gas_sat_on_the_rail():
   controller.bosch_last_gas = rail - 1.0
   controller.update(cc, cs, 1.0)
   assert controller.bosch_gas_factor == pytest.approx(1.0 + 0.5 / 50.0)
+
+
+def test_speed_table_starts_on_the_logged_default_and_moves_at_the_pace_of_evidence():
+  table = SpeedTable([0.0, 10.0, 20.0], [0.6, 0.5, 0.4], GAS_FACTOR_LIMITS, horizon=1000.0, prior_weight=100.0)
+  assert table.value(5.0) == pytest.approx(0.55)
+  for _ in range(100):
+    table.learn(10.0, 1.0)
+  # 100 samples of 1.0 against a prior worth 100 samples of 0.5: halfway
+  assert table.value(10.0) == pytest.approx(0.75)
+  assert table.value(0.0) == pytest.approx(0.6) and table.value(20.0) == pytest.approx(0.4)
+  table.learn(10.0, float("nan"))
+  table.learn(10.0, 50.0)
+  assert table.value(10.0) == pytest.approx(0.75)
+
+
+def test_speed_table_forgets_by_driving_time_near_the_knot_not_by_wall_time():
+  table = SpeedTable([0.0, 10.0, 20.0], [0.5, 0.5, 0.5], GAS_FACTOR_LIMITS, horizon=1000.0, prior_weight=100.0)
+  for _ in range(100):
+    table.learn(10.0, 1.0)
+  learned = table.value(10.0)
+  for _ in range(5000):
+    table.observe_driving(0.0)  # driving far from the 10 m/s knot leaves it alone
+  assert table.value(10.0) == pytest.approx(learned)
+  for _ in range(1000):
+    table.observe_driving(10.0)  # one horizon of driving near the knot decays its evidence to 1/e
+  assert table.sums[1] == pytest.approx(100.0 * math.exp(-1.0), rel=0.01)
+  assert 0.5 < table.value(10.0) < learned
+
+
+def test_speed_table_state_round_trips_and_rejects_foreign_knots():
+  table = SpeedTable([0.0, 10.0], [0.5, 0.5], GAS_FACTOR_LIMITS)
+  table.learn(5.0, 0.8)
+  copy = SpeedTable([0.0, 10.0], [0.5, 0.5], GAS_FACTOR_LIMITS)
+  assert copy.load(table.state()) and copy.values() == table.values()
+  assert not SpeedTable([0.0, 15.0], [0.5, 0.5], GAS_FACTOR_LIMITS).load(table.state())
+  bad = table.state()
+  bad["weights"] = [float("inf"), 0.0]
+  assert not copy.load(bad) and copy.values() == table.values()
+
+
+def test_brake_command_divides_by_the_ratio_and_passes_hard_braking_through():
+  assert brake_command(-1.0, 1.1) == pytest.approx(-1.0 / 1.1)
+  assert brake_command(-2.0, 1.25) == pytest.approx(-1.6)
+  assert brake_command(-2.5, 1.25) == pytest.approx(-2.5 * (0.5 / 1.25 + 0.5))
+  assert brake_command(-3.5, 1.25) == -3.5
+  assert brake_command(0.5, 1.25) == 0.5
+
+
+def steady_run(controller, accel, speed, measured, frames=STEADY_FRAMES + 2, pitch=0.0):
+  controller.observe_orientation((0.0, pitch, 0.0))
+  cc, cs = inputs(speed=speed, measured=measured)
+  for _ in range(frames):
+    result = controller.update(cc, cs, accel)
+  return result
+
+
+def test_accord_gas_table_learns_only_from_steady_commands_and_at_its_speed():
+  controller = owner()
+  before = controller.gas_table.values()
+  # a ramping command (the launch case) teaches nothing
+  controller.observe_orientation((0.0, 0.0, 0.0))
+  cc, cs = inputs(speed=20.0, measured=0.5)
+  for i in range(STEADY_FRAMES + 2):
+    controller.update(cc, cs, 0.5 + 0.02 * i)
+  assert controller.gas_table.values() == before
+  # the car produces more than the table predicted for the gas sent: the knot at 20 m/s moves down
+  steady_run(controller, 1.0, 20.0, 1.5, frames=STEADY_FRAMES + 200)
+  after = controller.gas_table.values()
+  knot = ACCORD_GAS_FACTOR_BP.index(20.0)
+  assert after[knot] < before[knot] and after[knot - 1] == before[knot - 1] and after[knot + 1] == before[knot + 1]
+  # and the gas it sends now follows the table at that speed
+  assert controller.bosch_gas_factor == pytest.approx(controller.gas_table.value(20.0), rel=1e-3)  # read before this frame taught
+  assert controller.gas_table.weights[knot] > 100
+
+
+def test_accord_brake_request_is_divided_by_the_learned_ratio_while_the_bosch_brake_is_in_charge():
+  controller = owner()
+  cc, cs = inputs(speed=15.0, measured=-1.0)
+  command, gas, force, braking = controller.update(cc, cs, -1.0)
+  assert braking and gas == 0.0
+  knot = 2  # 15 m/s
+  assert command == pytest.approx(-1.0 / ACCORD_BRAKE_RATIO_V[knot])
+  assert controller.accel == -1.0  # the target the learner judges itself against is unscaled
+  # the Civic keeps the request as is
+  civic = owner(CAR.HONDA_CIVIC_BOSCH)
+  assert civic.update(cc, cs, -1.0)[0] == -1.0
+  # a steady over-delivering brake teaches a larger ratio
+  before = controller.brake_table.values()[knot]
+  steady_run(controller, -1.0, 15.0, -1.3, frames=STEADY_FRAMES + 200)
+  assert BRAKE_RATIO_LIMITS[0] < before < controller.brake_table.values()[knot] < BRAKE_RATIO_LIMITS[1]
+
+
+def test_accord_tables_round_trip_through_the_learning_params_file(tmp_path):
+  from openpilot.starpilot.car.honda.longitudinal import BoschLearningParams
+
+  class FakeParams:
+    def __init__(self):
+      self.store = {"HondaGasFactorParams": 1.0, "HondaWindFactorParams": 1.0}
+    def get(self, key, return_default=False):
+      return self.store[key]
+    def put(self, key, value, block=False):
+      self.store[key] = value
+
+  path = tmp_path / "tables.json"
+  controller = owner()
+  learning = BoschLearningParams(FakeParams(), controller, path=path)
+  steady_run(controller, 1.0, 20.0, 1.5, frames=STEADY_FRAMES + 200)
+  learning.persist(5999)
+  assert not path.exists()
+  learning.persist(6000)
+  assert path.exists()
+  fresh = owner()
+  BoschLearningParams(FakeParams(), fresh, path=path)
+  assert fresh.gas_table.values() == controller.gas_table.values()
+  assert fresh.brake_table.values() == controller.brake_table.values()
+  # a Civic has no tables and never touches the file
+  path.unlink()
+  BoschLearningParams(FakeParams(), owner(CAR.HONDA_CIVIC_BOSCH), path=path).persist(6000)
+  assert not path.exists()
+  assert TABLE_PRIOR_WEIGHT > 0
