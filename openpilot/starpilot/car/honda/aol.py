@@ -103,3 +103,36 @@ def create_intent(CP, settings):
 
 def aol_safety_config(CP):
   return CP.safetyConfigs[-1] if qualified_stock(CP, marked_only=True) else None
+
+
+def physical_cancel_lateral_allowed(CP, CS, intent, native, *, settings, previous,
+                                    source_ns, now_ns, axis_session_id) -> bool:
+  """CANCEL withdraws longitudinal only while a granted classic-Bosch alpha-long LAT axis remains.
+
+  Stock-owned Honda ports keep their explicit-latch CANCEL handling; this covers the
+  classic Bosch alpha-long owners (Accord and kin), where CANCEL has no other job
+  than ending cruise.
+  """
+  from openpilot.starpilot.aol.intent import ButtonType
+  from openpilot.starpilot.aol.runtime import (AXIS_MAX_AGE_NS, INTENT_MAX_AGE_NS, SAFETY_MAX_AGE_NS,
+                                               native_inventory_matches_cp)
+  try:
+    return bool(qualified_honda(CP) and not qualified_stock(CP) and settings is not None and settings.enabled and
+      previous is not None and previous.lateral_active and previous.native_acknowledged and
+      intent is not None and intent.settingsQualified and intent.allowedLatch and intent.lateralArmed and
+      not intent.pauseLateral and intent.producerSessionId and intent.carStateLogMonoTime == source_ns and
+      0 < source_ns <= intent.observedMonoTime <= now_ns <= intent.validUntilMonoTime and
+      now_ns - source_ns <= AXIS_MAX_AGE_NS and now_ns - intent.observedMonoTime <= INTENT_MAX_AGE_NS and
+      intent.validUntilMonoTime - intent.observedMonoTime <= SAFETY_MAX_AGE_NS and
+      CS.canValid and not CS.canTimeout and CS.cruiseState.available and not CS.steerFaultTemporary and
+      not CS.steerFaultPermanent and not CS.accFaulted and not CS.doorOpen and
+      any(event.type == ButtonType.cancel for event in CS.buttonEvents) and
+      native is not None and native.compatible and int(native.protocolVersion) == 1 and
+      axis_session_id and native.axisSessionId == axis_session_id and native.requestedLateral and native.lateralAllowed and
+      native_accepts_cp(CP, native.safetyModel, native.safetyParam) and native.pandaInventory and
+      native_inventory_matches_cp(native, CP) and
+      0 < native.observedMonoTime <= now_ns <= native.validUntilMonoTime and
+      now_ns - native.observedMonoTime <= SAFETY_MAX_AGE_NS and
+      native.validUntilMonoTime - native.observedMonoTime <= SAFETY_MAX_AGE_NS)
+  except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
+    return False
