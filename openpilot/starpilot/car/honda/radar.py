@@ -20,6 +20,15 @@ HONDA_BOSCH_A_LOW_SPEED_MIN_COUNT = 3
 HONDA_BOSCH_A_CHALLENGER_STALE_CYCLES = 2
 HONDA_BOSCH_A_GROSS_DISTANCE_STALE_CYCLES = 3
 HONDA_BOSCH_A_GROSS_DISTANCE_M = 25.0
+# 2026-11-08 route 0000002a--d7d0d36342 (35,846 frames): at 80-130 m the model read 20-25 % longer than the radar for the
+# same car (77 vs 104 m, prob 0.9+), so a fixed 25 m evicted the track every few frames and the lead's range stepped
+# between the two sources. The gross-distance limit scales with the vision range; 25 m stays the floor.
+HONDA_BOSCH_A_GROSS_DISTANCE_SCALE = 0.35
+# Same route: all 70 leadOne drops happened with the filtered probability at 0.35-0.40 against a bare "> 0.35" gate
+# (instant rise, 0.2 s decay). Once a lead is present it stays until the probability is this far under the entry gate,
+# or has sat under the gate for this many frames (0.5 s at 20 Hz). Entry is unchanged, so the planner sees a lead no later.
+LEAD_GATE_EXIT_MARGIN = 0.10
+LEAD_GATE_HOLD_FRAMES = 10
 POST_STANDSTILL_RADAR_LEAD_PERSISTENCE_FRAMES = 3
 POST_STANDSTILL_RADAR_LEAD_URGENT_TTC = 1.5
 POST_STANDSTILL_RADAR_LEAD_URGENT_DISTANCE = 1.5
@@ -182,13 +191,15 @@ def get_lead(
   *,
   vision_state,
   range_only: bool = False,
+  detection_probability: float | None = None,
 ) -> dict[str, Any]:
   def matched_state(matched: Track) -> dict[str, Any]:
     if range_only:
       return get_RadarState_range_only(matched, lead_msg, v_ego, model_v_ego, filtered_lead_prob, vision_state)
     return matched.get_RadarState(filtered_lead_prob)
 
-  lead_detection_probability = float(getattr(starpilot_toggles, 'lead_detection_probability', 0.35))
+  lead_detection_probability = float(getattr(starpilot_toggles, 'lead_detection_probability', 0.35)
+                                     if detection_probability is None else detection_probability)
   filtered_lead_prob = float(lead_msg.prob if lead_prob is None else lead_prob)
   if len(tracks) > 0 and ready and (filtered_lead_prob > lead_detection_probability):
     track = match_vision_to_track(v_ego, lead_msg, tracks, preferred_track_id=preferred_track_id)
@@ -240,11 +251,32 @@ class BoschALeadPolicy:
     self.preferred_challenger_stale_counts[lead_index] = 0
     self.preferred_gross_distance_stale_counts[lead_index] = 0
 
-  def _update_honda_bosch_a_preferred_staleness(self, lead_index: int, lead: capnp._DynamicStructReader, lead_prob: float) -> None:
+  def _gate_threshold(self, lead_index: int, lead_prob: float) -> float:
+    """The probability this lead must clear this frame: the entry gate, or the lower exit gate while it is held open."""
+    entry = float(getattr(self.starpilot_toggles, 'lead_detection_probability', 0.35))
+    if not self.lead_gate_open[lead_index]:
+      return entry
+    if lead_prob > entry:
+      self.lead_gate_below[lead_index] = 0
+      return entry
+    self.lead_gate_below[lead_index] += 1
+    if self.lead_gate_below[lead_index] <= LEAD_GATE_HOLD_FRAMES:
+      return max(entry - LEAD_GATE_EXIT_MARGIN, 0.0)
+    return entry
+
+  def _remember_gate(self, lead_index: int, lead: dict[str, Any], threshold: float) -> None:
+    held = bool(lead.get('present', False)) and float(lead.get('modelProb', 0.0)) > threshold
+    if not held:
+      self.lead_gate_below[lead_index] = 0
+    self.lead_gate_open[lead_index] = held
+
+  def _update_honda_bosch_a_preferred_staleness(self, lead_index: int, lead: capnp._DynamicStructReader, lead_prob: float,
+                                                lead_detection_probability: float | None = None) -> None:
     preferred_id = self.prev_lead_track_ids[lead_index]
     if self.preferred_stale_track_ids[lead_index] != preferred_id:
       self._reset_preferred_stale_evidence(lead_index, preferred_id)
-    lead_detection_probability = float(getattr(self.starpilot_toggles, 'lead_detection_probability', 0.35))
+    if lead_detection_probability is None:
+      lead_detection_probability = float(getattr(self.starpilot_toggles, 'lead_detection_probability', 0.35))
     preferred_track = self.tracks.get(preferred_id)
     if preferred_id < 0 or preferred_track is None or (not self.ready) or (lead_prob <= lead_detection_probability):
       self._reset_preferred_stale_evidence(lead_index, preferred_id)
@@ -261,10 +293,12 @@ class BoschALeadPolicy:
         self.preferred_challenger_stale_counts[lead_index] += 1
       else:
         self.preferred_challenger_stale_counts[lead_index] = 0
-    distance_mismatch = abs(preferred_track.dRel - (lead.x[0] - RADAR_TO_CAMERA))
+    vision_range = lead.x[0] - RADAR_TO_CAMERA
+    distance_mismatch = abs(preferred_track.dRel - vision_range)
+    gross_limit = max(HONDA_BOSCH_A_GROSS_DISTANCE_M, HONDA_BOSCH_A_GROSS_DISTANCE_SCALE * abs(vision_range))
     if strict_match:
       self.preferred_gross_distance_stale_counts[lead_index] = 0
-    elif distance_mismatch > HONDA_BOSCH_A_GROSS_DISTANCE_M:
+    elif distance_mismatch > gross_limit:
       self.preferred_gross_distance_stale_counts[lead_index] += 1
     else:
       self.preferred_gross_distance_stale_counts[lead_index] = 0
@@ -323,6 +357,8 @@ class BoschALeadPolicy:
     self.preferred_stale_track_ids = [-1, -1]
     self.preferred_challenger_stale_counts = [0, 0]
     self.preferred_gross_distance_stale_counts = [0, 0]
+    self.lead_gate_open = [False, False]
+    self.lead_gate_below = [0, 0]
     self._was_standstill = False
     self._standstill_had_lead = False
     self._post_standstill_gate_active = False
@@ -352,8 +388,9 @@ class BoschALeadPolicy:
 
   def leads(self, sm, radar, model_v_ego):
     leads = sm['modelV2'].leadsV3
+    thresholds = [self._gate_threshold(index, radar.lead_prob_filters[index].x) for index in range(2)]
     for index in range(2):
-      self._update_honda_bosch_a_preferred_staleness(index, leads[index], radar.lead_prob_filters[index].x)
+      self._update_honda_bosch_a_preferred_staleness(index, leads[index], radar.lead_prob_filters[index].x, thresholds[index])
     output = [
       get_lead(
         self.v_ego,
@@ -367,10 +404,13 @@ class BoschALeadPolicy:
         preferred_track_id=self.prev_lead_track_ids[index],
         vision_state=self.vision_state,
         range_only=self.range_only,
+        detection_probability=thresholds[index],
       )
       for index in range(2)
     ]
     output[0] = self._filter_post_standstill_lead(output[0])
+    for index in range(2):
+      self._remember_gate(index, output[index], thresholds[index])
     for index, lead in enumerate(output):
       if lead.get('present', False) and lead.get('radar', False):
         identifier = int(lead.get('radarTrackId', -1))
