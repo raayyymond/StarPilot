@@ -589,8 +589,13 @@ class SharedBluetoothOwner(BluetoothOwner):
 
     ``link_up`` decides whether the hands-free link itself is open; without it BlueZ's Connected flag stands in, which
     is also true while only another profile (audio) is up and the car's hands-free, the one that gates the screen, is not.
+
+    The page itself (ConnectProfile, up to ``timeout``) runs outside both the owner's lock and the phone's D-Bus lock:
+    2026-11-08 it held them for 8.0 s while the projection's own setup waited for the adapter address. Admission is
+    checked before the page and again after it, under the lock each time.
     """
     address = normalized_address(address)
+    hfp = '0000111e-0000-1000-8000-00805f9b34fb'
     with self.lock:
       lease = self.phone_lease
       if lease is None or lease.released or lease.session is not None:
@@ -599,7 +604,6 @@ class SharedBluetoothOwner(BluetoothOwner):
       path, props, sender = client.adapter_identity()
       receiver = lease.phone.device(lease.receiver)
       device = lease.phone.device(address)
-      hfp = '0000111e-0000-1000-8000-00805f9b34fb'
       def valid():
         return (self.phone_lease is lease and not lease.released and lease.enabled is not None and lease.enabled() and
                 lease.selected_receiver is not None and lease.selected_receiver().upper() == lease.receiver and
@@ -611,9 +615,18 @@ class SharedBluetoothOwner(BluetoothOwner):
         raise BluetoothRejected('Selected paired hands-free car is unavailable')
       was_admitted = self.companion_devices.get(address)
       self.companion_devices[address] = device['path']
-      try:
-        if connect and not (link_up() if link_up is not None else device['connected']):
-          lease.phone._call(device['path'], 'org.bluez.Device1', 'ConnectProfile', 's', (hfp,), timeout=timeout)
+
+    def revoke():
+      with self.lock:
+        if was_admitted is None:
+          self.companion_devices.pop(address, None)
+        else:
+          self.companion_devices[address] = was_admitted
+
+    try:
+      if connect and not (link_up() if link_up is not None else device['connected']):
+        lease.phone._call(device['path'], 'org.bluez.Device1', 'ConnectProfile', 's', (hfp,), timeout=timeout, exclusive=False)
+      with self.lock:
         current_path, current_props, current_sender = client.adapter_identity()
         current = lease.phone.device(address)
         current_receiver = lease.phone.device(lease.receiver)
@@ -625,12 +638,9 @@ class SharedBluetoothOwner(BluetoothOwner):
         if connect and not (link_up() if link_up is not None else current['connected']):
           raise BluetoothRejected('Connect the selected car before starting its Android Auto adapter')
         return current
-      except BaseException:
-        if was_admitted is None:
-          self.companion_devices.pop(address, None)
-        else:
-          self.companion_devices[address] = was_admitted
-        raise
+    except BaseException:
+      revoke()
+      raise
 
   def companion_action(self, operation: str, address: str, session: tuple) -> dict | None:
     """Delegate saved-car actions within the existing projection owner's lock.

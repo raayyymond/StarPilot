@@ -88,6 +88,12 @@ NATIVE_FOCUS_GIVE_UP_S = 15.0
 # while it keeps its own screen, open that link again this often, each try bounded by this timeout.
 COMPANION_LINK_RETRY_S = 10.0
 COMPANION_CONNECT_TIMEOUT_S = 8.0
+# 2026-11-08: a page the car did not answer (D-Bus timeout, or "busy" because the kernel is still paging from the last
+# one) kept the controller paging 8 s of every 10; the car's own hands-free connection, the one that grants the screen,
+# only landed in the idle window. After such a page the keeper rests this long so the car gets the air to call us.
+COMPANION_PAGE_BACKOFF_S = 30.0
+COMPANION_READY_POLL_S = 0.5
+COMPANION_PAGING_OUTCOMES = ("TimeoutError", "br-connection-busy", "InProgress", "page-timeout")
 COMPANION_LINK_HINT = ("Waiting for the car's hands-free link to StarPilot; the car keeps its own screen until it is up. "
                        "If another phone is connected to the car's hands-free, connect StarPilot on the car's phone screen.")
 WIFI_READY_PROBE_S = 5.0     # how often auto-connect asks NetworkManager whether it manages the Wi-Fi radio yet
@@ -451,13 +457,21 @@ class CompanionLinkKeeper:
 
   2026-11-02 Honda/OTTOCAST: the car granted video within a second of its HandsFreeLink completing a hands-free
   connection to the comma, 38 s into one projection; without that link it never did. Runs beside the projection
-  connection from the moment the adapter accepted us until the car hands over or the session ends.
+  connection until the car hands over or the session ends.
+
+  2026-11-08 session 38: paging from the moment the adapter accepted us held the phone's D-Bus lock through the
+  projection's own setup (connecting_tcp -> authenticating took the page's full 8.0 s, 0.0-0.2 s in every other
+  session), so with ``ready`` the first page waits until the projection is streaming. A page the car did not answer is
+  followed by ``backoff`` instead of ``interval``: the car connected by itself 6 s into the one idle window it got.
   """
 
   def __init__(self, connect: Callable[[float], str], link_up: Callable[[], bool], log: Callable[..., None],
-               interval: float = COMPANION_LINK_RETRY_S, timeout: float = COMPANION_CONNECT_TIMEOUT_S):
+               interval: float = COMPANION_LINK_RETRY_S, timeout: float = COMPANION_CONNECT_TIMEOUT_S,
+               backoff: float = COMPANION_PAGE_BACKOFF_S, ready: Callable[[], bool] | None = None,
+               ready_poll: float = COMPANION_READY_POLL_S):
     self.connect, self.link_up, self.log = connect, link_up, log
-    self.interval, self.timeout = interval, timeout
+    self.interval, self.timeout, self.backoff = interval, timeout, backoff
+    self.ready, self.ready_poll = ready, ready_poll
     self.attempts = 0
     self.outcome = ""
     self._stop = threading.Event()
@@ -472,16 +486,28 @@ class CompanionLinkKeeper:
     if self._thread.is_alive() and threading.current_thread() is not self._thread:
       self._thread.join(timeout=1.0)
 
+  @staticmethod
+  def paged(outcome: str) -> bool:
+    """The attempt paged the car and it did not answer (or the kernel is still paging from the last one)."""
+    return any(marker in outcome for marker in COMPANION_PAGING_OUTCOMES)
+
   def _run(self) -> None:
+    while self.ready is not None and not self.ready():
+      if self._stop.wait(self.ready_poll):
+        return
     while not self._stop.is_set():
+      wait = self.interval
       if not self.link_up():
         self.attempts += 1
         try:
           self.outcome = self.connect(self.timeout)
         except Exception as error:  # never let a Bluetooth hiccup take the keeper down
           self.outcome = f"{type(error).__name__}: {error}"
-        self.log("companion_link", attempt=self.attempts, outcome=self.outcome[:160], up=self.link_up())
-      if self._stop.wait(self.interval):
+        up = self.link_up()
+        if not up and self.paged(self.outcome):
+          wait = self.backoff
+        self.log("companion_link", attempt=self.attempts, outcome=self.outcome[:160], up=up, next_s=round(wait, 1))
+      if self._stop.wait(wait):
         return
 
 
@@ -1353,7 +1379,12 @@ class Supervisor:
   def _start_companion_keeper(self, tuning: dict) -> None:
     self._stop_companion_keeper()
     if tuning["hfp_gate"] and self.config.get('companion_address', '') and self._shared_bluetooth_owner is not None:
-      self._companion_keeper = CompanionLinkKeeper(self._connect_companion_link, self._companion_link_up, self.log).start()
+      self._companion_keeper = CompanionLinkKeeper(self._connect_companion_link, self._companion_link_up, self.log,
+                                                   ready=self._projection_streaming).start()
+
+  def _projection_streaming(self) -> bool:
+    """The projection connection is up and past its own Bluetooth work; the keeper may page the car now."""
+    return getattr(self, "_status", {}).get("state") in ("streaming", "suspended")
 
   def _stop_companion_keeper(self) -> None:
     keeper, self._companion_keeper = self._companion_keeper, None

@@ -265,6 +265,50 @@ def test_companion_link_keeper_survives_a_connect_that_raises():
   assert keeper.attempts >= 2 and events[0]["outcome"] == "RuntimeError: D-Bus went away"
 
 
+def test_companion_link_keeper_waits_for_the_projection_to_stream_before_paging():
+  # 2026-11-08 session 38: the first page held the phone's D-Bus lock through connecting_tcp -> authenticating (8.0 s).
+  ready = {"streaming": False}
+  calls = []
+  keeper = supervisor.CompanionLinkKeeper(lambda timeout: calls.append(timeout) or "connected", lambda: bool(calls),
+                                          lambda name, **values: None, interval=0.02, ready=lambda: ready["streaming"],
+                                          ready_poll=0.01).start()
+  time.sleep(0.1)
+  assert calls == [] and keeper.attempts == 0
+  ready["streaming"] = True
+  deadline = time.monotonic() + 2.0
+  while keeper.attempts < 1 and time.monotonic() < deadline:
+    time.sleep(0.005)
+  keeper.stop()
+  assert keeper.attempts == 1 and calls == [supervisor.COMPANION_CONNECT_TIMEOUT_S]
+
+
+def test_companion_link_keeper_rests_after_a_page_the_car_did_not_answer():
+  # 2026-11-08: TimeoutError / br-connection-busy alternated every 10 s, so the controller paged 8 s of every 10 and the
+  # car's own hands-free connection (the one that grants the screen) landed only in the one idle window.
+  events = []
+  outcomes = iter(["TimeoutError", "org.bluez.Error.InProgress: br-connection-busy", "org.bluez.Error.Failed: br-connection-refused"])
+  keeper = supervisor.CompanionLinkKeeper(lambda timeout: next(outcomes), lambda: False,
+                                          lambda name, **values: events.append(values), interval=0.02, backoff=0.2).start()
+  deadline = time.monotonic() + 3.0
+  while keeper.attempts < 3 and time.monotonic() < deadline:
+    time.sleep(0.005)
+  keeper.stop()
+  assert [values["next_s"] for values in events[:3]] == [0.2, 0.2, 0.0]  # paged, still paging, answered: rest, rest, retry
+  assert all(supervisor.CompanionLinkKeeper.paged(marker) for marker in ("TimeoutError: x", "br-connection-busy", "br-connection-page-timeout"))
+  assert not supervisor.CompanionLinkKeeper.paged("org.bluez.Error.Failed: br-connection-refused")
+
+
+def test_the_keeper_pages_only_once_the_supervisor_reports_streaming():
+  sup = bare_supervisor([])
+  assert sup._projection_streaming() is False
+  sup._set(state="streaming")
+  assert sup._projection_streaming() is True
+  sup._set(state="suspended")
+  assert sup._projection_streaming() is True
+  sup._set(state="connecting_tcp")
+  assert sup._projection_streaming() is False
+
+
 def test_connecting_the_saved_car_follows_its_hands_free_link_not_bluez_connected():
   sup = supervisor.Supervisor.__new__(supervisor.Supervisor)
   sup.config = {"companion_address": CAR}

@@ -100,10 +100,16 @@ class BluezPhone:
 
   # -------------------------------------------------------------------- D-Bus
 
-  def _call(self, path: str, interface: str, member: str, signature: str | None = None, body: tuple = (), timeout: float = 15.0):
+  def _call(self, path: str, interface: str, member: str, signature: str | None = None, body: tuple = (), timeout: float = 15.0,
+            exclusive: bool = True):
+    """One BlueZ method call. ``exclusive=False`` is for a page (ConnectProfile) that may run to its timeout: the router
+    matches replies per serial, so a long call need not keep the short adapter queries waiting behind it."""
     address = DBusAddress(path, bus_name=BLUEZ, interface=interface)
     message = new_method_call(address, member, signature, body) if signature else new_method_call(address, member)
-    with self._lock:
+    if exclusive:
+      with self._lock:
+        reply = self.router.send_and_get_reply(message, timeout=timeout)
+    else:
       reply = self.router.send_and_get_reply(message, timeout=timeout)
     if reply.header.message_type == MessageType.error:
       name = reply.header.fields.get(HeaderFields.error_name, "org.bluez.Error.Failed")

@@ -122,7 +122,7 @@ class CompanionTests(unittest.TestCase):
     self.phone._call = call
     self.owner.prepare_companion(CAR, lambda: CAR, connect=True, timeout=8.0, link_up=lambda: link['up'])
     self.assertEqual(self.calls[0][0][2:], ('ConnectProfile', 's', (HFP,)))
-    self.assertEqual(self.calls[0][1], {'timeout': 8.0})
+    self.assertEqual(self.calls[0][1], {'timeout': 8.0, 'exclusive': False})  # the page never holds the phone's D-Bus lock
     self.calls.clear()
     self.owner.prepare_companion(CAR, lambda: CAR, connect=True, link_up=lambda: True)
     self.assertEqual(self.calls, [])  # the link is up: nothing to connect, whatever BlueZ's flag says
@@ -233,6 +233,26 @@ class CompanionTests(unittest.TestCase):
     self.assertEqual(self.calls[0][0][2:5], ('ConnectProfile', 's', (HFP,)))
     self.assertTrue(self.devices[ADAPTER]['connected'])
     self.assertFalse(self.lease.released)
+
+  def test_the_page_runs_outside_the_owner_lock_and_the_phone_lock(self):
+    # 2026-11-08: an 8 s ConnectProfile under both locks stalled the projection's own setup for exactly those 8 s.
+    seen = {}
+
+    def other_thread_can_take_owner_lock():
+      taken = self.owner.lock.acquire(blocking=False)
+      if taken:
+        self.owner.lock.release()
+      seen['owner_free'] = taken
+
+    def callback():
+      worker = threading.Thread(target=other_thread_can_take_owner_lock)
+      worker.start()
+      worker.join(1.0)
+    self.hook = callback
+    self.owner.prepare_companion(CAR, lambda: CAR, connect=True, timeout=8.0)
+    self.assertTrue(seen['owner_free'])
+    self.assertEqual(self.calls[0][1], {'timeout': 8.0, 'exclusive': False})
+    self.assertTrue(self.owner.companion_accepts(CAR))
 
   def test_saved_companion_standby_admission_and_reconnect_fail_closed(self):
     self.owner.prepare_companion(CAR, lambda: CAR)
