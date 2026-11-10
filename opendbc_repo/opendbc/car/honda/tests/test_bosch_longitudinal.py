@@ -275,3 +275,38 @@ def test_accord_tables_round_trip_through_the_learning_params_file(tmp_path):
   BoschLearningParams(FakeParams(), owner(CAR.HONDA_CIVIC_BOSCH), path=path).persist(6000)
   assert not path.exists()
   assert TABLE_PRIOR_WEIGHT > 0
+
+
+def test_launch_boost_covers_only_the_undelivered_part_of_a_low_speed_launch():
+  # 2026-11-09 routes 0000002b-2d: 1.4 m/s^2 asked, 0.8 delivered under 2.5 m/s.
+  from opendbc.car.honda.bosch_longitudinal import (LAUNCH_BOOST_END_MPS, LAUNCH_BOOST_FULL_MPS, LAUNCH_BOOST_GAIN,
+                                                    LAUNCH_BOOST_MAX, launch_boost)
+  assert launch_boost(1.4, 0.8, 1.5) == pytest.approx(LAUNCH_BOOST_GAIN * 0.6)
+  assert launch_boost(1.4, 0.0, 0.0) == LAUNCH_BOOST_MAX, 'bounded from a standstill'
+  assert launch_boost(1.4, 1.4, 1.5) == 0.0 and launch_boost(1.4, 1.9, 1.5) == 0.0, 'nothing once the car delivers'
+  assert launch_boost(0.4, 0.0, 1.0) == 0.0, 'creeping is not a launch'
+  assert launch_boost(-1.0, -2.0, 1.0) == 0.0, 'never while slowing'
+  assert launch_boost(1.4, 0.8, LAUNCH_BOOST_FULL_MPS) == pytest.approx(LAUNCH_BOOST_GAIN * 0.6)
+  assert launch_boost(1.4, 0.8, 6.0) == pytest.approx(LAUNCH_BOOST_GAIN * 0.6 * 0.5)
+  assert launch_boost(1.4, 0.8, LAUNCH_BOOST_END_MPS) == 0.0 and launch_boost(1.4, 0.8, 30.0) == 0.0
+  assert launch_boost(float('nan'), 0.8, 1.0) == 0.0 and launch_boost(1.4, float('inf'), 1.0) == 0.0
+
+
+def test_launch_boost_raises_the_accord_gas_only_under_control_and_off_the_pedals():
+  def gas_after(frames=40, identity=CAR.HONDA_ACCORD, **kwargs):
+    controller = owner(identity)
+    cc, cs = inputs(**kwargs)
+    for _ in range(frames):  # past the 60-unit-per-frame gas ramp
+      _, gas, force, _ = controller.update(cc, cs, 1.4)
+    return gas, force, controller
+
+  lagging, force, controller = gas_after(speed=1.5, measured=0.8)
+  delivering, same_force, _ = gas_after(speed=1.5, measured=1.4)
+  assert controller.launch_boost == pytest.approx(0.36) and lagging > delivering
+  assert force == pytest.approx(same_force, abs=1e-3), 'the force that decides gas versus brake is untouched'
+  assert gas_after(speed=1.5, measured=0.8, gas=True)[0] == delivering, 'the driver has the pedal'
+  assert gas_after(speed=1.5, measured=0.8, brake=True)[0] == delivering
+  assert gas_after(speed=1.5, measured=0.8, state="starting")[0] == delivering
+  assert gas_after(speed=20.0, measured=0.8)[2].launch_boost == 0.0, 'highway acceleration is the table alone'
+  other = gas_after(speed=1.5, measured=0.8, identity=CAR.HONDA_CIVIC_BOSCH)[2]
+  assert other.gas_table is None and other.launch_boost == 0.0, 'only the Accord, whose launch was measured'
