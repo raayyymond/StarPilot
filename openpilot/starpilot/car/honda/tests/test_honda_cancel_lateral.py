@@ -115,3 +115,40 @@ def test_cancel_exception_never_invents_intent_or_permission(failure):
   elif failure == 'nidec':
     cp, cs, intent, native, context = proof(CAR.HONDA_CIVIC)
   assert not physical_cancel_lateral_allowed(cp, cs, intent, native, **context)
+
+
+STOCK_CLASSIC_LONG = 2083  # what the Accord really runs (route 0000002d carParams), with alternativeExperience 32
+
+
+def stock_proof(identity=CAR.HONDA_ACCORD):
+  cp, cs, intent, native, context = proof(identity, car_fw=ANGLE_EPS_FW)
+  cp.safetyConfigs[0].safetyParam = STOCK_CLASSIC_LONG
+  cp.alternativeExperience, cp.flags = 32, 32774  # the real car's flags: Bosch, alt brake, angle-loop EPS firmware
+  cp.transmissionType = structs.CarParams.TransmissionType.automatic
+  native = replace(native, safetyParam=STOCK_CLASSIC_LONG,
+                   pandaInventory=(replace(native.pandaInventory[0], safetyParam=STOCK_CLASSIC_LONG, alternativeExperience=32),))
+  return cp, cs, intent, native, context
+
+
+def test_the_accord_as_it_actually_runs_keeps_lateral_through_cancel():
+  from opendbc.car.honda.stock_aol import qualified as qualified_stock
+  from openpilot.starpilot.car.honda.aol import qualified_honda
+  cp, cs, intent, native, context = stock_proof()
+  assert qualified_stock(cp, marked_only=True) and not qualified_honda(cp), 'the stock-owned contract, not the host latch'
+  assert physical_cancel_lateral_allowed(cp, cs, intent, native, **context)
+  cs.buttonEvents[0].pressed = False
+  assert physical_cancel_lateral_allowed(cp, cs, intent, native, **context), 'the release frame carries buttonCancel too'
+
+
+def test_a_mapped_cancel_action_keeps_its_own_handling():
+  cp, cs, intent, native, context = stock_proof()
+  context['settings'] = replace(context['settings'], cancel_actions=(9, 0, 0))
+  assert not physical_cancel_lateral_allowed(cp, cs, intent, native, **context)
+
+
+def test_the_stock_owner_still_needs_the_latch_and_the_panda():
+  cp, cs, intent, native, context = stock_proof()
+  assert not physical_cancel_lateral_allowed(cp, cs, replace(intent, allowedLatch=False, lateralArmed=False), native, **context)
+  assert not physical_cancel_lateral_allowed(cp, cs, intent, replace(native, lateralAllowed=False), **context)
+  cs.buttonEvents = []
+  assert not physical_cancel_lateral_allowed(cp, cs, intent, native, **context)
