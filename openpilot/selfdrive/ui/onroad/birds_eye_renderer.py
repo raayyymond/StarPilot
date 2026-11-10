@@ -89,6 +89,7 @@ LABEL_SMOOTHING = 0.5   # per frame, toward the glyph-attached label position
 LABEL_SNAP_PX = 80.0    # a jump larger than this (side flip, a new lead) is taken directly
 SUBLABEL_SCALE = 0.62   # curve tag, relative to the distance label
 SHOW_CURVE_MARK = False  # the curve-speed bar and tag on the path (scene.curve is still ingested)
+SHOW_LANE_CHANGE_GHOST = False  # the ego outline one lane over during a lane change (the state is still ingested)
 
 LANE_HEADING_PROB = 0.3  # an ego lane line needs this probability to steer the lead glyph's heading
 LAT_ACTIVE_LANE = (52, 216, 104)  # ego lane lines while lateral control is active
@@ -1098,13 +1099,23 @@ class BirdsEyeRenderer(Widget):
     of the sizes in layout, filled with colors (C, polygons, 4) as one fan each, then a hull outline strip in
     outlines (C, 4). Returns one op list per car and the hulls (C, 8, 2) in pixels; transparent parts are skipped.
 
-    Drawn in car-frame meters through the view mapping, so they share the view's scale (true length, lateral_stretch wider)."""
+    Each glyph is rigid: its centre and its heading go through the view mapping, then the car is drawn at the view's
+    scale there (true length, lateral_stretch wider) and rotated on screen. Mapping the rotated corners instead sheared
+    a turned car into a parallelogram, because the view is wider sideways than forward."""
     poses = np.asarray(poses, dtype=np.float64).reshape(-1, 3)
-    cos_h, sin_h = np.cos(poses[:, 2]), np.sin(poses[:, 2])
-    pts = np.empty((poses.shape[0], local.shape[0], 2))
-    pts[..., 0] = poses[:, None, 0] + local[None, :, 0] * cos_h[:, None] - local[None, :, 1] * sin_h[:, None]
-    pts[..., 1] = poses[:, None, 1] + local[None, :, 0] * sin_h[:, None] + local[None, :, 1] * cos_h[:, None]
-    screen = bem.car_to_widget(pts.reshape(-1, 2), rect, self.config, view).astype(np.float64).reshape(pts.shape)
+    count = poses.shape[0]
+    probes = np.concatenate((poses[:, :2], poses[:, :2] + (1.0, 0.0), poses[:, :2] + (0.0, 1.0)))
+    mapped = bem.car_to_widget(probes, rect, self.config, view).astype(np.float64)
+    centre = mapped[:count]
+    forward_ppm = centre[:, 1] - mapped[count:2 * count, 1]
+    lateral_ppm = mapped[2 * count:, 0] - centre[:, 0]
+    turn = np.arctan2(lateral_ppm * np.sin(poses[:, 2]), forward_ppm * np.cos(poses[:, 2]))  # the heading, on screen
+    cos_t, sin_t = np.cos(turn)[:, None], np.sin(turn)[:, None]
+    along = local[None, :, 0] * forward_ppm[:, None]
+    across = local[None, :, 1] * lateral_ppm[:, None]
+    screen = np.empty((count, local.shape[0], 2))
+    screen[..., 0] = centre[:, None, 0] + along * sin_t + across * cos_t
+    screen[..., 1] = centre[:, None, 1] - along * cos_t + across * sin_t
     hulls = screen[:, hull_at:hull_at + 8]
     cars = []
     for c in range(poses.shape[0]):
@@ -1122,7 +1133,7 @@ class BirdsEyeRenderer(Widget):
     """While the model's lane change is pending or under way, an outline of the ego car one lane over on that side:
     dim before the change starts, green once it does, red when that side's blind spot is set."""
     state, side = scene.lane_change_state, scene.lane_change_direction
-    if state == 0 or side == 0:
+    if not SHOW_LANE_CHANGE_GHOST or state == 0 or side == 0:
       return
     width = round(bem.lane_width(scene.lanes, scene.grid, EGO_FRONT, side), 1)
     blocked = scene.left_blindspot if side < 0 else scene.right_blindspot

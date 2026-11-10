@@ -165,7 +165,7 @@ def test_disengaged_bar_is_grey_with_the_setpoint_at_zero():
   view, rl, text = hud(lambda: (sm(desired=1.5, actual=0.8, long_active=False, plan=1.2, limits=(-1.2, 1.6)), None))
   view.render(*LOGICAL_720P)
   assert accel_fills(rl, g) == [], 'no fill away from zero'
-  assert text.drawn == []
+  assert [entry for entry in text.drawn if not entry[0].endswith(('AM', 'PM'))] == [], 'only the clock'
   track = next(call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][1] == g.top)
   assert track[-1][:3] == hud_module.IDLE
   limit_ticks = [call for call in rl.calls if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.LIMIT]
@@ -419,7 +419,7 @@ def test_speed_readout_shows_speed_and_set_speed_at_twice_the_lead_label():
   view = BirdsEyeHud(FakeRl(), text, lambda: (sm(v_ego=26.8224, v_cruise=112.654, long_active=False), None),
                      feedback=lambda sm, cp: TorqueFeedback(), clock=lambda: 0.0)
   view.render(*LOGICAL_720P)
-  (speed, speed_size, sx, sy), (mph, cap_size, _, cy), (cruise, cruise_size, cx, _), (unit, _, _, _) = text.drawn
+  (speed, speed_size, sx, sy), (mph, cap_size, _, cy), (cruise, cruise_size, cx, _), (unit, _, _, _) = text.drawn[:4]
   assert (speed, mph, cruise, unit) == ('60', 'mph', '70', 'SET')
   assert speed_size == cruise_size == pytest.approx(2 * label_font_size(view_rect(*LOGICAL_720P)[3]))
   assert cap_size < speed_size / 2
@@ -428,7 +428,7 @@ def test_speed_readout_shows_speed_and_set_speed_at_twice_the_lead_label():
   view.metric = True
   text.drawn.clear()
   view.render(*LOGICAL_720P)
-  assert [entry[0] for entry in text.drawn] == ['97', 'km/h', '113', 'SET']
+  assert [entry[0] for entry in text.drawn[:4]] == ['97', 'km/h', '113', 'SET']
 
 
 def test_cpu_cost_per_frame_is_small():
@@ -438,3 +438,23 @@ def test_cpu_cost_per_frame_is_small():
   for _ in range(300):
     view.render(*LOGICAL_720P)
   assert (time.perf_counter() - start) / 300 < 0.001
+
+
+def test_the_clock_sits_at_the_top_right_in_twelve_hour_time():
+  import time as _time
+  from openpilot.starpilot.system.starport.birds_eye_hud import CLOCK_SCALE, clock_text
+  for hour, minute, expected in ((0, 5, '12:05 AM'), (9, 30, '9:30 AM'), (12, 0, '12:00 PM'), (16, 7, '4:07 PM')):
+    assert clock_text(_time.mktime((2026, 11, 9, hour, minute, 0, 0, 0, -1))) == expected
+  now = [_time.mktime((2026, 11, 9, 16, 7, 0, 0, 0, -1))]
+  text = SizedText()
+  text.measure = lambda value, size: (len(value) * size * 0.5, size)
+  view = BirdsEyeHud(FakeRl(), text, lambda: (sm(), None), feedback=lambda sm, cp: TorqueFeedback(), clock=lambda: 0.0,
+                     wall_clock=lambda: now[0])
+  width, height = LOGICAL_720P
+  view.render(width, height)
+  value, size, x, y = text.drawn[-1]
+  assert value == '4:07 PM' and size == pytest.approx(readout_size(width, height) * CLOCK_SCALE)
+  assert x + len(value) * size * 0.5 == pytest.approx(width - 28 * height / 1080, abs=1) and y < 0.1 * height
+  now[0] += 60
+  view.render(width, height)
+  assert text.drawn[-1][0] == '4:08 PM'

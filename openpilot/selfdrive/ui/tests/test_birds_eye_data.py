@@ -227,6 +227,7 @@ def test_lane_change_ghost_sits_one_lane_over_and_turns_red_on_a_blind_spot(monk
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   view, _ = _renderer_with_scene()
   calls = []
+  monkeypatch.setattr(ber, 'SHOW_LANE_CHANGE_GHOST', True)
   monkeypatch.setattr(view, '_cars', lambda v, rect, poses, local, layout, hull_at, colors, outlines, **k:
                       calls.append((poses[0], outlines[0])) or ([[]], np.zeros((1, 8, 2))))
   pv = bem.view_params(RECT, view.config)
@@ -321,3 +322,16 @@ def test_curve_mark_is_hidden_but_still_ingested(monkeypatch):
   path = SimpleNamespace(end=(20.0, 0.0, 0.0))
   view._marks(view.scene, RECT, bem.view_params(RECT, view.config), path)
   assert len(bars) == 1 and drawn == [], 'only the shouldStop bar; no curve bar or tag'
+
+
+def test_the_lane_change_ghost_is_off_by_default(monkeypatch):
+  # 2026-11-09: the operator did not want the green outline one lane over; the feature is gated, not deleted.
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  assert ber.SHOW_LANE_CHANGE_GHOST is False
+  view, _ = _renderer_with_scene()
+  calls = []
+  monkeypatch.setattr(view, '_cars', lambda *a, **k: calls.append(a) or ([[]], np.zeros((1, 8, 2))))
+  view.ingest(_rich_model(state='laneChangeStarting', direction='right'), None,
+              SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=True, leftBlindspot=False, rightBlindspot=False))
+  view._lane_change_ghost(view.scene, RECT, (RECT.x, RECT.y, RECT.width, RECT.height, view.config), bem.view_params(RECT, view.config))
+  assert not calls

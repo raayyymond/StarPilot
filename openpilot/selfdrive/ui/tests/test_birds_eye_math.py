@@ -701,3 +701,30 @@ def test_label_position_is_filtered_and_whole_pixels():
   assert (x, y) == (105.0, 201.0), 'half way toward the glyph'
   prev, view._labels = view._labels, []
   assert view._label_position(prev, 400.0, 200.0) == (400.0, 200.0), 'a side flip snaps'
+
+
+def test_a_turned_car_glyph_is_rotated_rigidly_not_sheared():
+  # 2026-11-09: on a curve the lead was drawn as a parallelogram. The view is 1.3x wider sideways than forward, so
+  # rotating the corners in meters and then mapping them sheared the rectangle. The glyph now turns on screen.
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  view = bem.view_params(stream, bem.DEFAULT_CONFIG)
+  renderer = ber.BirdsEyeRenderer(text=object())
+  local = np.array([(2.3, -0.95), (2.3, 0.95), (-2.3, 0.95), (-2.3, -0.95)] * 2)
+  args = (local, (8,), 0, [[(1, 1, 1, 1)]], [(1, 1, 1, 1)])
+  straight = renderer._cars(view, stream, [(40.0, 1.0, 0.0)], *args)[1][0][:4]
+  heading = math.radians(20.0)
+  turned = renderer._cars(view, stream, [(40.0, 1.0, heading)], *args)[1][0][:4]
+
+  def sides(quad):
+    return [float(np.linalg.norm(quad[i] - quad[(i + 1) % 4])) for i in range(4)]
+  assert sides(turned) == pytest.approx(sides(straight), rel=1e-6), 'same size as when it points straight ahead'
+  for i in range(4):
+    a, b = turned[(i + 1) % 4] - turned[i], turned[(i + 2) % 4] - turned[(i + 1) % 4]
+    assert float(a @ b) == pytest.approx(0.0, abs=1e-6), 'corners stay square'
+  assert turned.mean(axis=0) == pytest.approx(straight.mean(axis=0), abs=1e-6), 'turned about its centre'
+  # Its long side lies along the road as the view draws it: a road line through the same heading, mapped to pixels.
+  ends = bem.car_to_widget(np.array([(40.0, 1.0), (40.0 + math.cos(heading), 1.0 + math.sin(heading))]), stream, bem.DEFAULT_CONFIG, view)
+  road = (ends[1] - ends[0]) / np.linalg.norm(ends[1] - ends[0])
+  nose = turned[:2].mean(axis=0) - turned.mean(axis=0)
+  assert nose / np.linalg.norm(nose) == pytest.approx(road, abs=1e-4)

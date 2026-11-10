@@ -54,6 +54,7 @@ SIGNAL_HEIGHT = 260                            # turn-signal arrow height at 108
 SIGNAL_MARGIN = 28
 READOUT_SCALE = 2.0                            # readout numbers over the birds-eye lead label size
 CAPTION_SCALE = 0.3                            # unit captions over the readout numbers
+CLOCK_SCALE = 0.6                              # the clock over the readout numbers
 SET_SPEED_NA = 255                             # onroad hud_renderer: a set speed at or above this is not set
 MPH_PER_MPS, KPH_PER_MPS = 2.2369362921, 3.6
 TURN_SIGNAL_BLINK_PERIOD = 1 / (80 / 60)       # the comma screen's period (mici alert_renderer)
@@ -271,6 +272,12 @@ def read_speeds(sm, metric: bool) -> tuple[str, str] | None:
   return speed, '--' if cruise is None else f"{round(cruise if metric else cruise / KPH_PER_MPS * MPH_PER_MPS):d}"
 
 
+def clock_text(now: float | None = None) -> str:
+  """The comma's local time as the car would show it: 12-hour, no leading zero, e.g. 4:07 PM."""
+  t = time.localtime(now)
+  return f"{t.tm_hour % 12 or 12}:{t.tm_min:02d} {'AM' if t.tm_hour < 12 else 'PM'}"
+
+
 def readout_size(width: float, height: float) -> float:
   """The readout numbers' size: READOUT_SCALE x the birds-eye lead label's size over the same view rect."""
   from openpilot.selfdrive.ui.onroad.birds_eye_math import label_font_size
@@ -324,11 +331,15 @@ def torque_feedback(sm, car_params):
 
 
 class BirdsEyeHud:
-  def __init__(self, rl, text, source, *, feedback=torque_feedback, clock=time.monotonic, icon_path=TURN_SIGNAL_ICON):
+  def __init__(self, rl, text, source, *, feedback=torque_feedback, clock=time.monotonic, icon_path=TURN_SIGNAL_ICON,
+               wall_clock=time.time):
     """source() -> (SubMaster, CarParams or None). clock() -> seconds, for the turn-signal pulse."""
     self.rl, self.text, self.source = rl, text, source
     self._feedback = feedback
     self._clock = clock
+    self._wall_clock = wall_clock
+    self._clock_key = None
+    self._clock_draw = None
     self._icon_path = icon_path
     self._desired = _Filter(ACCEL_RC)
     self._actual = _Filter(AEGO_RC)
@@ -367,6 +378,7 @@ class BirdsEyeHud:
     self._draw_torque(sm, car_params, width, height)
     self._draw_signals(sm, width, height, geometry.strip)
     self._draw_readout(sm, width, height, geometry.strip)
+    self._draw_clock(width, height)
 
   def _draw_dock(self, width, height, strip) -> None:
     """The torque dock continues the view's own background; the view's last rows fade into it."""
@@ -540,6 +552,19 @@ class BirdsEyeHud:
     for (value, size, x, y, unit, caption, cx, cy), rgb in zip(self._readout, (ACTUAL, TICK), strict=True):
       self.text.draw(value, size, x, y, rl.Color(*rgb, 255))
       self.text.draw(unit, caption, cx, cy, rl.Color(*TICK, 230))
+
+  def _draw_clock(self, width, height) -> None:
+    """The time of day at the top right of the view, on the readout's top margin."""
+    if self.text is None:
+      return
+    text = clock_text(self._wall_clock())
+    key = (text, width, height)
+    if key != self._clock_key:
+      size = readout_size(width, height) * CLOCK_SCALE
+      margin = SIGNAL_MARGIN * height / 1080
+      w, _ = self.text.measure(text, size)
+      self._clock_draw, self._clock_key = (text, size, round(width - margin - w), round(margin)), key
+    self.text.draw(*self._clock_draw, self.rl.Color(*ACTUAL, 255))
 
   def _draw_arrow(self, icon, x, y, w, h, flip, alpha) -> None:
     rl = self.rl
