@@ -275,3 +275,22 @@ def test_accord_tables_round_trip_through_the_learning_params_file(tmp_path):
   BoschLearningParams(FakeParams(), owner(CAR.HONDA_CIVIC_BOSCH), path=path).persist(6000)
   assert not path.exists()
   assert TABLE_PRIOR_WEIGHT > 0
+
+
+def test_a_saved_table_keeps_what_it_learned_when_a_knot_is_added_between_its_knots():
+  # 2026-11-09: the 1.5 m/s gas knot was added on a car with a learned 7-knot table.
+  old_bp = [x for x in ACCORD_GAS_FACTOR_BP if x != 1.5]
+  old = SpeedTable(old_bp, [v for x, v in zip(ACCORD_GAS_FACTOR_BP, ACCORD_GAS_FACTOR_V, strict=True) if x != 1.5], GAS_FACTOR_LIMITS)
+  for _ in range(4000):
+    old.learn(3.0, 0.8)
+    old.learn(20.0, 0.4)
+  new = SpeedTable(ACCORD_GAS_FACTOR_BP, ACCORD_GAS_FACTOR_V, GAS_FACTOR_LIMITS)
+  assert new.load(old.state())
+  learned, now = dict(zip(old_bp, old.values(), strict=True)), dict(zip(ACCORD_GAS_FACTOR_BP, new.values(), strict=True))
+  assert {knot: now[knot] for knot in old_bp} == learned, 'every old knot is exactly what the car had'
+  assert now[1.5] == 1.0 and new.weights[1] == 0.0, 'the new knot starts on its logged default'
+  assert new.value(1.5) == 1.0 and learned[0.0] < new.value(0.75) < 1.0
+  assert SpeedTable(ACCORD_GAS_FACTOR_BP, ACCORD_GAS_FACTOR_V, GAS_FACTOR_LIMITS).load(new.state()), 'and round-trips after'
+  duplicate = old.state()
+  duplicate['bp'][1] = duplicate['bp'][0]
+  assert not new.load(duplicate)

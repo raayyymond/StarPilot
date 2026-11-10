@@ -71,8 +71,11 @@ BOSCH_TABLE_LEARNER_CARS = frozenset((CAR.HONDA_ACCORD,))
 # longitudinal, 2026-11-06).  Gas: table force the sent gas stood for / net force the powertrain produced (aEgo +
 # grade + aero), at speeds 1-5 m/s 0.57-0.68, 5-10 0.53, 10-32 0.48-0.52, 32-36 0.37.  Brake: aEgo / commanded accel
 # while the Bosch brake was in charge; it tracks vehicle acceleration itself, so grade is NOT added back.
-ACCORD_GAS_FACTOR_BP = [0.0, 3.0, 6.0, 10.0, 20.0, 30.0, 35.0]
-ACCORD_GAS_FACTOR_V = [0.64, 0.64, 0.55, 0.52, 0.50, 0.49, 0.37]
+# The 1.5 m/s knot, 2026-11-09 (routes 0000002b-2d): with the gas held steady the car delivered 0.59 of the command
+# in the first 3 s after a stop and 0.69 after, at 1-3 m/s, on a factor of 0.64; 0.82 at 3-5 m/s. That is gain, not lag,
+# and the 0 and 3 m/s knots could not hold it: 0.64 / 0.63 = 1.0. It learns from there like every other knot.
+ACCORD_GAS_FACTOR_BP = [0.0, 1.5, 3.0, 6.0, 10.0, 20.0, 30.0, 35.0]
+ACCORD_GAS_FACTOR_V = [0.64, 1.0, 0.64, 0.55, 0.52, 0.50, 0.49, 0.37]
 ACCORD_BRAKE_RATIO_BP = [0.0, 5.0, 15.0, 25.0, 35.0]
 ACCORD_BRAKE_RATIO_V = [0.95, 1.08, 1.13, 1.07, 1.10]
 TABLE_UPDATE_HZ = 50  # update() runs on every other 100 Hz control frame
@@ -137,18 +140,23 @@ class SpeedTable:
     return {'bp': list(self.bp), 'sums': list(self.sums), 'weights': list(self.weights)}
 
   def load(self, state) -> bool:
+    """Take a saved table.  Its knots must all be knots of this table; a knot added since the save starts on its
+    default, so what the car learned at the old knots survives a new one being put between them."""
     try:
-      if [float(x) for x in state['bp']] != self.bp:
-        return False
+      saved_bp = [float(x) for x in state['bp']]
       sums = [float(x) for x in state['sums']]
       weights = [float(x) for x in state['weights']]
     except (KeyError, TypeError, ValueError):
       return False
-    if (len(sums) != len(self.bp) or len(weights) != len(self.bp) or
+    if (not saved_bp or len(set(saved_bp)) != len(saved_bp) or not all(x in self.bp for x in saved_bp) or
+        len(sums) != len(saved_bp) or len(weights) != len(saved_bp) or
         not all(math.isfinite(x) and 0.0 <= x <= 10.0 * self.horizon for x in weights) or
         not all(math.isfinite(x) for x in sums)):
       return False
-    self.sums, self.weights = sums, weights
+    self.sums, self.weights = [0.0] * len(self.bp), [0.0] * len(self.bp)
+    for knot, total, weight in zip(saved_bp, sums, weights, strict=True):
+      index = self.bp.index(knot)
+      self.sums[index], self.weights[index] = total, weight
     return True
 
 
