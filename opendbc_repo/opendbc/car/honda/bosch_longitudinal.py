@@ -84,15 +84,6 @@ STEADY_BRAKE_MPS2 = 0.1
 BRAKE_SCALE_FULL = -2.0  # the learned brake ratio corrects requests down to here ...
 BRAKE_SCALE_NONE = -3.0  # ... and fades to a pass-through by here, where the data runs out
 GAS_FACTOR_LIMITS = (0.1, 3.0)
-# Launch shortfall. 2026-11-09, routes 0000002b-2d, gas-only frames with a command over 0.6 m/s^2: the car delivered
-# 58 % of the command under 2.5 m/s, 70 % at 2.5-5 and 77-85 % above 5, so the lead pulled away at 2-3 m/s^2 while
-# the car made 0.8 on a 1.4 request and the driver took over with the pedal. The tables are steady-state gain and
-# stay that way; this adds force only for the part of the command the car is not yet delivering, only at low speed.
-LAUNCH_BOOST_GAIN = 0.6
-LAUNCH_BOOST_MAX = 0.5  # m/s^2 of table force
-LAUNCH_BOOST_MIN_ACCEL = 0.5  # commands under this are creeping, not launching
-LAUNCH_BOOST_FULL_MPS = 4.0
-LAUNCH_BOOST_END_MPS = 8.0
 BRAKE_RATIO_LIMITS = (0.7, 1.5)
 
 
@@ -159,16 +150,6 @@ class SpeedTable:
       return False
     self.sums, self.weights = sums, weights
     return True
-
-
-def launch_boost(accel: float, a_ego: float, v_ego: float) -> float:
-  """Extra table force for a launch the car is under-delivering: zero once aEgo reaches the command or by 8 m/s."""
-  if not (math.isfinite(accel) and math.isfinite(a_ego) and math.isfinite(v_ego)):
-    return 0.0
-  if accel < LAUNCH_BOOST_MIN_ACCEL or v_ego >= LAUNCH_BOOST_END_MPS:
-    return 0.0
-  fade = min(1.0, (LAUNCH_BOOST_END_MPS - max(v_ego, 0.0)) / (LAUNCH_BOOST_END_MPS - LAUNCH_BOOST_FULL_MPS))
-  return float(np.clip(LAUNCH_BOOST_GAIN * (accel - a_ego), 0.0, LAUNCH_BOOST_MAX)) * fade
 
 
 def brake_command(accel: float, ratio: float) -> float:
@@ -292,11 +273,7 @@ class BoschLongitudinal:
         else:
           self.bosch_gas_factor_before_gasmax = self.bosch_gas_factor
           self.bosch_wind_factor_before_gasmax = self.bosch_wind_factor
-    self.launch_boost = 0.0
-    if (self.gas_table is not None and CC.longActive and actuators.longControlState == LongCtrlState.pid and
-        not CS.out.gasPressed and not CS.out.brakePressed):
-      self.launch_boost = launch_boost(self.accel, CS.out.aEgo, v_ego)
-    gas_lookup_input = (gas_pedal_force + self.launch_boost) * self.bosch_gas_factor
+    gas_lookup_input = gas_pedal_force * self.bosch_gas_factor
     self.gas = float(np.interp(gas_lookup_input, self.params.BOSCH_GAS_LOOKUP_BP, self.params.BOSCH_GAS_LOOKUP_V))
     self.gas = min(self.gas, max(60.0, self.bosch_last_gas + 60.0))
     self.bosch_last_gas = self.gas
