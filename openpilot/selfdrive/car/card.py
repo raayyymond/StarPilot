@@ -726,6 +726,16 @@ class Car:
       self.aol_card_intent.update(CS, fault_active=fault_active, now_ns=now_ns, native_rejection_ns=rejection_ns,
                                   standard_enabled=(host_enabled if getattr(self.aol_card_intent, 'observe_stock_engagement', False)
                                                     else host_control_enabled))
+      cleared = getattr(self.aol_card_intent, 'latch_clear_count', 0)
+      if cleared != getattr(self, '_aol_latch_clear_logged', 0):
+        # Observational: names the branch that dropped always-on lateral, once per drop.
+        self._aol_latch_clear_logged = cleared
+        try:
+          cloudlog.event('aol_latch_cleared', reason=getattr(self.aol_card_intent, 'latch_clear_reason', ''),
+                         transport_reset=bool(transport_reset), native_rejected=bool(rejected), fault_active=bool(fault_active),
+                         buttons=[(str(event.type), bool(event.pressed)) for event in CS.buttonEvents])
+        except Exception:
+          pass  # a diagnostic can never take the car interface down
       # Observe ordinary state directly: independent AOL actuator activity is
       # not evidence that ordinary preEnabled has become active engagement.
       engagement_ns = int(self.sm.logMonoTime.get('selfdriveState', 0))
@@ -906,6 +916,15 @@ class Car:
 
   def aol_honda_brake_source(self, CS, now_ns: int) -> int:
     observation = getattr(self, '_aol_can_observation', None)
+    settings = getattr(self, 'aol_settings', None)
+    if (not CS.brakePressed and observation is not None and observation[0] is CS and
+        settings is not None and settings.enabled and not any(settings.cancel_actions) and
+        qualified_honda_stock_aol(self.CP, marked_only=True)):
+      from openpilot.starpilot.car.honda.aol import cancel_press_ends_cruise_only
+      # An unmapped CANCEL press ends cruise only; it shares the brake's bounded lateral-intent hold.
+      received_ns = int(observation[1])
+      return received_ns if (cancel_press_ends_cruise_only(self.CP, CS) and
+                             0 < received_ns <= now_ns and now_ns - received_ns <= 30_000_000) else 0
     if (not CS.brakePressed or not qualified_honda_stock_aol(self.CP, marked_only=True) or
         observation is None or observation[0] is not CS):
       return 0

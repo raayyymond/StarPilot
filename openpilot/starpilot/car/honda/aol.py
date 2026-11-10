@@ -113,6 +113,21 @@ def classic_bosch_long_cancel_owner(CP) -> bool:
   return qualified_honda(CP) and not qualified_stock(CP)
 
 
+def cancel_press_ends_cruise_only(CP, CS) -> bool:
+  """A fresh CANCEL press on a classic-Bosch alpha-long owner: the panda drops longitudinal on the same CAN frame.
+
+  2026-11-09 route 0000002f t=790.87: the panda status sampled 5 ms after the press still carried the host's
+  longitudinal request, card read that as a transport fault and cleared the lateral latch. Presses whose panda
+  sample landed after the host withdrew (t=296.48, t=738.43) kept lateral. The brake pedal has the same race and
+  already holds lateral intent through it; CANCEL now uses that hold.
+  """
+  try:
+    return bool(classic_bosch_long_cancel_owner(CP) and
+                any(event.type == car.CarState.ButtonEvent.Type.cancel and event.pressed for event in CS.buttonEvents))
+  except (AttributeError, IndexError, TypeError, ValueError):
+    return False
+
+
 def physical_cancel_lateral_allowed(CP, CS, intent, native, *, settings, previous,
                                     source_ns, now_ns, axis_session_id) -> bool:
   """CANCEL withdraws longitudinal only while a granted classic-Bosch alpha-long LAT axis remains.

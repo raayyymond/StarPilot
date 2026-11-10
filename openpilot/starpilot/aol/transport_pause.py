@@ -775,7 +775,9 @@ class TransportPauseFeedback:
     from opendbc.car.honda.stock_aol import qualified
     from opendbc.car.structs import car
 
-    source_ns = self.honda_brake_ns or (brake_source_ns if cs.brakePressed else 0)
+    from openpilot.starpilot.car.honda.aol import cancel_press_ends_cruise_only
+    # Brake and CANCEL both make the panda drop longitudinal before the host withdraws its request.
+    source_ns = self.honda_brake_ns or (brake_source_ns if cs.brakePressed or cancel_press_ends_cruise_only(cp, cs) else 0)
     if (not qualified(cp, marked_only=True) or not latched or self.failed or self.paused or self.pending_event or
       not self.session or str(axis.sessionId) != self.session or
       not self.healthy_feedback_ns or not 0 <= now_ns - self.healthy_feedback_ns <= AXIS_MAX_AGE_NS or
