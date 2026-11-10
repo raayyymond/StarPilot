@@ -1386,6 +1386,24 @@ class Supervisor:
     """The projection connection is up and past its own Bluetooth work; the keeper may page the car now."""
     return getattr(self, "_status", {}).get("state") in ("streaming", "suspended")
 
+  def _start_bluetooth_trace(self) -> None:
+    """The controller's own account of the session's first minutes; never allowed to stop a session from starting."""
+    self._stop_bluetooth_trace()
+    try:
+      from openpilot.starpilot.system.starport.bt_trace import BluetoothTrace
+      self._bluetooth_trace = BluetoothTrace(self.log.directory, self.log).start()
+    except Exception as error:
+      self._bluetooth_trace = None
+      self.log("bt_trace_unavailable", error=str(error)[:120])
+
+  def _stop_bluetooth_trace(self) -> None:
+    trace, self._bluetooth_trace = getattr(self, "_bluetooth_trace", None), None
+    if trace is not None:
+      try:
+        trace.stop()
+      except Exception as error:
+        self.log("bt_trace_failed", error=str(error)[:120])
+
   def _stop_companion_keeper(self) -> None:
     keeper, self._companion_keeper = self._companion_keeper, None
     if keeper is not None:
@@ -1598,6 +1616,7 @@ class Supervisor:
              # What the owner chose, so a report can tell a built-in unit from a dongle and say which profile applied.
              setup={"type": {"wired": "usb", "headunitpad": "app", "openheadunit": "app"}.get(connection) or self.car_type(),
                     "profile": profile, "profile_source": profile_source})
+    self._start_bluetooth_trace()
     self._flush_reset_note()   # a handshake reset made while nothing was running
     lease = self._lease() if wireless else NoLease()
     attempt = 0
@@ -1669,6 +1688,7 @@ class Supervisor:
         self._release_phone()
       except Exception as error:
         self.log("bluetooth_release_failed", error=str(error))
+      self._stop_bluetooth_trace()
       self.log("session_stop")
       self.log.close()
       self.log.capture_system()
