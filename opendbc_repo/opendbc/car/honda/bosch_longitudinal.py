@@ -73,9 +73,11 @@ BOSCH_TABLE_LEARNER_CARS = frozenset((CAR.HONDA_ACCORD,))
 # while the Bosch brake was in charge; it tracks vehicle acceleration itself, so grade is NOT added back.
 # The 1.5 m/s knot, 2026-11-09 (routes 0000002b-2d): with the gas held steady the car delivered 0.59 of the command
 # in the first 3 s after a stop and 0.69 after, at 1-3 m/s, on a factor of 0.64; 0.82 at 3-5 m/s. That is gain, not lag,
-# and the 0 and 3 m/s knots could not hold it: 0.64 / 0.63 = 1.0. It learns from there like every other knot.
+# and the 0 and 3 m/s knots could not hold it. 0.64 / 0.63 = 1.0 is the factor the whole 1-3 m/s range needs; the table
+# interpolates to neighbours near 0.7, so the knot itself is 1.3 to average 1.06 across that range. It rarely sees a
+# learnable frame, so this start is what the car runs on for a long time.
 ACCORD_GAS_FACTOR_BP = [0.0, 1.5, 3.0, 6.0, 10.0, 20.0, 30.0, 35.0]
-ACCORD_GAS_FACTOR_V = [0.64, 1.0, 0.64, 0.55, 0.52, 0.50, 0.49, 0.37]
+ACCORD_GAS_FACTOR_V = [0.64, 1.3, 0.64, 0.55, 0.52, 0.50, 0.49, 0.37]
 ACCORD_BRAKE_RATIO_BP = [0.0, 5.0, 15.0, 25.0, 35.0]
 ACCORD_BRAKE_RATIO_V = [0.95, 1.08, 1.13, 1.07, 1.10]
 TABLE_UPDATE_HZ = 50  # update() runs on every other 100 Hz control frame

@@ -288,8 +288,8 @@ def test_a_saved_table_keeps_what_it_learned_when_a_knot_is_added_between_its_kn
   assert new.load(old.state())
   learned, now = dict(zip(old_bp, old.values(), strict=True)), dict(zip(ACCORD_GAS_FACTOR_BP, new.values(), strict=True))
   assert {knot: now[knot] for knot in old_bp} == learned, 'every old knot is exactly what the car had'
-  assert now[1.5] == 1.0 and new.weights[1] == 0.0, 'the new knot starts on its logged default'
-  assert new.value(1.5) == 1.0 and learned[0.0] < new.value(0.75) < 1.0
+  assert now[1.5] == 1.3 and new.weights[1] == 0.0, 'the new knot starts on its logged default'
+  assert new.value(1.5) == 1.3 and learned[0.0] < new.value(0.75) < 1.3
   assert SpeedTable(ACCORD_GAS_FACTOR_BP, ACCORD_GAS_FACTOR_V, GAS_FACTOR_LIMITS).load(new.state()), 'and round-trips after'
   duplicate = old.state()
   duplicate['bp'][1] = duplicate['bp'][0]
