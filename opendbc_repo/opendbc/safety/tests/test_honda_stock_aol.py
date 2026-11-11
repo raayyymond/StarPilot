@@ -131,6 +131,35 @@ class TestHondaStockAol(unittest.TestCase):
             self.stream(main=False)
             self.assertEqual(self.safety.aol_get_permission_mask(), 0)
 
+  def press(self, button):
+    scm = {"CRUISE_BUTTONS": button, "CRUISE_SETTING": 0}
+    if self.alt:
+      scm["MAIN_ON"] = 1
+    self.assertTrue(self.safety.safety_rx_hook(self.packet("SCM_BUTTONS", scm)))
+
+  def test_cancel_ends_cruise_and_keeps_the_lateral_request_on_bosch_alpha_long(self):
+    # 2026-11-10 route 00000033 t=513.72: a held CANCEL frame cleared the whole host request between pandad's
+    # write and its status read; the host saw lateral neither requested nor allowed and raised controlsMismatch.
+    for case in CASES:
+      alpha_long = case[1] == 20 and case[2] in (10, 11, 1058, 1059, 1570, 1571, 2082, 2083, 2211)
+      for button, name in ((2, "cancel"), (1, "main")):
+        with self.subTest(case=case[0], button=name):
+          self.configure(case)
+          self.stream()
+          self.normal_engage()
+          self.safety.aol_set_host_request(3)
+          self.assertEqual(self.safety.aol_get_permission_mask(), 3 if self.scoped else 0)
+          for _ in range(5):  # held: one frame every 40 ms
+            self.press(button)
+            self.assertFalse(self.safety.get_controls_allowed())
+            kept = self.scoped and alpha_long and name == "cancel"
+            self.assertEqual(self.safety.aol_get_request_mask(), 3 if kept else 0)
+            self.assertEqual(self.safety.aol_get_permission_mask(), 1 if kept else 0)
+          self.press(0)
+          self.assertFalse(self.safety.get_controls_allowed(), "a release never re-enters cruise")
+          self.safety.aol_set_host_request(0)
+          self.assertEqual(self.safety.aol_get_permission_mask(), 0, "the host can still withdraw lateral")
+
   def test_blocked_normal_edge_is_not_replayed_after_sources_recover(self):
     for case in CASES:
       for blocked in ("eps", "reverse", "brake", "missing", "expired", "request_expired"):

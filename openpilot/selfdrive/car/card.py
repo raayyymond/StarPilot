@@ -655,7 +655,7 @@ class Car:
           not CS.steerFaultTemporary and not CS.steerFaultPermanent and not CS.accFaulted and
           feedback.signature is not None and feedback.signature[5] == 'none' and
           not feedback.source_retention_started_ns and not feedback.longitudinal_cancel_ns and
-          not feedback.honda_brake_ns and not feedback.gm_withdrawal_ns and not feedback.failed and not feedback.paused and
+          not feedback.honda_brake_ns and not getattr(feedback, 'honda_cause_wait_ns', 0) and not feedback.gm_withdrawal_ns and not feedback.failed and not feedback.paused and
           not feedback.pending_event and not feedback.awaiting and not feedback.qualified and
           not feedback.retention_started_ns and not feedback.retention_qualified and not feedback.retention_pending and
           not any(e.immediateDisable or e.softDisable or e.userDisable for e in self.sm['onroadEvents']))

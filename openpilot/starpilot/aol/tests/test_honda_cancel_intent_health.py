@@ -30,19 +30,19 @@ class Peers:
     return getattr(self.messages[name], name)
 
 
-def sample(*, pressed=True, button=Cancel):
+def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False):
   """The panda sample of t=790.873: longitudinal dropped, the host still asking for it, lateral granted."""
   cp, _, _, _, _ = stock_proof()
   config = cp.safetyConfigs[0]
   slots = (PandaSlot(0, 'accord-panda', config.safetyModel.raw, STOCK_CLASSIC_LONG, 32, False),)
   native = SafetyState(1, True, NOW - 1_000_000, NOW + 199_000_000, config.safetyModel.raw, STOCK_CLASSIC_LONG,
-                       True, False, True, True, 'accord-panda', 'axis-session',
+                       True, panda_long, True, True, 'accord-panda', 'axis-session',
                        sourcePandaStatesMonoTime=NOW + 9_000_000_000, pandaInventory=slots)
   safety = messaging.new_message('aolSafetyWire', 0, valid=True, logMonoTime=native.observedMonoTime)
   safety.aolSafetyWire = encode_safety(native)
   pandas = messaging.new_message('pandaStates', 1, valid=True, logMonoTime=NOW)
   p = pandas.pandaStates[0]
-  p.safetyModel, p.safetyParam, p.alternativeExperience, p.controlsAllowed = config.safetyModel, STOCK_CLASSIC_LONG, 32, False
+  p.safetyModel, p.safetyParam, p.alternativeExperience, p.controlsAllowed = config.safetyModel, STOCK_CLASSIC_LONG, 32, panda_long
   axis = messaging.new_message('aolAxisState', valid=True, logMonoTime=NOW - 1_000_000)
   a = axis.aolAxisState
   a.sessionId = a.faultSessionId = 'axis-session'
@@ -50,6 +50,7 @@ def sample(*, pressed=True, button=Cancel):
   a.observedMonoTime, a.validUntilMonoTime = axis.logMonoTime, axis.logMonoTime + 30_000_000
   a.sourceCarStateMonoTime = axis.logMonoTime - 1000
   a.desiredLateral = a.lateralActive = a.nativeAcknowledged = True
+  a.desiredLongitudinal = a.longitudinalActive = combined
   events = messaging.new_message('onroadEvents', 1, valid=True, logMonoTime=NOW - 1_000_000)
   events.onroadEvents[0].name = 'buttonCancel'
   events.onroadEvents[0].userDisable = events.onroadEvents[0].noEntry = True
@@ -114,3 +115,51 @@ def test_an_unlatched_driver_gets_nothing_from_cancel():
   cp, cs, sm, feedback = sample()
   axis = sm['aolAxisState']
   assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW, latched=False, brake_source_ns=PRESS) is None
+
+
+def status_first():
+  """2026-11-10 route 00000034 t=539.375: the panda status with longitudinal dropped, 17 ms before the press."""
+  cp, cs, sm, feedback = sample(combined=True)
+  cs.buttonEvents = []
+  return cp, cs, sm, feedback
+
+
+def test_a_panda_status_ahead_of_the_press_waits_for_it_and_keeps_the_first_deadline():
+  cp, cs, sm, feedback = status_first()
+  assert card_for(cp, cs).aol_honda_brake_source(cs, NOW) == 0
+  assert not feedback.observe(sm, cp, cs, NOW, latched=True), 'the latch waits one axis age for a cause'
+  assert feedback.honda_cause_wait_ns == NOW and not feedback.honda_brake_ns
+  cs.buttonEvents = [structs.CarState.ButtonEvent(type=Cancel, pressed=True)]
+  later = NOW + 1_000_000
+  source = card_for(cp, cs, received_ns=later - 100_000).aol_honda_brake_source(cs, later)
+  assert source == later - 100_000
+  assert not feedback.observe(sm, cp, cs, later, latched=True, brake_source_ns=source), 'the press explains it'
+  assert feedback.honda_brake_ns == NOW and not feedback.honda_cause_wait_ns, 'the hold runs from the first sample'
+
+
+def test_a_longitudinal_drop_with_no_cause_still_clears_lateral_one_axis_age_later():
+  cp, cs, sm, feedback = status_first()
+  axis = sm['aolAxisState']
+  assert not feedback.observe(sm, cp, cs, NOW, latched=True)
+  held = feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW + 20_000_000, latched=True, brake_source_ns=0)
+  assert held is not None and feedback.honda_cause_wait_ns == NOW, 'held samples never renew the wait'
+  for late in (NOW + 30_000_001, NOW + 40_000_000, NOW + 90_000_000):
+    assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, late, latched=True, brake_source_ns=0) is None
+    assert feedback.honda_cause_wait_ns == NOW, 'and an expired wait never starts again'
+  assert feedback.observe(sm, cp, cs, NOW + 30_000_001, latched=True), 'the fault stands'
+
+
+def test_the_wait_needs_the_panda_to_have_dropped_longitudinal_while_the_host_still_asks():
+  cp, cs, sm, feedback = sample(combined=True, panda_long=True)
+  cs.buttonEvents = []
+  axis = sm['aolAxisState']
+  assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW, latched=True, brake_source_ns=0) is None
+  assert not feedback.honda_cause_wait_ns, 'longitudinal still granted: nothing to explain'
+  cp, cs, sm, feedback = sample(combined=False)
+  cs.buttonEvents = []
+  axis = sm['aolAxisState']
+  assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW, latched=True, brake_source_ns=0) is None
+  assert not feedback.honda_cause_wait_ns, 'the host is not asking for longitudinal'
+  cp, cs, sm, feedback = status_first()
+  feedback.failed = True
+  assert feedback._honda_brake_lateral_current(sm, cp, cs, sm['aolAxisState'], NOW, latched=True, brake_source_ns=0) is None

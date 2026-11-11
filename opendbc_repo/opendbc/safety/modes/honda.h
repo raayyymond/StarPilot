@@ -162,7 +162,12 @@ static void honda_rx_hook(const CANPacket_t *msg) {
     // exit controls once main or cancel are pressed
     if ((button == HONDA_BTN_MAIN) || (button == HONDA_BTN_CANCEL)) {
       controls_allowed = false;
-      aol_set_host_request(0U);
+      // On a stock-AOL Bosch alpha-long car CANCEL ends cruise only, as controls_allowed alone does in stock
+      // openpilot. Clearing the host request here also dropped lateral on every held CANCEL frame until pandad's
+      // next 10 Hz write (2026-11-10 route 00000033 t=513.72: a status read in that gap raised controlsMismatch).
+      if ((button != HONDA_BTN_CANCEL) || !honda_bosch_long || !honda_stock_aol_flag(HONDA_STOCK_ENABLED)) {
+        aol_set_host_request(0U);
+      }
     }
     cruise_button_prev = button;
   }

@@ -293,6 +293,7 @@ class TransportPauseFeedback:
     self.longitudinal_cancel_ns = 0
     self.last_cancel_source_ns = 0
     self.honda_brake_ns = 0
+    self.honda_cause_wait_ns = 0
     self.gm_withdrawal_ns = 0
     self.retention_qualified = False
     self.retention_pending = False
@@ -775,9 +776,24 @@ class TransportPauseFeedback:
     from opendbc.car.honda.stock_aol import qualified
     from opendbc.car.structs import car
 
-    from openpilot.starpilot.car.honda.aol import cancel_press_ends_cruise_only
+    from openpilot.starpilot.car.honda.aol import cancel_press_ends_cruise_only, classic_bosch_long_cancel_owner
     # Brake and CANCEL both make the panda drop longitudinal before the host withdraws its request.
-    source_ns = self.honda_brake_ns or (brake_source_ns if cs.brakePressed or cancel_press_ends_cruise_only(cp, cs) else 0)
+    cause_ns = brake_source_ns if cs.brakePressed or cancel_press_ends_cruise_only(cp, cs) else 0
+    source_ns = self.honda_brake_ns or cause_ns
+    # The panda's status can reach card before the CAN batch that carries the press or the pedal
+    # (2026-11-10 route 00000034 t=539.38: 17 ms). Wait one axis age for the cause, once; the hold that
+    # follows keeps this first deadline. Without a cause the fault stands, one axis age late.
+    waiting = False
+    if not self.honda_brake_ns:
+      wait_ns = self.honda_cause_wait_ns
+      if 0 < wait_ns <= now_ns <= wait_ns + AXIS_MAX_AGE_NS:
+        waiting, source_ns = not cause_ns, wait_ns
+      elif not wait_ns and not cause_ns and not self.failed and axis.desiredLongitudinal:
+        try:
+          waiting = bool(not sm['pandaStates'][0].controlsAllowed and classic_bosch_long_cancel_owner(cp))
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+          waiting = False
+        source_ns = now_ns if waiting else 0
     if (not qualified(cp, marked_only=True) or not latched or self.failed or self.paused or self.pending_event or
       not self.session or str(axis.sessionId) != self.session or
       not self.healthy_feedback_ns or not 0 <= now_ns - self.healthy_feedback_ns <= AXIS_MAX_AGE_NS or
@@ -799,9 +815,11 @@ class TransportPauseFeedback:
     native = independent_lateral_health(sm, cp, cs, self.session, now_ns)
     if (native is None or not native.requestedLateral or not native.lateralAllowed or
         not native.requestedLongitudinal or native.observedMonoTime < self.healthy_native_ns or
-        (native.pandaSerial, tuple(p.hardwareSerial for p in native.pandaInventory)) != self.healthy_inventory):
+        (native.pandaSerial, tuple(p.hardwareSerial for p in native.pandaInventory)) != self.healthy_inventory or
+        waiting and native.longitudinalAllowed):
       return None
-    self.honda_brake_ns = source_ns
+    self.honda_cause_wait_ns = source_ns if waiting else 0
+    self.honda_brake_ns = 0 if waiting else source_ns
     return native
 
   def _longitudinal_cancel_current(self, sm, cp, cs, axis, now_ns, *, latched, cancel_source_ns, withdrawal_required=True) -> SafetyState | None:
@@ -1643,6 +1661,7 @@ class TransportPauseFeedback:
         self.pending_event = 0
         self.failed = False
         self.longitudinal_cancel_ns = 0
+        self.honda_cause_wait_ns = 0
         continuity = True
       if self.failed:
         self.longitudinal_cancel_ns = 0
@@ -1662,6 +1681,7 @@ class TransportPauseFeedback:
           self.gm_withdrawal_ns = 0
         if native is not None and not native.requestedLongitudinal:
           self.honda_brake_ns = 0
+          self.honda_cause_wait_ns = 0
         if (not latched or native is not None and not native.requestedLongitudinal or
             self.longitudinal_cancel_ns and now_ns - self.longitudinal_cancel_ns > SAFETY_MAX_AGE_NS):
           self.longitudinal_cancel_ns = 0
