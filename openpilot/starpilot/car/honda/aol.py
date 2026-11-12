@@ -124,6 +124,16 @@ def long_mask_proves_controls_denied(CP) -> bool:
   return bool(qualified_stock(CP, marked_only=True) and classic_bosch_long_cancel_owner(CP))
 
 
+def held_brake_renews_lateral(CP) -> bool:
+  """A held brake in lateral-only does not stop a fresh carState renewing the expired lateral output.
+
+  2026-11-11 route 00000038 t=476.297: one 28 ms CAN gap at 3 m/s, cruise off, brake held. The published output
+  expired at 30 ms and the fresh carState could not renew it because the held brake counts as a user disable, so
+  always-on lateral ended on a critical fault. Route 00000039 t=261.170, a 26 ms gap with no pedal, renewed.
+  """
+  return bool(qualified_stock(CP, marked_only=True) and classic_bosch_long_cancel_owner(CP))
+
+
 def cancel_press_ends_cruise_only(CP, CS) -> bool:
   """A fresh CANCEL press on a classic-Bosch alpha-long owner: the panda drops longitudinal on the same CAN frame.
 

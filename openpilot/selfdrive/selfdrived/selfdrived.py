@@ -39,6 +39,7 @@ from openpilot.starpilot.aol.vehicle import native_bootstrap_supported
 from opendbc.car.gm.steering_authority import monitored_profile
 from openpilot.starpilot.car.gm.steering_companion import SteeringCompanion
 from openpilot.starpilot.car.hyundai.aol import qualified_ioniq6
+from openpilot.starpilot.car.honda.aol import held_brake_renews_lateral as honda_held_brake_renews_lateral
 from opendbc.car.gm.values import GMFlags, is_volt_ascm_longitudinal
 from openpilot.starpilot.aol.intent import read_settings
 from openpilot.starpilot.aol.intent_companion import IntentCompanion
@@ -872,7 +873,8 @@ class SelfdriveD:
     """Recognize an already applied override; never admit a new physical edge."""
     if (proof is None or not (qualified_ioniq6(self.CP) or qualified_gm(self.CP) or
         (self.CP.brand == 'hyundai' and self.source_deadline_deferral_supported()) or
-        self.ford_source_deadline_supported()) or not self.sm.seen['carControl'] or
+        self.ford_source_deadline_supported() or honda_held_brake_renews_lateral(self.CP)) or
+        not self.sm.seen['carControl'] or
         not self.sm.valid['carControl'] or self.sm['carControl'].longActive or
         not 0 < int(self.sm.logMonoTime['carControl']) <= now_ns or
         not fresh_successor and now_ns - int(self.sm.logMonoTime['carControl']) > INTENT_MAX_AGE_NS):
@@ -1427,6 +1429,9 @@ class SelfdriveD:
       self.aol_fault_reason = 'critical'
       self.aol_authority_lost = True
       self.events.add(EventName.controlsMismatch)
+      cloudlog.event('aol_expiry_fault', path='source', was_enabled=bool(was_enabled),
+                     source_age_ms=(now_ns - source_ns) / 1e6,
+                     events=[str(e.name) for e in self.events.to_msg()])
       if ET.IMMEDIATE_DISABLE not in self.state_machine.current_alert_types:
         self.state_machine.current_alert_types.append(ET.IMMEDIATE_DISABLE)
 
@@ -1494,7 +1499,8 @@ class SelfdriveD:
         user_disable = any(event.userDisable and event.name not in
           (EventName.buttonCancel, EventName.pcmDisable, EventName.pedalPressed) for event in self.events.to_msg())
     held_brake, held_gas = self.held_axis_override_wait(CS, proof, now_ns,
-      fresh_successor=fresh_successor and (qualified_gm(self.CP) or self.ford_source_deadline_supported()))
+      fresh_successor=fresh_successor and (qualified_gm(self.CP) or self.ford_source_deadline_supported() or
+                                           honda_held_brake_renews_lateral(self.CP)))
     if user_disable and (held_brake or self.ford_source_deadline_supported() and held_gas):
       # A fresh same-owner source can establish its own LAT permission after
       # an old output expires. Held-brake continuity does not renew that output;
@@ -1564,6 +1570,9 @@ class SelfdriveD:
       self.aol_fault_reason = 'critical'
       self.aol_authority_lost = True
       self.events.add(EventName.controlsMismatch)
+      cloudlog.event('aol_expiry_fault', path='continuity', was_enabled=bool(was_enabled),
+                     source_age_ms=(now_ns - source_ns) / 1e6,
+                     events=[str(e.name) for e in self.events.to_msg()])
       if ET.IMMEDIATE_DISABLE not in self.state_machine.current_alert_types:
         self.state_machine.current_alert_types.append(ET.IMMEDIATE_DISABLE)
     return True
