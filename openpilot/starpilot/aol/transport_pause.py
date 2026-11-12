@@ -776,7 +776,8 @@ class TransportPauseFeedback:
     from opendbc.car.honda.stock_aol import qualified
     from opendbc.car.structs import car
 
-    from openpilot.starpilot.car.honda.aol import cancel_press_ends_cruise_only, classic_bosch_long_cancel_owner
+    from openpilot.starpilot.car.honda.aol import (cancel_press_ends_cruise_only, classic_bosch_long_cancel_owner,
+                                                   long_mask_proves_controls_denied)
     # Brake and CANCEL both make the panda drop longitudinal before the host withdraws its request.
     cause_ns = brake_source_ns if cs.brakePressed or cancel_press_ends_cruise_only(cp, cs) else 0
     source_ns = self.honda_brake_ns or cause_ns
@@ -790,7 +791,9 @@ class TransportPauseFeedback:
         waiting, source_ns = not cause_ns, wait_ns
       elif not wait_ns and not cause_ns and not self.failed and axis.desiredLongitudinal:
         try:
-          waiting = bool(not sm['pandaStates'][0].controlsAllowed and classic_bosch_long_cancel_owner(cp))
+          # pandaStates is 10 Hz and can trail the panda's own mask by 100 ms; where the mask is proof, use it.
+          waiting = bool(classic_bosch_long_cancel_owner(cp) and
+                         (long_mask_proves_controls_denied(cp) or not sm['pandaStates'][0].controlsAllowed))
         except (AttributeError, IndexError, KeyError, TypeError, ValueError):
           waiting = False
         source_ns = now_ns if waiting else 0

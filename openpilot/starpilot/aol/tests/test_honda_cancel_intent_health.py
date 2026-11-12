@@ -30,7 +30,7 @@ class Peers:
     return getattr(self.messages[name], name)
 
 
-def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False):
+def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False, health_long=None):
   """The panda sample of t=790.873: longitudinal dropped, the host still asking for it, lateral granted."""
   cp, _, _, _, _ = stock_proof()
   config = cp.safetyConfigs[0]
@@ -42,7 +42,8 @@ def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False):
   safety.aolSafetyWire = encode_safety(native)
   pandas = messaging.new_message('pandaStates', 1, valid=True, logMonoTime=NOW)
   p = pandas.pandaStates[0]
-  p.safetyModel, p.safetyParam, p.alternativeExperience, p.controlsAllowed = config.safetyModel, STOCK_CLASSIC_LONG, 32, panda_long
+  p.safetyModel, p.safetyParam, p.alternativeExperience = config.safetyModel, STOCK_CLASSIC_LONG, 32
+  p.controlsAllowed = panda_long if health_long is None else health_long
   axis = messaging.new_message('aolAxisState', valid=True, logMonoTime=NOW - 1_000_000)
   a = axis.aolAxisState
   a.sessionId = a.faultSessionId = 'axis-session'
@@ -163,3 +164,26 @@ def test_the_wait_needs_the_panda_to_have_dropped_longitudinal_while_the_host_st
   cp, cs, sm, feedback = status_first()
   feedback.failed = True
   assert feedback._honda_brake_lateral_current(sm, cp, cs, sm['aolAxisState'], NOW, latched=True, brake_source_ns=0) is None
+
+
+def test_the_wait_does_not_need_the_10_hz_panda_health_to_have_caught_up():
+  """2026-11-11 route 00000036 t=231.655 and t=520.857: pandaStates still said allowed 90 ms after the mask dropped."""
+  cp, cs, sm, feedback = sample(combined=True, health_long=True)
+  cs.buttonEvents = []
+  assert sm['pandaStates'][0].controlsAllowed
+  assert not feedback.observe(sm, cp, cs, NOW, latched=True), 'the mask alone starts the wait'
+  assert feedback.honda_cause_wait_ns == NOW
+  cs.brakePressed = True
+  assert not feedback.observe(sm, cp, cs, NOW + 5_000_000, latched=True, brake_source_ns=NOW + 4_000_000), 'the pedal explains it'
+  assert feedback.honda_brake_ns == NOW and not feedback.honda_cause_wait_ns
+
+
+def test_the_accord_mask_is_the_proof_only_for_the_stock_owned_alpha_long_car():
+  from openpilot.starpilot.car.honda.aol import long_mask_proves_controls_denied
+  cp, _, _, _, _ = stock_proof()
+  assert long_mask_proves_controls_denied(cp)
+  cp.openpilotLongitudinalControl = False
+  assert not long_mask_proves_controls_denied(cp)
+  cp, _, _, _, _ = stock_proof()
+  cp.alternativeExperience = 0
+  assert not long_mask_proves_controls_denied(cp)

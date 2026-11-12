@@ -1934,8 +1934,12 @@ class SelfdriveD:
     # edge: honor LONG withdrawal while the existing native LAT grant stands.
     # Ioniq6 also checks the physical brake before its separately published host sample.
     # Retain only its already granted LAT; all proof, health and LONG withdrawal gates remain.
+    # The stock-AOL Accord's panda parses brake and CANCEL before the host and grants LONG on
+    # controls_allowed alone, so its LAT-only mask is the same proof while the 10 Hz health trails it.
     # The exact vehicle policies and all proof/health checks above remain required.
+    from openpilot.starpilot.car.honda.aol import long_mask_proves_controls_denied as honda_long_mask_proof
     return bool(ordinary_ford or gm_native_accepts_cp(self.CP, native.safetyModel, native.safetyParam) or
+                honda_long_mask_proof(self.CP) or
                 early_native_long_withdrawal_supported(self.CP) or
                 toyota_aol_qualified(self.CP, marked_only=True) or
                 not native.pandaInventory[owners[0]].controlsAllowed and
@@ -2171,6 +2175,18 @@ class SelfdriveD:
                                'availabilityPause' if ordinary_availability or cold_main_wait else
                                'critical' if self.aol_authority_lost or self.events.contains(ET.IMMEDIATE_DISABLE) else
                                'availabilityPause' if availability or aol_hard_soft_fault else 'transportPause' if pause else 'none')
+      if self.aol_fault_reason != previous_fault_reason and self.aol_fault_reason != 'none':
+        # The native wire is not logged; without this a fault names no cause (2026-11-11 route 00000036).
+        cloudlog.event('aol_fault', reason=self.aol_fault_reason, upgraded=bool(upgraded), pause=bool(pause),
+          lost_active=bool(lost_active_aol), lost_companion=bool(lost_companion), lost_permission=bool(lost_permission),
+          lost_honda_lateral=bool(lost_honda_lateral_grant), availability=bool(availability),
+          ordinary_availability=bool(ordinary_availability), publication_expiry=bool(publication_expiry),
+          hard_soft=bool(aol_hard_soft_fault), source_current=bool(source_current), driver_override=bool(driver_override),
+          source_age_ms=(now_ns - self.aol_car_state_log_ns) / 1e6 if self.aol_car_state_log_ns else -1,
+          native=None if native is None else (bool(native.requestedLateral), bool(native.lateralAllowed),
+            bool(native.requestedLongitudinal), bool(native.longitudinalAllowed),
+            tuple(bool(slot.controlsAllowed) for slot in native.pandaInventory)),
+          events=[str(name) for name in self.events.names])
       if self.aol_authority_lost or pause:
         self.events.add(EventName.controlsMismatch)
         lost_active_aol |= pause

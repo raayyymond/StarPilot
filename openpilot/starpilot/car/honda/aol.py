@@ -113,6 +113,17 @@ def classic_bosch_long_cancel_owner(CP) -> bool:
   return qualified_honda(CP) and not qualified_stock(CP)
 
 
+def long_mask_proves_controls_denied(CP) -> bool:
+  """Stock-AOL classic-Bosch alpha long: lateral granted with longitudinal denied means controls_allowed fell.
+
+  The panda grants longitudinal on controls_allowed alone and keeps lateral on the latch token, and it parses the
+  brake and CANCEL before the host does. 2026-11-11 route 00000036 t=231.655 (brake) and t=520.857 (CANCEL): that
+  mask reached selfdrived 5 ms before the carState with the cause, while the 10 Hz pandaStates still said allowed
+  for another 90 ms, and it was read as a lost permission.
+  """
+  return bool(qualified_stock(CP, marked_only=True) and classic_bosch_long_cancel_owner(CP))
+
+
 def cancel_press_ends_cruise_only(CP, CS) -> bool:
   """A fresh CANCEL press on a classic-Bosch alpha-long owner: the panda drops longitudinal on the same CAN frame.
 
