@@ -37,6 +37,41 @@ class TestLaneFeedback(unittest.TestCase):
     event = feedback_message(None, 0., False, model_mono_time=0, car_control_mono_time=0, valid=False)
     self.assertEqual(event.starpilotLateralState.laneCentering.reason, 'inactive')
 
+  def test_blendful_side_shows_only_without_a_classic_correction_and_while_the_drive_is_live(self):
+    from openpilot.starpilot.lateral import lane_feedback
+    from openpilot.starpilot.lateral.lane_feedback import BLENDFUL_POLL_NS, blendful_direction
+    saved = {'side': -1, 'reads': 0}
+
+    def read():
+      saved['reads'] += 1
+      return saved['side']
+
+    def fresh():
+      lane_feedback._blendful.update(read_ns=None, direction=0)
+
+    self.addCleanup(fresh)
+    with patch.object(lane_feedback, '_saved_blendful_direction', read):
+      fresh()
+      sm, now = self.reader(applied=0.0, requested=0.0)
+      self.assertEqual(blendful_direction(sm, now, 0, read=read), -1)
+      saved['side'] = 1
+      self.assertEqual(blendful_direction(sm, now + BLENDFUL_POLL_NS - 1, 0, read=read), -1)  # polled, not read every frame
+      self.assertEqual(saved['reads'], 1)
+      self.assertEqual(blendful_direction(sm, now + BLENDFUL_POLL_NS, 0, read=read), 1)
+      for stale in (lambda sm: sm.alive.__setitem__('modelV2', False), lambda sm: sm.valid.__setitem__('carControl', False)):
+        sm, now = self.reader(applied=0.0, requested=0.0)
+        stale(sm)
+        self.assertEqual(blendful_direction(sm, now, 0, read=read), 0)
+      sm, now = self.reader(applied=0.0, requested=0.0)
+      self.assertEqual(blendful_direction(sm, now, sm.frame, read=read), 0)  # nothing received in this drive yet
+      self.assertEqual(blendful_direction(sm, now + MAX_AGE_NS + 1, 0, read=read), 0)
+
+      def broken():
+        raise FileNotFoundError
+
+      fresh()
+      self.assertEqual(blendful_direction(sm, now, 0, read=broken), 0)
+
   def test_real_messages_show_applied_sign_and_keep_legacy_fields_inactive(self):
     for correction, expected in ((0.0003, 1), (-0.0003, -1), (0.0, 0), (0.0000005, 0)):
       sm, now = self.reader(applied=correction, requested=0.0005 if correction >= 0 else -0.0005)

@@ -6,6 +6,9 @@ from openpilot.starpilot.lateral.blendful import Blendful
 
 KEY = 'LaneCenteringBlendful'
 CLASSIC_KEY = 'LaneCentering'
+DIRECTION_KEY = 'LaneCenteringBlendfulDirection'  # -1 left, 0 none, +1 right: the side the correction steers toward
+DIRECTION_ON = 0.005  # m/s^2 of lateral acceleration the correction must ask for before a lane line turns blue
+DIRECTION_OFF = 0.002
 REFRESH_FRAMES = 20  # 1 s of model frames
 
 
@@ -32,6 +35,8 @@ class BlendfulHost:
     self.enabled = False
     self.frame = 0
     self.applied = 0.0
+    self.direction = 0
+    self.published: int | None = None
 
   def strip(self, prev_action, lat_active: bool) -> None:
     """Before the model's action call: the previous action it smooths from is its own, without the correction."""
@@ -49,4 +54,19 @@ class BlendfulHost:
     if correction:
       action.desiredCurvature = base + correction
     self.applied = float(action.desiredCurvature) - base
+    self._publish_direction(self.applied * max(v_ego, 0.0) ** 2)
     return self.applied
+
+  def _publish_direction(self, lateral_accel: float) -> None:
+    """Tell the lane-line display which side the correction steers toward; written only when it changes."""
+    side = (lateral_accel > 0) - (lateral_accel < 0)
+    if abs(lateral_accel) > DIRECTION_ON:
+      self.direction = side
+    elif abs(lateral_accel) < DIRECTION_OFF or side != self.direction:
+      self.direction = 0
+    if self.direction != self.published:
+      try:
+        self.params.put(DIRECTION_KEY, self.direction)
+      except Exception:
+        pass  # display only: an unregistered key or a failed write never touches the correction
+      self.published = self.direction

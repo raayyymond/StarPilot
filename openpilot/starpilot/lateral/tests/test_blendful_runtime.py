@@ -6,14 +6,18 @@ import pytest
 
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.starpilot.lateral.blendful_runtime import BlendfulHost, CLASSIC_KEY, KEY, REFRESH_FRAMES, enabled
+from openpilot.starpilot.lateral.blendful_runtime import BlendfulHost, CLASSIC_KEY, DIRECTION_KEY, KEY, REFRESH_FRAMES, enabled
 
 X = np.array(ModelConstants.X_IDXS)
 
 
 class SavedParams:
-  def __init__(self, root, registered=(KEY, CLASSIC_KEY)):
-    self.root, self.registered = root, registered
+  def __init__(self, root, registered=(KEY, CLASSIC_KEY, DIRECTION_KEY)):
+    self.root, self.registered, self.writes = root, registered, []
+
+  def put(self, key, value):
+    self.get_param_path(key)
+    self.writes.append((key, value))
 
   def get_param_path(self, key):
     if key not in self.registered:
@@ -86,7 +90,7 @@ def test_on_pulls_toward_the_lane_center_and_stays_out_of_the_models_smoothing(t
   host = BlendfulHost(params)
   published, model_only = run(host, 5.0, model=0.001, tau=0.5)
   correction = published - model_only
-  assert correction[-1] * 20.0 ** 2 > 0.02  # m/s^2 toward a lane center 0.5 m to the left
+  assert correction[-1] * 20.0 ** 2 > 0.02  # m/s^2 toward a lane center 0.5 m to the right
   assert np.all(np.diff(correction) * 20.0 ** 2 <= 0.5 * DT_MDL + 1e-9)  # builds at Blendful's own jerk limit
   # the model's smoothed action converges on the model's demand alone; the correction does not compound through it
   assert model_only[-1] == pytest.approx(0.001, rel=1e-3)
@@ -104,3 +108,21 @@ def test_inactive_releases_and_live_toggle_off_drops_the_correction(tmp_path):
   params.save(**{KEY: b'0'})
   published, model_only = run(host, (REFRESH_FRAMES + 1) * DT_MDL)
   assert published[-1] == model_only[-1] and host.applied == 0.0
+
+
+def test_publishes_the_side_it_steers_toward_only_when_it_changes(tmp_path):
+  params = SavedParams(tmp_path)
+  params.save(**{KEY: b'1'})
+  host = BlendfulHost(params)
+  run(host, 5.0, center=0.5)  # lane center to the right (model y is positive right)
+  run(host, 8.0, center=-0.5)
+  run(host, 3.0, active=False)
+  assert params.writes == [(DIRECTION_KEY, 0), (DIRECTION_KEY, 1), (DIRECTION_KEY, -1), (DIRECTION_KEY, 0)]
+
+
+def test_a_params_build_without_the_side_key_still_corrects(tmp_path):
+  params = SavedParams(tmp_path, registered=(KEY, CLASSIC_KEY))
+  params.save(**{KEY: b'1'})
+  host = BlendfulHost(params)
+  run(host, 5.0)
+  assert host.applied > 0 and host.direction == 1 and params.writes == []

@@ -123,6 +123,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AolBrakePauseSpeedMps", {PERSISTENT, FLOAT}},
     {"LaneCentering", {PERSISTENT, BOOL, "0"}},
     {"LaneCenteringBlendful", {PERSISTENT, BOOL, "0"}},
+    {"LaneCenteringBlendfulDirection", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT, "0"}},
     {"LaneCenteringPauseOnSignal", {PERSISTENT, BOOL, "1"}},
     {"LaneCenterOffset", {PERSISTENT, FLOAT, "0.0"}},
     {"LaneCenteringE2EAuthority", {PERSISTENT, FLOAT, "0.5"}},
