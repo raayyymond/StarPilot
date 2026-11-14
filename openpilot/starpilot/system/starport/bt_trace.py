@@ -6,6 +6,13 @@ start of each session, keeps only the command and event headers with their addre
 (no payloads, no keys, no names), masks addresses to their last byte, and writes them to bt_trace.txt beside the
 session logs. Link-level connects and disconnects also go into the session log, on the same timeline as
 hfp_connected and video_focus.
+
+2026-11-13: btmon shortens a header to 80 columns when its output is not a terminal ("HCI Event: Connect Re.. (0x04)"),
+so no link event ever matched by name and none reached the session log; they are recognised by their code now. The
+traces of sessions 55 and 56 showed the Honda's link up for 68 s with no authentication and no hands-free, and could
+not show whether the Honda asked for anything on it, because every data packet was dropped. Connection signalling is
+kept now: the L2CAP, SDP, AVDTP and RFCOMM control headers with their channel, result and status lines (which service
+was asked for and how it was answered), still without any payload; streams and AT commands stay out.
 """
 import re
 import subprocess
@@ -21,10 +28,23 @@ COMMAND = ("sudo", "-n", "stdbuf", "-oL", "timeout", "--signal=INT", "{seconds}"
 STOP_COMMAND = ("sudo", "-n", "pkill", "-INT", "-x", "btmon")
 HEADER = re.compile(r"^[<>@=] ")
 PAYLOAD = ("ACL Data", "SCO Data", "ISO Data")
-DETAIL = re.compile(r"^\s+(Address|Peer address|BD_ADDR|LE Address|Handle|Status|Reason|Link type|Role|Error)\b")
+DETAIL = re.compile(r"^\s+(Address|Peer address|BD_ADDR|LE Address|Handle|Status|Reason|Link type|Role|Error|Mode|Interval)\b")
 LINK_EVENTS = ("Connect Request", "Connect Complete", "Connection Complete", "Disconnect Complete",
                "Disconnection Complete", "Create Connection", "Accept Connection", "Reject Connection",
                "HCI Command: Disconnect", "Device Connected", "Device Disconnected", "Connect Failed")
+# The same events by code: btmon shortens the name to fit 80 columns ("Connect Re..", or all of it: "HCI Command:..."),
+# never the code.
+CODED = re.compile(r"^[<>@] (HCI Event|HCI Command|MGMT Event):.*?\((0x[0-9a-fx|]+)\) plen")
+LINK_CODES = {
+  "HCI Event": {"0x03": "Connect Complete", "0x04": "Connect Request", "0x05": "Disconnect Complete"},
+  "HCI Command": {"0x01|0x0005": "Create Connection", "0x01|0x0006": "Disconnect",
+                  "0x01|0x0009": "Accept Connection Request", "0x01|0x000a": "Reject Connection Request"},
+  "MGMT Event": {"0x000b": "Device Connected", "0x000c": "Device Disconnected", "0x000d": "Connect Failed"},
+}
+# Under an ACL data header: connection signalling is kept, everything else on the link (streams, AT commands) is not.
+SIGNALLING = re.compile(r"^\s+(L2CAP: |SDP: |AVDTP: |RFCOMM: (?!Unnumbered Info))")
+SIGNALLING_CHANNEL = re.compile(r"^\s+Channel: \d+ len \d+ \[PSM \d+")
+SIGNALLING_DETAIL = re.compile(r"^\s+(PSM|Source CID|Destination CID|Result|Status|Type|Reason)\b")
 STAMP = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s*$")
 TRAILER = re.compile(r"\s+(plen \d+|\{0x[0-9a-fA-F]+\}|#\d+|\[hci\d+\]).*$")
 FIELD = re.compile(r"^\s+([A-Za-z_ ]+?):\s*(.*)$")
@@ -36,20 +56,48 @@ class TraceFilter:
   def __init__(self):
     self.keeping = False
     self.event: dict | None = None
+    self.held: str | None = None   # an ACL data header (and its channel line) not yet known to be signalling
+    self.signalling = False        # the ACL data block being read is connection signalling
+
+  @staticmethod
+  def link_event(line: str) -> str | None:
+    """The name of a link-level event, whether btmon wrote its name out or shortened it."""
+    coded = CODED.match(line)
+    if coded:
+      name = LINK_CODES[coded.group(1)].get(coded.group(2))
+      if name:
+        return f"{coded.group(1)}: {name} ({coded.group(2)})"
+    if any(word in line for word in LINK_EVENTS):
+      return TRAILER.sub("", line[2:]).strip()[:80]
+    return None
 
   def feed(self, line: str) -> tuple[str | None, dict | None]:
     line = line.rstrip("\r\n")
     if HEADER.match(line):
       finished, self.event = self.event, None
+      self.held, self.signalling = None, False
       self.keeping = not any(word in line for word in PAYLOAD)
       if not self.keeping:
+        if "ACL Data" in line:
+          self.held = redact(line.encode()).decode()
         return None, finished
-      if any(word in line for word in LINK_EVENTS):
+      what = self.link_event(line)
+      if what:
         stamp = STAMP.search(line)
-        self.event = {"what": TRAILER.sub("", line[2:]).strip()[:80],
-                      "direction": {"<": "sent", ">": "received"}.get(line[0], "host"),
+        self.event = {"what": what, "direction": {"<": "sent", ">": "received"}.get(line[0], "host"),
                       "at": stamp.group(1) if stamp else ""}
       return redact(line.encode()).decode(), finished
+    if self.held is not None:
+      if SIGNALLING.match(line):
+        kept, self.held, self.signalling = f"{self.held}\n{redact(line.encode()).decode()}", None, True
+        return kept, None
+      if SIGNALLING_CHANNEL.match(line):
+        self.held = f"{self.held}\n{line}"   # which service's channel; written only if signalling follows on it
+      return None, None
+    if self.signalling:
+      if SIGNALLING.match(line) or SIGNALLING_DETAIL.match(line):
+        return redact(line.encode()).decode(), None
+      return None, None
     if self.keeping and DETAIL.match(line):
       kept = redact(line.encode()).decode()
       field = FIELD.match(kept)

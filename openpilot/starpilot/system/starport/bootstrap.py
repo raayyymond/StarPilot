@@ -318,6 +318,7 @@ class WirelessBootstrap:
     self.link_closed = threading.Event()  # set when keepalive saw the head unit close or break RFCOMM
     self.restarted = threading.Event()  # keepalive saw a new WifiVersionRequest and on_restart() took it
     self.restart_payload = b""
+    self.endpoint: Endpoint | None = None  # the car's projection address, once it has sent it
     self.on_restart: Callable[[], bool] = lambda: False  # supervisor: True while the projection connection is still being set up
 
   def only_not_ready(self) -> bool:
@@ -524,6 +525,7 @@ class WirelessBootstrap:
       else:
         self.log("bootstrap_ignored", message=NAMES.get(message_id, message_id))
     assert endpoint is not None
+    self.endpoint = endpoint  # known before the join: where the car will be on the network it is about to name
     self.log("bootstrap_endpoint", ip=endpoint.ip, port=endpoint.port)
 
     # Stage 2: ask for the network, unless setup info already supplied it.

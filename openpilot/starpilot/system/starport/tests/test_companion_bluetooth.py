@@ -254,6 +254,64 @@ class CompanionTests(unittest.TestCase):
     self.assertEqual(self.calls[0][1], {'timeout': 8.0, 'exclusive': False})
     self.assertTrue(self.owner.companion_accepts(CAR))
 
+  def test_a_silent_link_from_the_saved_car_is_hung_up_and_the_car_stays_admitted(self):
+    # 2026-11-13: the Honda's link came up at ignition and carried nothing; hang it up so the car calls again. Its next
+    # call must still be accepted, the adapter must be untouched, and the Disconnect must not hold either lock.
+    self.owner.prepare_companion(CAR, lambda: CAR)
+    self.assertEqual(self.owner.drop_companion(CAR, lambda: CAR), "not connected")
+    self.assertEqual(self.calls, [])
+    self.devices[CAR]['connected'] = True
+    seen = {}
+
+    def other_thread_can_take_owner_lock():
+      taken = self.owner.lock.acquire(blocking=False)
+      if taken:
+        self.owner.lock.release()
+      seen['owner_free'] = taken
+
+    def callback():
+      worker = threading.Thread(target=other_thread_can_take_owner_lock)
+      worker.start()
+      worker.join(1.0)
+    self.hook = callback
+    self.assertEqual(self.owner.drop_companion(CAR, lambda: CAR), "dropped")
+    self.assertEqual(self.calls, [((self.devices[CAR]['path'], 'org.bluez.Device1', 'Disconnect'), {'timeout': 6.0, 'exclusive': False})])
+    self.assertTrue(seen['owner_free'])
+    self.assertFalse(self.devices[CAR]['connected'])
+    self.assertTrue(self.owner.companion_accepts(CAR))
+    self.assertTrue(self.devices[ADAPTER]['connected'])
+    self.assertFalse(self.lease.released)
+
+  def test_only_the_admitted_saved_car_can_be_hung_up(self):
+    self.devices[CAR]['connected'] = True
+    with self.assertRaises(Rejected):           # never admitted for this lease
+      self.owner.drop_companion(CAR, lambda: CAR)
+    self.owner.prepare_companion(CAR, lambda: CAR)
+    for address, selected in [(ADAPTER, lambda: ADAPTER), (CAR, lambda: ADAPTER)]:   # the adapter; a car no longer saved
+      with self.assertRaises(Rejected):
+        self.owner.drop_companion(address, selected)
+    self.state['enabled'] = False
+    with self.assertRaises(Rejected):
+      self.owner.drop_companion(CAR, lambda: CAR)
+    self.state['enabled'] = True
+    self.lease.session = SESSION                # a pairing lease, not a projection
+    with self.assertRaises(Rejected):
+      self.owner.drop_companion(CAR, lambda: CAR)
+    self.assertEqual(self.calls, [])
+
+  def test_a_link_that_carries_the_cars_audio_is_not_a_silent_one(self):
+    self.owner.prepare_companion(CAR, lambda: CAR)
+    self.devices[CAR]['connected'] = True
+    path = self.devices[CAR]['path']
+    for objects in ({path + '/sep1/fd0': {'org.bluez.MediaTransport1': {}}},
+                    {path: {'org.bluez.MediaControl1': {'Connected': True}}}):
+      self.phone.managed_objects = lambda objects=objects: objects
+      self.assertEqual(self.owner.drop_companion(CAR, lambda: CAR), "audio connected")
+    self.phone.managed_objects = lambda: {path: {'org.bluez.MediaControl1': {'Connected': False}},
+                                          self.devices[ADAPTER]['path'] + '/sep1/fd0': {'org.bluez.MediaTransport1': {}}}
+    self.assertEqual(self.owner.drop_companion(CAR, lambda: CAR), "dropped")
+    self.assertEqual(len(self.calls), 1)
+
   def test_saved_companion_standby_admission_and_reconnect_fail_closed(self):
     self.owner.prepare_companion(CAR, lambda: CAR)
     self.assertTrue(self.owner.companion_accepts(CAR))

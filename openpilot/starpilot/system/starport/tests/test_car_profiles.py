@@ -51,8 +51,11 @@ def test_ottocast_tuning_applies_only_when_chosen():
   # by the car's own hands-free link, so the negotiate delay and the native-screen reconnects are gone.
   chosen = config(car_profile_override="ottocast")
   assert car_profiles.resolve(chosen) == ("ottocast", "override")
+  # 2026-11-13: plus recycle_silent_link, for the Honda link that comes up at ignition and carries nothing for 68 s,
+  # and remember_wifi_address, for the 6 s the join spent on DHCP.
   assert car_profiles.tuning(chosen) == {**car_profiles.DEFAULTS, "phone_services": True, "reuse_wifi_join": True,
-                                         "tcp_stops_with_rfcomm": True, "hfp_gate": True, "remember_wifi_channel": True,
+                                         "tcp_stops_with_rfcomm": True, "hfp_gate": True, "recycle_silent_link": True,
+                                         "remember_wifi_channel": True, "remember_wifi_address": True,
                                          "setup_restarts": 2, "max_window": 30}  # the car's full video window (it offers 4)
   assert car_profiles.tuning(chosen)["negotiate_delay_s"] == 0.0 and car_profiles.tuning(chosen)["native_reconnects"] == 0
   assert car_profiles.summary(chosen)["car_profile_label"] == "OTTOCAST"

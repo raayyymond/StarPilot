@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import socket
 import threading
 import time
 import uuid
@@ -66,6 +67,12 @@ AUTOCONNECT_MARKER = DATA_DIR / "wifi_autoconnect_paused.json"
 # to that channel; a sighting older than this may be from before the access point restarted on another channel.
 AP_FRESH_S = 30.0
 SCAN_REUSE_S = 5.0  # a scan requested this recently (device preparation just before the join) is not asked for again
+# 2026-11-13 OTTOCAST, sessions 37-56: the join took 6.2 s at the median (5.4-13.9) and the adapter leased the same
+# address every time (192.168.1.102, the car on .101); 2026-11-03's journal put association at 0.1 s and the rest in
+# DHCP. A join that assumes the remembered address has no exchange to wait for, and nothing has proved the address
+# either: the car must answer ARP from it within this long, or the address is forgotten and the join starts over with DHCP.
+ADDRESS_CHECK_S = 1.5
+ARP_TABLE = "/proc/net/arp"
 
 
 class NetworkError(RuntimeError):
@@ -132,9 +139,30 @@ def band_channel(frequency: int) -> tuple[str, int] | None:
   return None
 
 
-def connection_settings(credentials: WifiCredentials, interface: str, frequency: int = 0, hidden: bool = True) -> dict:
+def arp_answered(address: str, interface: str, table: str = ARP_TABLE) -> bool:
+  """The kernel holds a hardware address for ``address`` on ``interface``: something there answered ARP. Entries go
+  when the interface loses its last address, so one found after a fresh join was learned on that join."""
+  try:
+    with open(table) as handle:
+      rows = [line.split() for line in handle.read().splitlines()[1:]]
+  except OSError:
+    return False
+  for row in rows:
+    if len(row) >= 6 and row[0] == address and row[5] == interface:
+      try:
+        complete = int(row[2], 16) & 0x2
+      except ValueError:
+        continue
+      if complete and row[3] != "00:00:00:00:00:00":
+        return True
+  return False
+
+
+def connection_settings(credentials: WifiCredentials, interface: str, frequency: int = 0, hidden: bool = True,
+                        address: tuple[str, int] | None = None) -> dict:
   """``frequency``/``hidden=False`` only for a BSSID this interface saw broadcasting: a profile that is not hidden never
-  matches a hidden access point, and a pinned channel never finds one that moved."""
+  matches a hidden access point, and a pinned channel never finds one that moved. ``address`` (address, prefix) joins
+  with that address instead of asking the access point for one."""
   wireless = {
     "ssid": ("ay", credentials.ssid.encode("utf-8")),
     "mode": ("s", "infrastructure"),
@@ -162,6 +190,9 @@ def connection_settings(credentials: WifiCredentials, interface: str, frequency:
     },
     "ipv6": {"method": ("s", "ignore")},
   }
+  if address is not None:
+    settings["ipv4"]["method"] = ("s", "manual")
+    settings["ipv4"]["address-data"] = ("aa{sv}", [{"address": ("s", address[0]), "prefix": ("u", int(address[1]))}])
   if not credentials.open:
     settings["802-11-wireless-security"] = {
       "key-mgmt": ("s", "sae" if credentials.security in SECURITY_WPA3 else "wpa-psk"),
@@ -200,6 +231,35 @@ class ChannelMemory:
     self.save(channels)
 
 
+class AddressMemory:
+  """The IPv4 address a car's access point leased this comma last time, per BSSID, as "address/prefix"."""
+
+  def __init__(self, load: Callable[[], dict], save: Callable[[dict], None]):
+    self.load, self.save = load, save
+
+  def address(self, bssid: str) -> tuple[str, int] | None:
+    try:
+      interface = ipaddress.ip_interface(str(self.load().get(bssid.upper(), "")))
+    except (ValueError, AttributeError):
+      return None
+    if interface.version != 4 or not 8 <= interface.network.prefixlen <= 30:
+      return None
+    return str(interface.ip), interface.network.prefixlen
+
+  def remember(self, bssid: str, address: str = "", prefix: int = 0) -> None:
+    """Store the lease, or forget it (no ``address``)."""
+    addresses = dict(self.load())
+    key = bssid.upper()
+    if address:
+      value = f"{address}/{int(prefix)}"
+      if addresses.get(key) == value:
+        return
+      addresses[key] = value
+    elif addresses.pop(key, None) is None:
+      return
+    self.save(addresses)
+
+
 class NetworkLease:
   def __init__(self, log: Callable[..., None], interface: str = "wlan0", dedicated: bool = False):
     """``dedicated``: the interface exists only for the car, so never fall back to another one or touch its previous network."""
@@ -218,6 +278,11 @@ class NetworkLease:
     self.reuse_join = False  # car profile: keep a join in progress when the adapter restarts the handshake
     self.channel_memory: ChannelMemory | None = None  # car profile: pin the first join to the remembered channel
     self.pinned_from_memory = False
+    self.address_memory: AddressMemory | None = None  # car profile: join with the address the access point leased last time
+    self.peer = ""                # the car's address on its network; the supervisor sets it before a join when it knows
+    self.static_address = ""      # the remembered address the current join assumed; "" when the access point leased one
+    self.address_confirmed = False  # the car accepted a connection from the assumed address
+    self._assumed: tuple[str, int] | None = None  # (address, prefix) the join being started will assume
     self.dhcp_patience = 0.0
     self.marker = AUTOCONNECT_MARKER
     self.scan_requested_at = -SCAN_REUSE_S
@@ -289,6 +354,9 @@ class NetworkLease:
     The BSSID the car reports is tried first (fast, unambiguous); if that
     attempt fails, one retry matches the SSID alone in case the reported BSSID
     belongs to a different radio of the head unit.
+
+    With ``peer`` (the car's own address there) and an address memory set on the lease, the join assumes the address
+    the access point leased last time and checks that the car answers from it, instead of waiting for DHCP.
     """
     self.dhcp_patience = dhcp_patience
     attempts = [credentials]
@@ -332,28 +400,108 @@ class NetworkLease:
     deadline = time.monotonic() + timeout
     restarts = 0
     while True:
+      self._assumed = self._remembered_address(credentials)
       self._activate(credentials, cancelled)
-      if self._wait_activated(deadline, timeout, cancelled, restarts < DHCP_RESTARTS):
-        break
-      restarts += 1
-      self.log("wifi_dhcp_restart", interface=self.interface, patience_s=self.dhcp_patience, restarts=restarts)
-      self._drop_attempt()
-    while True:
-      if cancelled():
-        raise NetworkError("cancelled")
-      try:
-        self.local_ip = self._ipv4()
-        break
-      except NetworkTimeout as error:
-        self._slow_answer(error, deadline)  # the network is up; a slow answer must not tear it down
+      if not self._wait_activated(deadline, timeout, cancelled, restarts < DHCP_RESTARTS):
+        restarts += 1
+        self.log("wifi_dhcp_restart", interface=self.interface, patience_s=self.dhcp_patience, restarts=restarts)
+        self._drop_attempt()
+        continue
+      while True:
+        if cancelled():
+          raise NetworkError("cancelled")
+        try:
+          self.local_ip = self._ipv4()
+          break
+        except NetworkTimeout as error:
+          self._slow_answer(error, deadline)  # the network is up; a slow answer must not tear it down
+      if self.static_address and not self._peer_answers(cancelled):
+        if cancelled():
+          raise NetworkError("cancelled")
+        # Nothing answered from the assumed address: the access point leases something else now. Ask it.
+        self._forget_address(credentials.bssid, f"the car did not answer from it within {ADDRESS_CHECK_S:.1f} s")
+        self._drop_attempt()
+        continue
+      break
     if self.dedicated:
       self._check_overlap()
     radio = self._radio()
-    self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **radio)
+    self.log("wifi_joined", interface=self.interface, local_ip=self.local_ip, **radio,
+             **({"address_source": "remembered"} if self.static_address else {}))
     self.pinned_from_memory = False
     if self.channel_memory is not None and credentials.bssid and radio.get("freq"):
       self.channel_memory.remember(credentials.bssid, int(radio["freq"]))
+    if self.address_memory is not None and credentials.bssid and not self.static_address:
+      self._remember_address(credentials.bssid)
     return self.local_ip
+
+  def _remembered_address(self, credentials: WifiCredentials) -> tuple[str, int] | None:
+    """The address to assume for this join: the one remembered for the access point, if the car is on that network."""
+    if self.address_memory is None or not credentials.bssid or not self.peer:
+      return None
+    address = self.address_memory.address(credentials.bssid)
+    if address is None:
+      return None
+    try:
+      network = ipaddress.ip_interface(f"{address[0]}/{address[1]}").network
+      peer = ipaddress.ip_address(self.peer)
+    except ValueError:
+      return None
+    if peer not in network or str(peer) == address[0]:
+      self._forget_address(credentials.bssid, f"the car is at {self.peer} now", address[0])
+      return None
+    return address
+
+  def _remember_address(self, bssid: str) -> None:
+    """After a join the access point answered: keep the address and prefix it leased."""
+    try:
+      config = self._get(self.active_path, NM_ACTIVE_IFACE, "Ip4Config")
+      entries = self._get(config, NM_IP4_CONFIG_IFACE, "AddressData") if config and config != "/" else []
+      for entry in entries:
+        address, prefix = entry.get("address", ("s", ""))[1], entry.get("prefix", ("u", 0))[1]
+        if address == self.local_ip and prefix:
+          self.address_memory.remember(bssid, address, int(prefix))
+          return
+    except (NetworkError, TypeError, ValueError, AttributeError):
+      pass
+
+  def _forget_address(self, bssid: str, reason: str, address: str = "") -> None:
+    if self.address_memory is not None and bssid:
+      self.address_memory.remember(bssid)
+      self.log("wifi_address_forgotten", address=address or self.static_address, reason=reason)
+    self.static_address = ""
+
+  def _peer_answers(self, cancelled: Callable[[], bool]) -> bool:
+    """The car answers ARP for its own address from the address this join assumed. A datagram to the car's discard port
+    is sent only so the kernel resolves that address; whether anything listens there does not matter."""
+    deadline = time.monotonic() + ADDRESS_CHECK_S
+    try:
+      probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+      return False
+    try:
+      probe.bind((self.local_ip, 0))
+      tries = 0
+      while True:
+        if tries % 5 == 0:
+          try:
+            probe.sendto(b"", (self.peer, 9))
+          except OSError:
+            pass
+        tries += 1
+        if arp_answered(self.peer, self.interface):
+          return True
+        if cancelled() or time.monotonic() >= deadline:
+          return False
+        time.sleep(0.05)
+    except OSError:
+      return False
+    finally:
+      probe.close()
+
+  def confirm_address(self) -> None:
+    """The car accepted a connection from the address this join assumed; without that, release() forgets it."""
+    self.address_confirmed = True
 
   def _activate(self, credentials: WifiCredentials, cancelled: Callable[[], bool]) -> None:
     with self._lock:
@@ -381,13 +529,16 @@ class NetworkLease:
           frequency = self.channel_memory.frequency(credentials.bssid)
           pinned_source = "remembered" if frequency else ""
         self.pinned_from_memory = pinned_source == "remembered"
+        assumed = self._assumed
+        self.static_address, self.address_confirmed = (assumed[0] if assumed else ""), False
         self._request_scan()  # every attempt: a retry's access point may have restarted since the last scan
         self.log("wifi_joining", interface=self.interface, **{k: v for k, v in credentials.describe().items() if k != "key_length"},
-                 had_previous=bool(self.previous_connection), pinned_freq=frequency, pinned_source=pinned_source)
+                 had_previous=bool(self.previous_connection), pinned_freq=frequency, pinned_source=pinned_source,
+                 **({"address_source": "remembered"} if assumed else {}))
         # A remembered channel keeps the profile hidden: the access point may not broadcast, and the pin alone narrows the scan.
         body = self._call(NM_PATH, NM_IFACE, "AddAndActivateConnection2", "a{sa{sv}}ooa{sv}",
-                          (connection_settings(credentials, self.interface, frequency, hidden=pinned_source != "seen"), self.device_path, "/",
-                           {"persist": ("s", "volatile")}), timeout=15.0)
+                          (connection_settings(credentials, self.interface, frequency, hidden=pinned_source != "seen", address=assumed),
+                           self.device_path, "/", {"persist": ("s", "volatile")}), timeout=15.0)
         self.connection_path, self.active_path = body[0], body[1]
         self.joined = credentials
 
@@ -643,6 +794,10 @@ class NetworkLease:
     ``restore=False`` is for a retry: the earlier network is remembered and
     reactivated only when the session finally stops, avoiding churn between attempts.
     """
+    # An assumed address the car never accepted a connection from is not kept: the next join asks the access point.
+    if self.static_address and not self.address_confirmed and self.joined is not None:
+      self._forget_address(self.joined.bssid, "the car accepted no connection from it")
+    self.static_address, self.address_confirmed = "", False
     with self._lock:
       if self.router is None and not (restore and (self.previous_connection or self.autoconnect_paused)):
         return
