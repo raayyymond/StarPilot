@@ -40,6 +40,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
+from openpilot.starpilot.lateral.blendful_runtime import BlendfulHost
 from openpilot.starpilot.lateral.lane_change_preferences import LiveLaneChangePolicy
 from openpilot.starpilot.lateral.auto_lane_change import ClockEpochGuard, auto_evidence, paired_clocks_ns, session_policy, steering_capable
 from openpilot.starpilot.lateral.lane_change_status_wire import (
@@ -493,6 +494,7 @@ def main(demo=False):
   lane_clock_guard = ClockEpochGuard(initial_mono_ns, initial_boot_ns, initial_skew_ns)
   DH = DesireHelper(runtime_lane_policy)
   navigation_turn = TurnIntent(params, CP)
+  blendful = BlendfulHost(params)
   lane_status_session = uuid.uuid4().hex
   lane_status_sequence = 0
 
@@ -626,9 +628,14 @@ def main(demo=False):
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
 
+      blendful.strip(prev_action, bool(sm['carControl'].latActive))
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       filter_action(action, prev_action, v_ego, subaru_tau)
       prev_action = action
+      # Blendful lane centering: a lane-line correction on the finished model action, off unless saved on
+      blendful.apply(action, model_output, v_ego,
+                     bool(sm['carControl'].latActive and desire == log.Desire.none and
+                          DH.lane_change_state == log.LaneChangeState.off))
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, extrinsics_calibration_seen)

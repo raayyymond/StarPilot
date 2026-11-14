@@ -1148,6 +1148,20 @@ class SettingsGatewayTest(unittest.TestCase):
       self.assertTrue(_onroad_preference("lane", key))
     self.assertFalse(_onroad_preference("torque", "reset_profiles"))
 
+  def test_blendful_lane_centering_writes_through_the_lane_page(self):
+    _, root = self._live_lane_context()
+    (root / "LaneCentering").write_bytes(b"0")
+    page = self.page("lane")
+    index = next(i for i, row in enumerate(page["rows"]) if row["label"] == "Blendful Lane Centering")
+    self.assertTrue(page["rows"][index]["available"])
+    self.assertEqual(page["rows"][index]["value"], "Off")
+    intent = self.gateway.preview(page["view"], index, 0, self.session, self.generation, value="On")
+    self.assertTrue(self.gateway.confirm(intent["intent"], self.session, self.generation))
+    self.assertEqual((root / "LaneCenteringBlendful").read_bytes(), b"1")
+    rows = {row["label"]: row for row in self.page("lane")["rows"]}
+    self.assertFalse(rows["Enable Lane Centering"]["available"])
+    self.assertTrue(rows["Blendful Lane Centering"]["available"])
+
   def test_live_lane_rejects_unsupported_vehicle_and_master_dependency(self):
     self.params.put_bool("LaneCentering", False, block=True)
     tagged, _ = self._live_lane_context()

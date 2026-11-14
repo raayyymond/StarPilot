@@ -88,7 +88,7 @@ BOOL_DEFAULTS = {
   "SpeedLimitController": False, "ShowSpeedLimits": True,
   "SLCConfirmation": False,
   "PauseLateralOnSignal": False,
-  "LaneCentering": True, "LaneCenteringPauseOnSignal": True,
+  "LaneCentering": True, "LaneCenteringPauseOnSignal": True, "LaneCenteringBlendful": False,
   "CustomPersonalities": False, PLANNER_SELECTION_KEY: True,
   LEAD_APPROACH_KEY: False,
   LEAD_TAKEOFF_KEY: False,
@@ -125,7 +125,7 @@ AOL_THRESHOLD = "AolBrakePauseSpeedMps"
 AOL_LEGACY_THRESHOLD = "PauseAOLOnBrake"
 TORQUE_NUMBERS = LEGACY_KEYS
 LANE_LIVE_KEYS = frozenset(("LaneCentering", "LaneCenteringPauseOnSignal", "LaneCenterOffset",
-                            "LaneCenteringE2EAuthority", "LaneCenteringStrength"))
+                            "LaneCenteringE2EAuthority", "LaneCenteringStrength", "LaneCenteringBlendful"))
 CURVE_KEYS = frozenset((CURVE_MASTER_KEY, CURVE_NO_LEAD_KEY))
 CURVE_PAGE_KEYS = CURVE_KEYS | {"ShowCSCStatus"}
 CRUISE_KEYS = frozenset(("CustomCruise", "CustomCruiseLong"))
@@ -1129,7 +1129,12 @@ class FeatureSettingsOwner:
       strength_supported = runtime_supported(self.vehicle_params())
       allowed = strength_supported and ((configurable and lateral_context) or (not parked and self.authority("lane_live")))
       lane_enabled, _, _ = self._value("LaneCentering")
-      rows.extend((self._bool_row("LaneCentering", "Enable Lane Centering", allowed),
+      # Blendful replaces the lane-centering correction, so only one of the two can be switched on; either can always be switched off
+      blendful_enabled, _, _ = self._value("LaneCenteringBlendful")
+      classic_blocked = blendful_enabled == "1" and lane_enabled == "0"
+      blendful_blocked = lane_enabled == "1" and blendful_enabled == "0"
+      classic_row = self._bool_row("LaneCentering", "Enable Lane Centering", allowed and not classic_blocked)
+      rows.extend((replace(classic_row, reason="Turn off Blendful Lane Centering first") if allowed and classic_blocked else classic_row,
                    replace(self._bool_row("LaneCenteringPauseOnSignal", "Pause on signal", allowed and lane_enabled == "1"),
                            default_reset_available=allowed and parked and self._value("LaneCenteringPauseOnSignal")[2] and
                            self._value("LaneCenteringPauseOnSignal")[0] in ("0", "1")),
@@ -1144,6 +1149,9 @@ class FeatureSettingsOwner:
                           minimum=33, maximum=round(STRENGTH_MAX / STRENGTH_BASELINE * 100), step=1 if strength_row.step > 0 else 0,
                           reason="100% is normal; lower values reduce centering and higher values strengthen it" if strength_supported else
                           "Not available with this vehicle configuration"))
+      blendful_row = self._bool_row("LaneCenteringBlendful", "Blendful Lane Centering", allowed and not blendful_blocked,
+                                    reason="Blends a lane-line correction into the model's steering path; used instead of Enable Lane Centering")
+      rows.append(replace(blendful_row, reason="Turn off Enable Lane Centering first") if allowed and blendful_blocked else blendful_row)
     elif page == FeaturePage.LANE_CHANGE:
       title = "Lane Changes"
       rows.extend(self.lane_changes.rows(parked))
@@ -1503,6 +1511,9 @@ class FeatureSettingsOwner:
         from openpilot.starpilot.lateral.lane_runtime import runtime_supported
         if not runtime_supported(self.vehicle_params()):
           return False
+      if request.value == "On" and (key == "LaneCenteringBlendful" and self._value("LaneCentering")[0] == "1" or
+                                    key == "LaneCentering" and self._value("LaneCenteringBlendful")[0] == "1"):
+        return False
       if (key == "LaneCenteringPauseOnSignal" and self._value("LaneCentering")[0] != "1" and
           not (reset_default and request.value == ("On" if self._default(key) == "1" else "Off"))):
         return False

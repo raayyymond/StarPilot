@@ -46,6 +46,7 @@
   "KeepScreenOnGpuLoading",
   "LaneCenterOffset",
   "LaneCentering",
+  "LaneCenteringBlendful",
   "LaneCenteringE2EAuthority",
   "LaneCenteringPauseOnSignal",
   "LaneCenteringStrength",

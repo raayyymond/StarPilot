@@ -380,6 +380,41 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertEqual(row.default_value, "On")
     self.assertFalse(self.params.get_bool("LaneCentering"))
 
+  def test_blendful_and_lane_centering_are_one_choice(self):
+    self.params.put_bool("LaneCentering", False, block=True)
+    from opendbc.car.car_helpers import interfaces
+    from opendbc.car.toyota.values import CAR
+    cp = interfaces[CAR.TOYOTA_COROLLA_TSS2].get_non_essential_params(CAR.TOYOTA_COROLLA_TSS2)
+    self.fingerprint = cp.carFingerprint
+    self.owner.vehicle_params = lambda: cp
+    self.owner.authority = lambda group: group == "lane_live"
+
+    def row(key):
+      view = self.owner.snapshot("lane", parked=False, system_long=False, lateral_context=False, metric=False)
+      return next(row for row in view.rows if row.key == key)
+
+    def forced_on(key):
+      return FeatureSettingsRequest(key, row(key).source, "On", vehicle_fingerprint=self.fingerprint)
+
+    blendful = row("LaneCenteringBlendful")
+    self.assertEqual((blendful.value, blendful.default_value, blendful.available), ("Off", "Off", True))
+    self.assertTrue(self.owner.apply(required_change(blendful)))
+    self.assertTrue(self.params.get_bool("LaneCenteringBlendful"))
+    classic = row("LaneCentering")
+    self.assertEqual((classic.available, classic.reason), (False, "Turn off Blendful Lane Centering first"))
+    self.assertFalse(self.owner.apply(forced_on("LaneCentering")))
+    self.assertFalse(self.params.get_bool("LaneCentering"))
+    self.assertTrue(self.owner.apply(required_change(row("LaneCenteringBlendful"))))
+    self.assertFalse(self.params.get_bool("LaneCenteringBlendful"))
+    self.assertTrue(self.owner.apply(required_change(row("LaneCentering"))))
+    blendful = row("LaneCenteringBlendful")
+    self.assertEqual((blendful.available, blendful.reason), (False, "Turn off Enable Lane Centering first"))
+    self.assertFalse(self.owner.apply(forced_on("LaneCenteringBlendful")))
+    self.assertFalse(self.params.get_bool("LaneCenteringBlendful"))
+    # both saved on (a restore): each row can still be switched off
+    self.params.put_bool("LaneCenteringBlendful", True, block=True)
+    self.assertTrue(row("LaneCentering").available and row("LaneCenteringBlendful").available)
+
   def test_live_lane_owner_maps_only_explicit_keys(self):
     self.params.put_bool("LaneCentering", False, block=True)
     from opendbc.car.car_helpers import interfaces

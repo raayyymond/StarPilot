@@ -25,6 +25,7 @@ DESCRIPTIONS = {
   'lane_change:close_gap_seconds': 'Sets following time while Close lane-change gap is active. Higher values leave more space.',
   'lane_change:reset': 'Restores the default lane-change assistance, signal timing, pace and gap settings.',
   'LaneCentering': 'Uses detected lane lines to help keep the vehicle centered in its lane.',
+  'LaneCenteringBlendful': "Blends a correction toward the detected lane center into the driving model's steering path, and yields when the model steers around something.",
   'LaneCenteringPauseOnSignal': 'Pauses lane-centering correction while a turn signal is on.',
   'LaneCenterOffset': 'Moves the lane-centering target left or right of the detected lane center.',
   'LaneCenteringE2EAuthority': 'Lets a confident driving-model path reduce lane-centering correction when the model path differs from the lane center.',

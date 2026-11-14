@@ -22,7 +22,7 @@ CYCLE_PERSONALITY = "__starpilot_controller_action__:cycle_driving_personality"
 # Saved preference shortcuts retain the current owner's authority and dependencies.
 FEATURE_KEYS = {
   "slc": ("SpeedLimitController", "ShowSpeedLimits", "SLCConfirmation", "SLCConfirmationHigher", "SLCConfirmationLower"),
-  "lane": ("LaneCentering", "LaneCenteringPauseOnSignal"),
+  "lane": ("LaneCentering", "LaneCenteringPauseOnSignal", "LaneCenteringBlendful"),
   "curve": ("CurveSpeedController", "CurveSpeedControllerNoLead", "ShowCSCStatus"),
   "aol": ("AlwaysOnLateral", "NostalgiaMode"),
   "profiles": ("CustomPersonalities",),

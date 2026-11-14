@@ -153,8 +153,9 @@ class TestGlobalFeaturePresentation(unittest.TestCase):
     self.assertTrue(owner.apply(request))
     self.assertTrue(self.params.get_bool('LaneCentering'))
     rows = owner.snapshot('lane', parked=True, system_long=True, lateral_context=True, metric=False).rows
-    self.assertTrue(all(row.available for row in rows if row.key in LANE_LIVE_KEYS))
-    requests = [FeatureSettingsRequest(row.key, row.source, row.value, vehicle_fingerprint=row.vehicle_fingerprint)
+    # Blendful is the other half of one choice: unavailable while the classic correction is on
+    self.assertEqual({row.key for row in rows if row.key in LANE_LIVE_KEYS and not row.available}, {"LaneCenteringBlendful"})
+    requests =[FeatureSettingsRequest(row.key, row.source, row.value, vehicle_fingerprint=row.vehicle_fingerprint)
                 for row in rows if row.key in LANE_LIVE_KEYS]
     before = {key: Path(self.params.get_param_path(key)).read_bytes()
               if Path(self.params.get_param_path(key)).exists() else None for key in LANE_LIVE_KEYS}
