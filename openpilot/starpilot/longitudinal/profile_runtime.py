@@ -22,6 +22,16 @@ JERK_MAX = 2.0
 LEGACY_FOLLOW_BP = (45.0 * CV.MPH_TO_MS, 70.0 * CV.MPH_TO_MS)
 TRAFFIC_BP = (0.0, 25.0)  # m/s, not mph.
 TRAFFIC_CRUISE_BRAKE_MAGNITUDE = 1.2 * 0.35  # Magnitude of A_CRUISE_MIN * 0.35.
+STANDSTILL_UNDERSHOOT = 0.5  # m/s; carState.vEgo is a Kalman state that dips below zero as the car stops.
+
+
+def profile_speed(v_ego: float) -> float:
+  """The speed the profiles are read at: a stopped car's slightly negative vEgo is zero, not an invalid frame.
+
+  Stopped, vEgo flips sign around -1e-17 every few frames, and it undershoots to about -0.1 as the car comes to
+  rest; rejecting those frames dropped the selected profile and put it back several times a second.
+  """
+  return 0.0 if -STANDSTILL_UNDERSHOOT <= v_ego < 0 else v_ego
 
 
 @dataclass(frozen=True)
@@ -190,8 +200,9 @@ def _traffic_value(points: tuple[float, float], speed: float) -> float:
 
 def resolve(settings: ProfileSettings | TrafficSettings | None, personality, v_ego: float, CP,
             *, traffic_mode: bool | None = False) -> ProfileTuning | None:
-  if settings is None or type(traffic_mode) is not bool or not math.isfinite(v_ego) or v_ego < 0:
+  if settings is None or type(traffic_mode) is not bool or not math.isfinite(v_ego) or profile_speed(v_ego) < 0:
     return None
+  v_ego = profile_speed(v_ego)
   personality_id = active_personality_id(traffic_mode, personality)
   if traffic_mode:
     if not isinstance(settings, TrafficSettings) or not settings.valid or len(settings.jerk) != 5:
@@ -317,9 +328,10 @@ def resolve_selected_profiles(document: dict | None, personality, v_ego: float, 
   the historical response scale; explicit personality curves retain theirs.
   """
   identity = active_personality_id(traffic_mode, personality)
-  if document is None or identity is None or not math.isfinite(v_ego) or v_ego < 0:
+  if document is None or identity is None or not math.isfinite(v_ego) or profile_speed(v_ego) < 0:
     return None
-  ev = CP.transmissionType == car.CarParams.TransmissionType.direct
+  v_ego = profile_speed(v_ego)
+  ev =CP.transmissionType == car.CarParams.TransmissionType.direct
   truck = is_truck_fingerprint(str(CP.carFingerprint)) and not ev
   acceleration = braking = None
   style = 'standard'

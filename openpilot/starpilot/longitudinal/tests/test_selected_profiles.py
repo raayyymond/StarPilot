@@ -105,6 +105,21 @@ class SelectedProfilesTests(unittest.TestCase):
                        {'preset': 'sport', 'curve': []}, False))
       self.assertEqual(aggressive.cruise_brake_magnitude, 2.0)
 
+  def test_stopped_car_negative_speed_keeps_the_profiles(self):
+    """Route 00000042 at 424 s: stopped, vEgo flipped sign near -1e-17 and the published limits flipped with it."""
+    document = self.document('sport', 'standard')
+    stopped = resolve_selected_profiles(document, 1, 0.0, self.cp)
+    self.assertIsNotNone(stopped.acceleration_max)
+    for speed in (-4.85e-17, -0.1, -0.5):
+      self.assertEqual(resolve_selected_profiles(document, 1, speed, self.cp), stopped)
+    for speed in (-0.6, -5.0, float('nan')):
+      self.assertIsNone(resolve_selected_profiles(document, 1, speed, self.cp))
+    traffic = read_traffic_settings(self.params)
+    still = resolve(traffic, 1, 0.0, self.cp, traffic_mode=True)
+    self.assertIsNotNone(still)
+    self.assertEqual(resolve(traffic, 1, -4.85e-17, self.cp, traffic_mode=True), still)
+    self.assertIsNone(resolve(traffic, 1, -0.6, self.cp, traffic_mode=True))
+
   def test_v4_migration_preserves_dormant_custom_and_original_activation(self):
     document = self.document('dom_default', 'sport', enabled=True)
     document['schemaVersion'] = 4
