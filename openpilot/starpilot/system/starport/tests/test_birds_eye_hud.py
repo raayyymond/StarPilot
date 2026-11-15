@@ -6,8 +6,8 @@ import time
 import pytest
 
 from openpilot.starpilot.system.starport import birds_eye_hud as hud_module
-from openpilot.starpilot.system.starport.birds_eye_hud import (DEFAULT_SCALE, LIMIT_FRACTION, AccelReading, AccelScale,
-                                                               BirdsEyeHud, RED, accel_geometry, braking, dock_height,
+from openpilot.starpilot.system.starport.birds_eye_hud import (ACCEL_RANGE, AccelLimits, AccelReading,
+                                                               BirdsEyeHud, RED, accel_geometry, accel_y, braking, dock_height,
                                                                fill_color, read_accel, read_limits, read_speeds,
                                                                readout_size, signal_alpha, torque_color, torque_geometry,
                                                                torque_strength, view_rect)
@@ -180,19 +180,70 @@ def test_disengaged_bar_is_grey_with_the_setpoint_at_zero():
   assert fill[-1][:3] == hud_module.IDLE and view._desired.x < 1.0
 
 
-def test_limits_sit_at_the_fixed_fraction_with_ticks():
-  g = accel_geometry(LOGICAL_720P[1])
-  scale = AccelScale(-1.2, 1.6)
-  assert scale.y(g, 1.6) == pytest.approx(g.zero - LIMIT_FRACTION * g.half)
-  assert scale.y(g, -1.2) == pytest.approx(g.zero + LIMIT_FRACTION * g.half)
-  assert scale.y(g, 9.0) == pytest.approx(g.top) and scale.y(g, -9.0) == pytest.approx(g.bottom), 'past the tick to the end'
-  assert DEFAULT_SCALE.y(g, 3.0) == pytest.approx(g.top) and DEFAULT_SCALE.y(g, -3.0) == pytest.approx(g.bottom)
+def limit_ticks(rl):
+  return sorted(call[1][1] + call[1][3] / 2 for call in rl.calls
+                if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.LIMIT)
 
-  view, rl, _ = hud(lambda: (sm(desired=0.4, limits=(-1.2, 1.6)), None))
-  view.render(*LOGICAL_720P)
-  ticks = sorted(call[1][1] + call[1][3] / 2 for call in rl.calls
-                 if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.LIMIT)
-  assert ticks == pytest.approx([scale.y(g, 1.6), scale.y(g, -1.2)])
+
+def test_scale_is_fixed_and_the_limit_ticks_move_on_it():
+  g = accel_geometry(LOGICAL_720P[1])
+  assert accel_y(g, 0.0) == pytest.approx(g.zero)
+  assert accel_y(g, ACCEL_RANGE) == pytest.approx(g.top) and accel_y(g, -ACCEL_RANGE) == pytest.approx(g.bottom)
+  assert accel_y(g, 1.5) == pytest.approx(g.zero - g.half / 2)
+  assert accel_y(g, 9.0) == pytest.approx(g.top) and accel_y(g, -9.0) == pytest.approx(g.bottom), 'clamped at the ends'
+
+  state = {'limits': (-1.2, 1.6), 'long_active': True}
+  view, rl, _ = hud(lambda: (sm(desired=0.4, actual=0.3, long_active=state['long_active'], limits=state['limits']), None))
+
+  def frame():
+    rl.calls.clear()
+    view.render(*LOGICAL_720P)
+    fill = accel_fills(rl, g)
+    actual = [call for call in rl.calls if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.ACTUAL]
+    return limit_ticks(rl), fill[0][1][1] if fill else None, actual[0][1][1]
+
+  ticks, fill_top, actual_y = frame()
+  assert ticks == pytest.approx([accel_y(g, 1.6), accel_y(g, -1.2)])
+  assert fill_top == pytest.approx(accel_y(g, 0.4))
+  # Tighter limits: the ticks move toward zero, the command and the measured tick stay where they were.
+  state['limits'] = (-0.6, 0.8)
+  for _ in range(60):
+    moved, moved_fill, moved_actual = frame()
+  assert moved == pytest.approx([accel_y(g, 0.8), accel_y(g, -0.6)], abs=0.5)
+  assert (moved_fill, moved_actual) == pytest.approx((fill_top, actual_y))
+  # Disengaging does not rescale either.
+  state['long_active'] = False
+  assert frame()[2] == pytest.approx(actual_y)
+
+
+def test_limit_ticks_stay_on_while_long_is_engaged():
+  g = accel_geometry(LOGICAL_720P[1])
+  state = {'limits': (-1.2, 1.6), 'long_active': True}
+  view, rl, _ = hud(lambda: (sm(desired=0.0, long_active=state['long_active'], limits=state['limits']), None))
+
+  def frame():
+    rl.calls.clear()
+    view.render(*LOGICAL_720P)
+    return limit_ticks(rl)
+
+  shown = frame()
+  assert len(shown) == 2
+  # The ceiling drops to zero while the model withholds throttle: its tick goes to the zero line, it does not vanish.
+  state['limits'] = (-1.2, 0.0)
+  for _ in range(60):
+    ticks = frame()
+  assert ticks == pytest.approx([g.zero, accel_y(g, -1.2)], abs=0.5)
+  # The message drops out or turns implausible: the last limits are held.
+  for dropout in (None, (-1.0, float('nan')), (0.5, 1.0)):
+    state['limits'] = dropout
+    assert frame() == pytest.approx(ticks, abs=0.5)
+  state['long_active'] = False
+  assert frame() == []
+  # Re-engaged with no message yet: nothing stale from the last engagement.
+  state['long_active'] = True
+  assert frame() == []
+  state['limits'] = (-0.6, 0.8)
+  assert frame() == pytest.approx([accel_y(g, 0.8), accel_y(g, -0.6)])
 
 
 def test_bar_grows_at_the_limit():
@@ -204,15 +255,26 @@ def test_bar_grows_at_the_limit():
     (fill,) = accel_fills(rl, g)
     widths[desired] = fill[1][2]
     if desired == 2.5:
-      assert fill[1][1] == pytest.approx(g.top), 'passes the limit tick up to the end'
+      assert fill[1][1] == pytest.approx(accel_y(g, 2.5)) and fill[1][1] < accel_y(g, 1.6), 'passes the limit tick'
   assert widths[0.5] == pytest.approx(g.width) and widths[1.6] == pytest.approx(g.grown) == widths[2.5]
   assert g.grown == 2 * g.width
+  # A ceiling of zero: any real command above it is at the limit.
+  view, rl, _ = hud(lambda: (sm(desired=0.3, limits=(-1.2, 0.0)), None))
+  view.render(*LOGICAL_720P)
+  assert accel_fills(rl, g)[0][1][2] == pytest.approx(g.grown)
+  # No limits read: the bar grows against its own ends.
+  view, rl, _ = hud(lambda: (sm(desired=1.6), None))
+  view.render(*LOGICAL_720P)
+  assert accel_fills(rl, g)[0][1][2] == pytest.approx(g.width)
 
 
-def test_limits_fall_back_when_absent_stale_or_implausible():
+def test_limits_are_unread_when_absent_stale_or_implausible():
   assert read_limits(sm()) is None
-  assert read_limits(sm(limits=(-1.0, 1.5))) == AccelScale(-1.0, 1.5)
-  assert read_limits(sm(limits=(0.0, 1.5))) is None
+  assert read_limits(sm(limits=(-1.0, 1.5))) == AccelLimits(-1.0, 1.5)
+  assert read_limits(sm(limits=(-1.0, 0.0))) == AccelLimits(-1.0, 0.0), 'throttle withheld'
+  assert read_limits(sm(limits=(0.0, 1.5))) == AccelLimits(0.0, 1.5)
+  assert read_limits(sm(limits=(0.0, 0.0))) is None, 'an unset message'
+  assert read_limits(sm(limits=(0.5, 1.5))) is None and read_limits(sm(limits=(-1.0, -0.5))) is None
   assert read_limits(sm(limits=(-1.0, float('nan')))) is None
   stale = sm(limits=(-1.0, 1.5))
   stale.alive = {'starpilotLongitudinalPlan': False}
@@ -220,9 +282,9 @@ def test_limits_fall_back_when_absent_stale_or_implausible():
   old = sm(limits=(-1.0, 1.5))
   old.recv_time = {'starpilotLongitudinalPlan': 1.0}
   assert read_limits(old, now_ns=3_000_000_000) is None and read_limits(old, now_ns=1_500_000_000) is not None
-  view, _, _ = hud(lambda: (sm(desired=0.4), None))
+  view, rl, _ = hud(lambda: (sm(desired=0.4), None))
   view.render(*LOGICAL_720P)
-  assert (view._lower.x, view._upper.x) == (DEFAULT_SCALE.lower, DEFAULT_SCALE.upper)
+  assert limit_ticks(rl) == [], 'engaged before any limits were published: nothing to mark'
 
 
 def test_geometry_at_1280x720():

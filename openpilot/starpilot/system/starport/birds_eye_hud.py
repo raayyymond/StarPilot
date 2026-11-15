@@ -5,12 +5,13 @@ Acceleration bar: a vertical track hugging the left edge, zero at its middle, ac
 carControl.longActive is it coloured: the fill is the planner's target (longitudinalPlan.aTarget; the 100 Hz
 carControl.actuators.accel adds the long PID on measured aEgo and jitters, so it is only the fallback while the plan is
 unseen or older than PLAN_MAX_AGE_NS), green accelerating, neutral below zero, red while braking (target below
-BRAKE_ACCEL, or the brake pedal). The scale then puts the
-planner's published cruise limits (starpilotLongitudinalPlan.accelLimitMin/Max, the floor and ceiling the StarPilot
-profile toggles and overrides leave in force) at LIMIT_FRACTION of each half, with a tick at each; as the command
-reaches a limit the bar grows thicker and may pass the tick up to the bar's end. Disengaged, the track is neutral
-grey, the setpoint stays at zero (the plan's accel is not shown) and the scale is +/-ACCEL_RANGE. A white tick is
-always the measured carState.aEgo, lightly filtered (AEGO_RC).
+BRAKE_ACCEL, or the brake pedal). The scale is fixed: +/-ACCEL_RANGE at the bar's ends, engaged or not. While
+longActive a tick marks each of the planner's published cruise limits (starpilotLongitudinalPlan.accelLimitMin/Max,
+the floor and ceiling the StarPilot profile toggles and overrides leave in force) and moves along the bar as they
+change; a ceiling of zero (throttle withheld, lateral budget spent) sits on the zero line, and the last limits read
+are held through a missing or stale message, so the ticks never blink. As the command reaches a limit the bar grows
+thicker; it may pass the tick. Disengaged, the track is neutral grey, the setpoint stays at zero (the plan's accel is
+not shown) and no limit ticks are drawn. A white tick is always the measured carState.aEgo, lightly filtered (AEGO_RC).
 
 Torque bar: a flat, rounded bar centred at the bottom, LENGTH_FRACTION of the frame width, always visible. Its
 indicator runs from the centre toward the sign of the same caller-qualified utilization as the full composition's arc
@@ -35,15 +36,15 @@ import math
 from pathlib import Path
 import time
 
-ACCEL_RANGE = 3.0          # m/s^2 at either end of the bar when no planner limits are known
-LIMIT_FRACTION = 0.8       # the planner's limits sit at this fraction of each half of the bar
+ACCEL_RANGE = 3.0          # m/s^2 at either end of the bar, always
+MIN_LIMIT = 0.1            # m/s^2; a limit nearer zero than this counts as this much for the bar's growth
 BRAKE_ACCEL = -0.2         # commanded accel below this while longActive counts as braking
 BRAKE_RELEASE = -0.15      # hysteresis: braking ends above this
 FPS = 30.0                 # the stream's frame rate; filters are tuned for it
 ACCEL_RC = 0.12            # seconds; enough to calm 30 fps jitter without visible lag
 AEGO_RC = 0.15             # seconds; the measured-accel tick's light filter
 TORQUE_RC = 0.1            # the full composition's torque filter time constant
-LIMITS_MAX_AGE_NS = 1_000_000_000  # starpilotLongitudinalPlan older than this falls back to +/-ACCEL_RANGE
+LIMITS_MAX_AGE_NS = 1_000_000_000  # starpilotLongitudinalPlan older than this is not read; the last limits are held
 PLAN_MAX_AGE_NS = 1_000_000_000    # longitudinalPlan older than this falls back to carControl.actuators.accel
 
 ACCEL_WIDTH, ACCEL_GROWN = 28, 56              # logical px at 1080 rows: 2x the former bar, doubling at the limit
@@ -114,24 +115,23 @@ class AccelGeometry:
     return (self.bottom - self.top) / 2
 
 
+def accel_y(g: AccelGeometry, accel: float) -> float:
+  """The bar's fixed scale: +/-ACCEL_RANGE at its ends, clamped there."""
+  return g.zero - _clamp(accel / ACCEL_RANGE, -1.0, 1.0) * g.half
+
+
 @dataclass(frozen=True)
-class AccelScale:
-  """Bar scale: `upper` m/s^2 lands at LIMIT_FRACTION of the upper half, `lower` (negative) of the lower half."""
+class AccelLimits:
+  """The planner's cruise floor (`lower` <= 0) and ceiling (`upper` >= 0), m/s^2."""
   lower: float
   upper: float
 
-  def y(self, g: AccelGeometry, accel: float) -> float:
-    limit = self.upper if accel >= 0 else -self.lower
-    fraction = _clamp(abs(accel) / limit * LIMIT_FRACTION) if limit > 0 else 0.0
-    return g.zero - math.copysign(fraction * g.half, accel)
-
   def utilization(self, accel: float) -> float:
     """Fraction of the limit on the accel's side; 1.0 at the limit."""
-    limit = self.upper if accel >= 0 else -self.lower
-    return abs(accel) / limit if limit > 0 else 0.0
+    return abs(accel) / max(self.upper if accel >= 0 else -self.lower, MIN_LIMIT)
 
 
-DEFAULT_SCALE = AccelScale(-ACCEL_RANGE * LIMIT_FRACTION, ACCEL_RANGE * LIMIT_FRACTION)  # +/-ACCEL_RANGE at the ends
+FULL_RANGE = AccelLimits(-ACCEL_RANGE, ACCEL_RANGE)  # what the bar grows against while no limits have been read
 
 
 def accel_geometry(height: float) -> AccelGeometry:
@@ -224,8 +224,11 @@ def read_accel(sm, now_ns: int | None = None) -> AccelReading | None:
   return AccelReading(desired, _finite(car_state.aEgo), long_active, bool(car_state.brakePressed))
 
 
-def read_limits(sm, now_ns: int | None = None) -> AccelScale | None:
-  """The planner's cruise floor and ceiling from starpilotLongitudinalPlan; None when absent, stale or implausible."""
+def read_limits(sm, now_ns: int | None = None) -> AccelLimits | None:
+  """The planner's cruise floor and ceiling from starpilotLongitudinalPlan; None when absent, stale or implausible.
+
+  Either may be zero: the ceiling is while the model withholds throttle or the lateral budget is spent.
+  """
   try:
     plan = _current(sm, 'starpilotLongitudinalPlan', now_ns, LIMITS_MAX_AGE_NS)
     if plan is None:
@@ -233,9 +236,9 @@ def read_limits(sm, now_ns: int | None = None) -> AccelScale | None:
     lower, upper = _finite(plan.accelLimitMin), _finite(plan.accelLimitMax)
   except (AttributeError, KeyError, TypeError, ValueError):
     return None
-  if lower is None or upper is None or not lower < 0 < upper:
+  if lower is None or upper is None or not lower <= 0 <= upper or lower == upper:
     return None
-  return AccelScale(lower, upper)
+  return AccelLimits(lower, upper)
 
 
 def read_blinkers(sm) -> tuple[bool, bool]:
@@ -346,6 +349,7 @@ class BirdsEyeHud:
     self._grow = _Filter(ACCEL_RC)
     self._lower = _Filter(ACCEL_RC)
     self._upper = _Filter(ACCEL_RC)
+    self._limits = None   # the last limits read while longActive; held through a dropout, cleared on disengage
     self._torque = _Filter(TORQUE_RC)
     self._torque_alpha = _Filter(TORQUE_RC)
     self._braking = False
@@ -391,32 +395,40 @@ class BirdsEyeHud:
     rl.draw_rectangle(x, top, w, int(height) - top, rl.Color(*BACKGROUND_BOTTOM, 255))
 
   # --- acceleration bar ---
-  def _scale(self, limits: AccelScale | None, long_active: bool) -> AccelScale:
-    target = limits if long_active and limits is not None else DEFAULT_SCALE
-    return AccelScale(self._lower.update(target.lower), self._upper.update(target.upper))
+  def _held_limits(self, limits: AccelLimits | None, long_active: bool) -> AccelLimits | None:
+    """The limits to mark, smoothed: this frame's while longActive, else the last read; None until one was read."""
+    if not long_active:
+      self._limits = self._lower.x = self._upper.x = None
+      return None
+    if limits is not None:
+      self._limits = limits
+    if self._limits is None:
+      return None
+    return AccelLimits(self._lower.update(self._limits.lower), self._upper.update(self._limits.upper))
 
-  def _draw_accel(self, g: AccelGeometry, reading: AccelReading | None, limits: AccelScale | None, height: float) -> None:
+  def _draw_accel(self, g: AccelGeometry, reading: AccelReading | None, limits: AccelLimits | None, height: float) -> None:
     rl = self.rl
     strip = int(g.strip)
     k = height / 1080
     rl.draw_rectangle_gradient_v(0, 0, strip, int(height), rl.Color(*BACKGROUND_TOP, 255), rl.Color(*BACKGROUND_BOTTOM, 255))
     rl.draw_rectangle(strip - 1, 0, 1, int(height), rl.Color(255, 255, 255, 14))
     long_active = reading is not None and reading.long_active
-    scale = self._scale(limits, long_active)
+    limits = self._held_limits(limits, long_active)
     track = TRACK if long_active else (*IDLE, 46)
     rl.draw_rectangle_rounded(rl.Rectangle(g.x, g.top, g.width, g.bottom - g.top), 1.0, 8, rl.Color(*track))
     tick = 8 * k
-    for unit in range(math.ceil(scale.lower / LIMIT_FRACTION), math.floor(scale.upper / LIMIT_FRACTION) + 1):
-      y = scale.y(g, unit)
+    for unit in range(math.ceil(-ACCEL_RANGE), math.floor(ACCEL_RANGE) + 1):
+      y = accel_y(g, unit)
       if unit == 0:
         rl.draw_rectangle_rec(rl.Rectangle(g.x - 2 * tick, y - k, g.width + 4 * tick, 2 * k), rl.Color(*TICK, 150))
       else:
         rl.draw_rectangle_rec(rl.Rectangle(g.x - tick - 3 * k, y - k / 2, tick, max(1.0, k)), rl.Color(*TICK, 90))
-    if long_active and limits is not None:
-      # The planner's floor and ceiling: short ticks across the bar at LIMIT_FRACTION of each half.
-      for accel in (scale.lower, scale.upper):
-        y = scale.y(g, accel)
+    if limits is not None:
+      # The planner's floor and ceiling: ticks across the bar that move on the fixed scale as the limits change.
+      for accel in (limits.lower, limits.upper):
+        y = accel_y(g, accel)
         rl.draw_rectangle_rec(rl.Rectangle(g.x - 2 * tick, y - 1.5 * k, g.width + 4 * tick, 3 * k), rl.Color(*LIMIT, 220))
+    scale = limits if limits is not None else FULL_RANGE
     if reading is None:
       self._desired.x = self._actual.x = self._grow.x = None
       self._braking = False
@@ -428,14 +440,14 @@ class BirdsEyeHud:
       # Like the torque bar's strength: thicker as the command reaches the limit (full at it).
       grow = self._grow.update(_clamp((scale.utilization(desired) - 0.8) * 5) if long_active else 0.0)
       width = g.width + (g.grown - g.width) * grow
-      y = scale.y(g, desired)
+      y = accel_y(g, desired)
       top, bottom = min(y, g.zero), max(y, g.zero)
       if bottom - top >= 0.5:
         rl.draw_rectangle_rounded(rl.Rectangle(g.center - width / 2, top, width, bottom - top), 1.0, 8, color)
       if long_active:
         self._draw_label(desired, color, g, k)
     if reading.actual is not None:
-      y = scale.y(g, self._actual.update(reading.actual))
+      y = accel_y(g, self._actual.update(reading.actual))
       w, h = g.grown + 12 * k, max(3.0, 5 * k)
       x = g.center - w / 2
       rl.draw_rectangle_rec(rl.Rectangle(x - k, y - h / 2 - k, w + 2 * k, h + 2 * k), rl.Color(*SHADOW, 170))
