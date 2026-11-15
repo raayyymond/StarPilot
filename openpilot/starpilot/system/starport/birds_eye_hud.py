@@ -5,7 +5,8 @@ Acceleration bar: a vertical track hugging the left edge, zero at its middle, ac
 carControl.longActive is it coloured: the fill is the planner's target (longitudinalPlan.aTarget; the 100 Hz
 carControl.actuators.accel adds the long PID on measured aEgo and jitters, so it is only the fallback while the plan is
 unseen or older than PLAN_MAX_AGE_NS), green accelerating, neutral below zero, red while braking (target below
-BRAKE_ACCEL, or the brake pedal). The scale is fixed: +/-ACCEL_RANGE at the bar's ends, engaged or not. While
+BRAKE_ACCEL, or the brake pedal). The scale is fixed: +/-ACCEL_RANGE at the bar's ends, engaged or not, with a line
+at zero and no other graduations. While
 longActive a tick marks each of the planner's published cruise limits (starpilotLongitudinalPlan.accelLimitMin/Max,
 the floor and ceiling the StarPilot profile toggles and overrides leave in force) and moves along the bar as they
 change; a ceiling of zero (throttle withheld, lateral budget spent) sits on the zero line, and the last limits read
@@ -417,12 +418,8 @@ class BirdsEyeHud:
     track = TRACK if long_active else (*IDLE, 46)
     rl.draw_rectangle_rounded(rl.Rectangle(g.x, g.top, g.width, g.bottom - g.top), 1.0, 8, rl.Color(*track))
     tick = 8 * k
-    for unit in range(math.ceil(-ACCEL_RANGE), math.floor(ACCEL_RANGE) + 1):
-      y = accel_y(g, unit)
-      if unit == 0:
-        rl.draw_rectangle_rec(rl.Rectangle(g.x - 2 * tick, y - k, g.width + 4 * tick, 2 * k), rl.Color(*TICK, 150))
-      else:
-        rl.draw_rectangle_rec(rl.Rectangle(g.x - tick - 3 * k, y - k / 2, tick, max(1.0, k)), rl.Color(*TICK, 90))
+    # The zero line is the only fixed mark.
+    rl.draw_rectangle_rec(rl.Rectangle(g.x - 2 * tick, g.zero - k, g.width + 4 * tick, 2 * k), rl.Color(*TICK, 150))
     if limits is not None:
       # The planner's floor and ceiling: ticks across the bar that move on the fixed scale as the limits change.
       for accel in (limits.lower, limits.upper):

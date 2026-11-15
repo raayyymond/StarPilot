@@ -216,6 +216,15 @@ def test_scale_is_fixed_and_the_limit_ticks_move_on_it():
   assert frame()[2] == pytest.approx(actual_y)
 
 
+def test_zero_line_is_the_only_fixed_mark():
+  g = accel_geometry(LOGICAL_720P[1])
+  for long_active in (True, False):
+    view, rl, _ = hud(lambda long_active=long_active: (sm(long_active=long_active), None))
+    view.render(*LOGICAL_720P)
+    marks = [call for call in rl.calls if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.TICK]
+    assert len(marks) == 1 and marks[0][1][1] + marks[0][1][3] / 2 == pytest.approx(g.zero)
+
+
 def test_limit_ticks_stay_on_while_long_is_engaged():
   g = accel_geometry(LOGICAL_720P[1])
   state = {'limits': (-1.2, 1.6), 'long_active': True}
