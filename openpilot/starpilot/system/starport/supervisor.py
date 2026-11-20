@@ -36,6 +36,7 @@ from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.starpilot.system.starport import car_profiles, device_health, identity as identity_store, new_setup, reachability, setup_ladder, system_slice
 from openpilot.starpilot.system.starport import reconnect_notice
 from openpilot.starpilot.system.starport.auto_connect import AutoConnectPolicy
+from openpilot.starpilot.system.starport.home_wifi import HomeWifiKeeper
 from openpilot.starpilot.system.starport.bootstrap import (MODERN_MAJOR, NAMES, WIFI_VERSION_REQUEST, BootstrapError, BootstrapTimeout,
                                                             WirelessBootstrap)
 from openpilot.starpilot.system.starport.bugsink_report import PairingAttempt
@@ -990,6 +991,7 @@ class Supervisor:
     """Periodic housekeeping from the daemon thread: pairing window, auto-connect."""
     now = time.monotonic() if now is None else now
     self.recover_wifi(now)
+    self.keep_home_wifi(now)
     owner = self._shared_bluetooth_owner
     if not self._projection_enabled():
       self._set(error='Android Auto was disabled')
@@ -2123,6 +2125,19 @@ class Supervisor:
       self.log("wifi_autoconnect_recover_failed", error=str(error))
       done = False
     self._wifi_recover_at = float("inf") if done else now + WIFI_RECOVER_RETRY_S
+
+  _home_wifi: HomeWifiKeeper | None = None
+
+  def keep_home_wifi(self, now: float) -> None:
+    """Rejoin a saved network in range that NetworkManager has given up on (see home_wifi.py). Never during a session."""
+    if self._session_alive():
+      return
+    if self._home_wifi is None:
+      self._home_wifi = HomeWifiKeeper(self.log)
+    try:
+      self._home_wifi.step(now)
+    except Exception as error:
+      self.log("home_wifi_check_failed", error=str(error))
 
   def recover_usb(self) -> None:
     """At startup: undo a wired session a crash interrupted, so the car stops seeing a dead accessory
