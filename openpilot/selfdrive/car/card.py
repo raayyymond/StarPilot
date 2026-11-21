@@ -332,6 +332,11 @@ class Car:
         raise ValueError('explicit car interface requires a radar interface')
       self.RI = RI
 
+    # Honda Bosch-A: read-only 20 Hz recording of the radar's internal track list (None on every other car)
+    from openpilot.starpilot.car.honda import array_b_recorder
+    self.xcp_radar_logger = array_b_recorder.build(self.CP, send_lock=self.vehicle_startup.send_lock, pm=self.pm,
+                                                   params=self.params)
+
     self.volt_cc_selected = gm_cc_transport_required(self.CP)
     self.volt_cc_boot_offset_ns = None
     self.volt_cc_source_floor_ns = 0
@@ -532,6 +537,8 @@ class Car:
     # Update carState from CAN
     observe_controller_can(self.CI, can_list)
     CS = self.CI.update(can_list)
+    if getattr(self, "xcp_radar_logger", None) is not None:
+      self.xcp_radar_logger.observe_can(can_list, time.monotonic_ns(), v_ego=float(CS.vEgo))
     self.RI.v_ego = CS.vEgo   # the Honda Bosch-A decoder bounds a reversing coast with it
     from openpilot.starpilot.car.gm.aol import f1_conventional_lateral_owner
     cancel_boot_ns = (time.clock_gettime_ns(time.CLOCK_BOOTTIME)
@@ -1196,6 +1203,10 @@ class Car:
     elif self.CP.brand == 'hyundai':
       from openpilot.starpilot.car.hyundai.dashboard import compose as hyundai_compose
       companion = hyundai_compose(self.CP, self.CI.CS, CS, companion, car_state_stamp=int(cs_send.logMonoTime))
+    if companion is not None and getattr(self, 'radar_point_status', None) is not None:
+      # radard reads the latest starpilotCarState: every one card sends carries the latest radar point statuses
+      from openpilot.starpilot.car.honda import radar_point_status
+      radar_point_status.write(companion.starpilotCarState, *self.radar_point_status)
     self.car_gps_publisher.update(self.CI.CS, self.pm, companion)
     self.pm.send('carState', cs_send)
     if getattr(self, 'learning_stamp_observer', None) is not None:
@@ -1298,6 +1309,15 @@ class Car:
       tracks_msg.valid = not RD.errors.canError
       tracks_msg.radarTracks = RD
       self.pm.send('radarTracks', tracks_msg)
+      statuses = getattr(getattr(self, 'RI', None), 'point_statuses', None)
+      if statuses is not None:
+        from openpilot.starpilot.car.honda import radar_point_status
+        self.radar_point_status = (int(tracks_msg.logMonoTime), dict(statuses))
+        status_msg = messaging.new_message('starpilotCarState', valid=bool(tracks_msg.valid))
+        radar_point_status.write(status_msg.starpilotCarState, *self.radar_point_status)
+        self.pm.send('starpilotCarState', status_msg)
+      if getattr(self, "xcp_radar_logger", None) is not None:
+        self.xcp_radar_logger.observe_radar_tracks(RD, time.monotonic_ns())
 
   def publish_traffic_receipt(self, cs_send):
     traffic_receipt = getattr(self, 'traffic_receipt', None)
@@ -1580,7 +1600,9 @@ class Car:
       with self.ioniq6_keepalive.lock:
         self.pm.send('sendcan', packet)
     else:
-      self.pm.send('sendcan', packet)
+      # The Bosch-A Array B recorder sends from its own thread on this same PubSocket.
+      with self.vehicle_startup.send_lock:
+        self.pm.send('sendcan', packet)
     self.learning_send_committed_mono_ns=self.learning_send_mono_ns
 
   def volt_cc_control_current(self):
@@ -1934,6 +1956,8 @@ class Car:
         from openpilot.starpilot.car.subaru.stop_start_caller import update as update_subaru_startup
         update_subaru_startup(self, now_nanos)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
+      if getattr(self, "xcp_radar_logger", None) is not None:
+        can_sends.extend(self.xcp_radar_logger.next_can_sends(time.monotonic_ns()))
       self.publish_sendcan(can_sends, valid=CS.canValid)
       if learning_snapshot is not None and self.learning_send_committed_mono_ns:
         try:
@@ -2049,6 +2073,8 @@ def main():
     Car.__init__(car)
     car.card_thread()
   finally:
+    if getattr(car, 'xcp_radar_logger', None) is not None:
+      car.xcp_radar_logger.close()
     if getattr(car, 'vehicle_startup', None) is not None:
       try:
         car.prepare_pe_restoration()
