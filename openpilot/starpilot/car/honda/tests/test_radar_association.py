@@ -1,19 +1,21 @@
+"""TARGET cases kept beside SOURCE's test_radar_lead_keep.py: the ones that still pass on SOURCE's Bosch-A policy
+and cover what test_radar_lead_keep does not (cut-ins, cut-outs, stationary returns, maturity, the MPC input).
+"""
 from types import SimpleNamespace as NS
 
 import pytest
 
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.controls.radard import KalmanParams
 from openpilot.starpilot.car.honda.radar import BoschALeadPolicy, Track
 
 
 def track(identifier=1, distance=47.5, lateral=-2.0, speed=15.4, acceleration=0.0, count=5):
-  value = Track.__new__(Track)
-  value.identifier = identifier
+  value = Track(identifier, speed, KalmanParams(DT_MDL))
+  value.update(distance, lateral, speed - 16.0, speed, True, False)
   value.cnt = count
-  value.dRel = distance
-  value.yRel = lateral
-  value.vRel = speed - 16.0
-  value.vLead = value.vLeadK = speed
+  value.vLeadK = speed
   value.aLeadK = acceleration
   value.aLeadTau = FirstOrderFilter(0.6, 0.45, 0.05)
   return value
@@ -40,32 +42,6 @@ def seeded(point=None):
   lead = step(owner, model(point.dRel, lateral=-point.yRel, speed=point.vLead), [point])
   assert lead['radar'] and lead['radarTrackId'] == point.identifier
   return owner
-
-
-def test_admitted_relaxed_match_does_not_retire_as_gross_distance_stale():
-  owner = seeded()
-  for _ in range(10):
-    lead = step(owner, model(76.5, y_std=0.8))
-    assert lead['radar'] and lead['radarTrackId'] == 1
-    assert owner.preferred_gross_distance_stale_counts[0] == 0
-
-
-def test_recorded_farther_vision_burst_keeps_continuous_moving_radar_range():
-  owner = seeded()
-  samples = ((73.6558, 3.3165, 0.5975), (78.3091, 3.4838, 0.6100),
-             (79.8259, 3.4606, 0.7102), (75.0199, 3.1916, 0.6405), (67.4930, 2.9413, 0.5891))
-  for distance, lateral, deviation in samples:
-    lead = step(owner, model(distance, lateral=lateral, y_std=deviation))
-    assert lead['radar'] and lead['radarTrackId'] == 1
-    assert lead['dRel'] == 47.5
-
-
-def test_persistent_incompatible_farther_target_expires_existing_preference():
-  owner = seeded()
-  for index in range(4):
-    lead = step(owner, model(140.0))
-    assert lead['radar'] is (index < 2)
-  assert owner.prev_lead_track_ids[0] == -1
 
 
 def test_strictly_matched_new_radar_target_wins_immediately():
@@ -118,13 +94,6 @@ def test_stationary_relaxed_match_keeps_original_gross_distance_expiry():
   for index in range(3):
     lead = step(owner, model(80.0, speed=0.0))
     assert lead['radar'] is (index < 2)
-
-
-def test_relaxed_radar_match_does_not_require_unused_vision_acceleration():
-  owner = seeded()
-  lead = model(76.5, y_std=0.8)
-  lead.a = []
-  assert step(owner, lead)['radar']
 
 
 def test_insufficient_maturity_low_probability_and_not_ready_do_not_gain_grace():

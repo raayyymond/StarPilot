@@ -202,15 +202,21 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
 class RadarD:
   def __init__(self, delay: float = 0.0, *, adjacent_enabled: bool = False, radar_available: bool = False,
                clock_pair_fn=None, honda_bosch_a_radar: bool = False, use_voacc: bool = False,
-               honda_bosch_a_range_only: bool = False):
+               honda_bosch_a_xcp_assist: bool = False, honda_bosch_a_range_only: bool = False):
     self.use_voacc = use_voacc
     self.tracks: dict[int, Track] = {}
     self.honda_bosch_a = None
     if honda_bosch_a_radar:
-      from openpilot.starpilot.car.honda.radar import BoschALeadPolicy
-      self.honda_bosch_a = BoschALeadPolicy(range_only=honda_bosch_a_range_only)
-    from opendbc.car.honda.bosch_a_radar import BOSCH_A_FREQ_HZ
-    self.kalman_params = KalmanParams(1.0 / BOSCH_A_FREQ_HZ if self.honda_bosch_a is not None else DT_MDL)
+      if honda_bosch_a_range_only:
+        from openpilot.starpilot.car.honda.radar_range_only import RangeOnlyLeadPolicy as BoschALeadPolicy
+      else:
+        from openpilot.starpilot.car.honda.radar import BoschALeadPolicy
+      self.honda_bosch_a = BoschALeadPolicy(xcp_assist=honda_bosch_a_xcp_assist)
+    if self.honda_bosch_a is not None:
+      from opendbc.car.honda.bosch_a_radar import BOSCH_A_FREQ_HZ  # the measured sweep rate (14.35 Hz), not a round 15
+      self.kalman_params = KalmanParams(1.0 / BOSCH_A_FREQ_HZ)
+    else:
+      self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
 
     self.v_ego = 0.0
@@ -363,6 +369,14 @@ class RadarD:
     if self.adjacent_enabled:
       self._qualified_adjacent(sm, rr)
 
+    # leadTwo on leadOne's radar track bypasses the leadOne-only bounds (bound_implausible_drop); publish it as no-lead
+    # (a2 s50 t3025.7 track 24: aT min -3.50 -> -1.86). Placed last so the adjacent labels still see both slots.
+    if self.honda_bosch_a is not None and len(leads_v3) > 1:
+      lead_one, lead_two = self.radar_state.leadOne, self.radar_state.leadTwo
+      if (lead_one.present and lead_one.radar and lead_two.present and lead_two.radar and
+          lead_one.radarTrackId == lead_two.radarTrackId):
+        self.radar_state.leadTwo = {'present': False}
+
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
 
@@ -400,25 +414,47 @@ class RadarD:
 
 
 # fuses camera and radar data for best lead detection
-def main() -> None:
-  config_realtime_process(5, Priority.CTRL_LOW)
+def _honda_bosch_a_xcp_assist(params, CP) -> bool:
+  # xcp_radar_assist is optional here: a missing module or a failing gate reads as off, never a radard startup exception.
+  try:
+    from openpilot.starpilot.car.honda.xcp_radar_assist import enabled as xcp_assist_enabled
+    return bool(xcp_assist_enabled(params, CP))
+  except Exception:
+    return False
 
-  # wait for stats about the car to come in from controls
-  cloudlog.info("radard is waiting for CarParams")
-  params = Params()
-  CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
-  cloudlog.info("radard got CarParams")
+
+def setup(params=None, CP=None) -> tuple[messaging.SubMaster, messaging.PubMaster, RadarD]:
+  if params is None:
+    params = Params()
+  if CP is None:
+    # wait for stats about the car to come in from controls
+    cloudlog.info("radard is waiting for CarParams")
+    CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
+    cloudlog.info("radard got CarParams")
+
+  from opendbc.car.honda.bosch_a_radar import BOSCH_A_RANGE_ONLY_CARS, VERIFIED_BOSCH_A_CARS
+  honda_bosch_a = CP.brand == "honda" and CP.carFingerprint in VERIFIED_BOSCH_A_CARS and not CP.radarUnavailable
+  honda_bosch_a_xcp = honda_bosch_a and _honda_bosch_a_xcp_assist(params, CP)
 
   # *** setup messaging
-  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2')
+  # Honda Bosch-A: card's starpilotCarState carries the radar points' F0 STATUS (radar_point_status); not a validity input
+  status_carrier = ['starpilotCarState'] if honda_bosch_a else []
+  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'] + status_carrier, poll='modelV2',
+                           ignore_alive=status_carrier, ignore_avg_freq=status_carrier, ignore_valid=status_carrier)
   adjacent_enabled = feature_enabled(params, CP, 'conditional', os.environ) and 'REPLAY' not in os.environ
   pm = messaging.PubMaster(['radarState', 'starpilotRadarState'] if adjacent_enabled else ['radarState'])
 
-  from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS, BOSCH_A_RANGE_ONLY_CARS
-  honda_bosch_a = CP.brand == "honda" and CP.carFingerprint in VERIFIED_BOSCH_A_CARS and not CP.radarUnavailable
   RD = RadarD(CP.radarDelay, adjacent_enabled=adjacent_enabled, radar_available=not CP.radarUnavailable,
               honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP),
+              honda_bosch_a_xcp_assist=honda_bosch_a_xcp,
               honda_bosch_a_range_only=honda_bosch_a and CP.carFingerprint in BOSCH_A_RANGE_ONLY_CARS)
+  return sm, pm, RD
+
+
+def main() -> None:
+  config_realtime_process(5, Priority.CTRL_LOW)
+
+  sm, pm, RD = setup()
   set_core_affinity([3, 5])
 
   while 1:
