@@ -730,7 +730,7 @@ struct StarPilotLongitudinalPlan {
   class Pipeline;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 6, 0)
+    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 7, 0)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -4323,6 +4323,10 @@ public:
 
   inline  ::uint64_t getDepartureAlertMonoTime() const;
 
+  inline float getAccelLimitMin() const;
+
+  inline float getAccelLimitMax() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -4377,6 +4381,12 @@ public:
 
   inline  ::uint64_t getDepartureAlertMonoTime();
   inline void setDepartureAlertMonoTime( ::uint64_t value);
+
+  inline float getAccelLimitMin();
+  inline void setAccelLimitMin(float value);
+
+  inline float getAccelLimitMax();
+  inline void setAccelLimitMax(float value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -19166,6 +19176,34 @@ inline  ::uint64_t StarPilotLongitudinalPlan::Builder::getDepartureAlertMonoTime
 inline void StarPilotLongitudinalPlan::Builder::setDepartureAlertMonoTime( ::uint64_t value) {
   _builder.setDataField< ::uint64_t>(
       ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getAccelLimitMin() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getAccelLimitMin() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setAccelLimitMin(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getAccelLimitMax() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getAccelLimitMax() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setAccelLimitMax(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool SlcState::Reader::hasSlotId() const {
