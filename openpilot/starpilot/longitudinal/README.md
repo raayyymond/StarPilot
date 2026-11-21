@@ -12,15 +12,14 @@ Policy order matters. Target shaping precedes PID preparation; vehicle output sh
 
 `LongitudinalPlanner.update(sm, *, cruise_ceiling=None, profile_tuning=None)` accepts an optional
 `CruiseCeiling(speed_mps, authority)` in addition to the existing driver cruise
-message. The live caller supplies no ceiling. The planner still reads
-`carState.vCruise` for the driver's selected ceiling and leaves every supplied
-Cap'n Proto message unchanged. [SLC](../speed_limits/README.md) adopts accepted
-limits into Card's ordinary cruise SET; it supplies no additional planner ceiling.
-The optional input remains available to explicit callers and replay tests.
+message. The live [SLC](../speed_limits/README.md) caller supplies a qualified cap.
+The planner still reads `carState.vCruise` as the driver's selected ceiling and
+leaves supplied messages unchanged. Accepted limits affect the planner cap, not SET.
 
 The `CruiseCeiling` dataclass validates no source or acceptance history by
-construction. Its caller must first establish a fresh, accepted, normalized
-m/s ceiling in the correct speed coordinate. The planner validates its numeric
+construction. Its caller must establish an accepted, normalized m/s ceiling in
+the correct speed coordinate, including the fixed previous-accepted-limit fallback.
+Vehicle coordinates and authority remain fresh. The planner validates its numeric
 shape and the shared four-mode `Authority` contract. It applies the lower of
 the supplied ceiling and the existing driver ceiling only when native system
 longitudinal control is available, the supplied authority grants active system
@@ -32,8 +31,11 @@ The planner records the decision in `last_cruise_ceiling_status`; it does not
 publish that diagnostic or alter the longitudinal plan schema.
 
 This optional input changes only the cruise candidate before the planner's
-existing jerk limiting. SLC uses the ordinary cruise braking response and selected
-profile after its SET adoption. Lead-relevance checks still prevent cruise comfort
+existing jerk limiting. SLC uses the selected profile for its capped target; a cap does
+not strengthen a softer cruise profile. While the SLC cap is the final cruise target and no
+braking-relevant lead is present, an overshoot is corrected over `CRUISE_ACCEL_RESPONSE_TIME`
+and braking builds at 0.15 m/s³ until -0.3 m/s², so friction brakes engage gently; braking
+already requested elsewhere keeps the normal jerk. Lead-relevance checks still prevent cruise comfort
 tuning from weakening braking for a close, slow or braking lead; malformed lead
 evidence also vetoes that tuning. The native MPC, lead, e2e, stop and acceleration
 arbitration remain in place. An inactive planner may still compute a nonzero
@@ -81,7 +83,7 @@ acceleration/braking limits. It cannot widen the native car acceleration range.
 Valid saved curves above native acceleration bounds are intersected with those
 bounds without dropping their other tuning or rewriting the saved document.
 Lead, e2e and cruise candidates still arbitrate normally. A lower explicit
-cruise or curve ceiling retains at least native cruise braking even when a saved profile asks
+cruise or curve ceiling retains at least the native cruise braking floor even when a saved profile asks
 for a softer approach; stronger configured braking may still apply.
 `forceDecel` keeps the native cruise braking response. Stock ACC and lateral-only control receive
 no profile effect. The acados model and cereal schemas are unchanged.
@@ -104,19 +106,19 @@ Ordinary personalities keep their existing 45/70 mph follow curve. The global
 **Selected Deceleration Profile** and explicit personality braking presets use
 different historical scales:
 
-| UI selection | Global or inherited through Selected Profile | Explicit personality preset |
+| UI selection | Global or inherited through Use global preset | Explicit personality preset |
 | --- | --- | --- |
 | Comfort (`eco`) | 0.6 m/s² | 0.5 m/s² |
 | Normal (`standard`) | 1.2 m/s² | 1.0 m/s² |
 | Sport (`sport`) | 2.4 m/s² | 2.0 m/s² |
 
 These are positive deceleration magnitudes for ordinary cruise braking,
-including an SLC change to cruise SET. Global values preserve the historical
+including a changed SLC cap. Global values preserve the historical
 1.2 m/s² baseline with half/normal/double responses; explicit personality
 presets retain their original physical values. The distinction preserves
 existing tuning and saved-document compatibility.
 
-Comfort is the fresh global default. A personality set to **Selected Profile**
+Comfort is the fresh global default. A personality set to **Use global preset**
 inherits the global choice; an explicit preset or Custom curve overrides it.
 For example, changing from inherited global Sport to explicit personality
 Sport changes the cruise braking magnitude from 2.4 to 2.0 m/s².

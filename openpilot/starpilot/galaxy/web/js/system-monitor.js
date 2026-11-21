@@ -1,3 +1,4 @@
+import { WikiHelp } from './wiki-help.js'
 import { GxState } from "./state.js"
 import { GxNotice } from "./notice.js"
 import { displayNumber, processFeature, processRows, processState, vital } from "./system-monitor-data.js"
@@ -6,7 +7,7 @@ import { GalaxySelect } from "./galaxy-select.js"
 
 export const SystemMonitor = {
   name: "SystemMonitor",
-  components: { GxState, GxNotice, GalaxySelect },
+  components: { WikiHelp, GxState, GxNotice, GalaxySelect },
   props: { mode: { type: String, required: true }, unauthorized: { type: Function, required: true } },
   data: () => ({ snapshot: null, status: "loading", error: "", query: "", scope: "comma", sort: "cpu", descending: true }),
   mounted() {
@@ -35,7 +36,7 @@ export const SystemMonitor = {
   },
   template: `
     <div class="gx-monitor">
-      <div class="gx-monitor__toolbar gx-page-header"><div><h2>System Monitor</h2><div class="gx-note">{{ mode === 'sample' ? 'Synthetic sample' : 'Local system' }} · Captured {{ captured }}</div></div><span class="gx-chip">{{ mode === 'sample' ? 'Offline preview' : status === 'current' ? 'Live' : 'Unavailable' }}</span></div>
+      <div class="gx-monitor__toolbar gx-page-header"><div><h2>System Monitor</h2><div class="gx-note">{{ mode === 'sample' ? 'Synthetic sample' : 'Local system' }} · Captured {{ captured }}</div></div><span class="gx-chip">{{ mode === 'sample' ? 'Offline preview' : status === 'current' ? 'Live' : 'Unavailable' }}</span><WikiHelp /></div>
       <p v-if="mode === 'sample'" class="gx-note">Illustrative values only. No device was read.</p>
       <p v-else class="gx-note">Read-only system activity. Updates every few seconds.</p>
       <GxNotice tone="danger" v-if="error">{{ error }}</GxNotice>
@@ -45,7 +46,8 @@ export const SystemMonitor = {
           <section class="gx-card gx-monitor__metric"><span>CPU</span><strong>{{ number(snapshot.cpuPercent, '%') }}</strong><small>{{ snapshot.cores.length }} cores · overall usage</small></section>
           <section class="gx-card gx-monitor__metric"><span>Memory</span><strong>{{ number(snapshot.memory.percent, '%') }}</strong><small>{{ snapshot.memory.usedMiB == null ? '—' : number(snapshot.memory.usedMiB / 1024) }} / {{ snapshot.memory.totalMiB == null ? '—' : number(snapshot.memory.totalMiB / 1024) }} GiB</small><progress v-if="snapshot.memory.percent != null" :value="snapshot.memory.percent" max="100" aria-label="Memory usage"></progress></section>
           <section class="gx-card gx-monitor__metric"><span>Processes</span><strong>{{ snapshot.processCount ?? '—' }}</strong><small>Uptime {{ uptime }}</small></section>
-          <section class="gx-card gx-monitor__metric"><span>Storage</span><strong>{{ number(snapshot.storage.usedGiB) }} GiB</strong><small>{{ number(snapshot.storage.totalGiB) }} GiB total</small></section>
+          <section class="gx-card gx-monitor__metric"><span>{{ snapshot.deviceType === 'tici' ? 'Internal storage' : 'Storage' }}</span><strong>{{ number(snapshot.storage.usedGiB) }} GiB</strong><small>{{ number(snapshot.storage.totalGiB) }} GiB total<span v-if="snapshot.deviceType === 'tici'"> · {{ number(snapshot.storage.freeGiB) }} GiB free</span></small></section>
+          <section v-if="snapshot.deviceType === 'tici' && snapshot.recordingStorage" class="gx-card gx-monitor__metric"><span>Recording drive</span><strong>{{ number(snapshot.recordingStorage.usedGiB) }} GiB</strong><small>{{ number(snapshot.recordingStorage.totalGiB) }} GiB total · {{ number(snapshot.recordingStorage.freeGiB) }} GiB free</small></section>
           <section class="gx-card gx-monitor__metric"><span>Onboard CPU temperature</span><strong>{{ number(sensor('cpuTempC', 'onboardMaxAgeMs'), ' °C') }}</strong></section>
           <section class="gx-card gx-monitor__metric"><span>Onboard GPU temperature</span><strong>{{ number(sensor('gpuTempC', 'onboardMaxAgeMs'), ' °C') }}</strong></section>
           <section class="gx-card gx-monitor__metric"><span>eGPU hotspot temperature</span><strong>{{ number(sensor('hotspotTempC', 'maxAgeMs'), ' °C') }}</strong></section>

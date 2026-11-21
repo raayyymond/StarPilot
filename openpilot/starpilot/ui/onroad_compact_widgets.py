@@ -14,7 +14,7 @@ from openpilot.starpilot.conditional_mode.policy import ModeChoice
 from openpilot.starpilot.ui.onroad_customization import offset as widget_offset, placement, rgba, widget_size
 from openpilot.starpilot.ui.onroad_state import AlertSize, ObservationKind, OnroadState, is_lane_change_notice, manual_slc_confirmation
 from openpilot.starpilot.ui.onroad_curve import controlling as curve_controlling
-from openpilot.starpilot.ui.onroad_conditional import reason as conditional_reason, status as conditional_status, stop_active
+from openpilot.starpilot.ui.onroad_conditional import reason as conditional_reason, status as conditional_status, stop_active, stop_observed
 from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile
 from openpilot.starpilot.ui.onroad_widget_style import draw_widget_frame
 from openpilot.starpilot.ui.wheel_feedback import WheelFeedbackFade
@@ -193,8 +193,7 @@ class CompactHudRenderer:
       self._last_cruise_display = display
       self._last_cruise_ns = now_ns
       elapsed = now_ns - self._set_speed_changed_ns if self._set_speed_changed_ns is not None else 0
-      persistent = (manual_slc_confirmation(Profile.COMPACT, state) or
-                    state.toyota_cruise_status in ('raise_dash', 'release_plus', 'off_hold'))
+      persistent = manual_slc_confirmation(Profile.COMPACT, state)
       return self._set_speed_alpha.update(float(persistent or 0 < elapsed < 2_500_000_000))
     if (self._last_cruise_ns is None or now_ns < self._last_cruise_ns or
         now_ns - self._last_cruise_ns > 150_000_000):
@@ -245,7 +244,7 @@ class MiciSidebarWidgets:
   def _conditional(self, center: rl.Rectangle, state: OnroadState) -> None:
     conditional = conditional_status(state)
     preview = state.visual_preview
-    if stop_active(state):
+    if stop_active(state) or stop_observed(state):
       self._stop_icon(center)
     elif (preview is not None and preview.curve_curvature is not None and state.alert.size != AlertSize.FULL) or curve_controlling(state):
       self._curve_icon(center)

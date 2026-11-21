@@ -9,7 +9,8 @@ from opendbc.car.tesla.values import CAR, DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD
 
 class TeslaScreenCANParser(CANParser):
   def __init__(self):
-    super().__init__('tesla_model3_vehicle', [('UI_status2', 0)], CANBUS.vehicle)
+    # Screen gestures are optional; their silence is not a control-bus fault.
+    super().__init__('tesla_model3_vehicle', [('UI_status2', float('nan'))], CANBUS.vehicle)
 
   def update(self, strings, sendcan=False):
     if strings and not isinstance(strings[0], list | tuple):
@@ -31,7 +32,8 @@ class CarState(CarStateBase):
       self.hands_on_level = 0
       self.das_control = {}
       return
-    self.cooperative_steering = CP.carFingerprint == CAR.TESLA_MODEL_3 and bool(CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.COOP_STEERING)
+    self.cooperative_steering = (CP.carFingerprint in (CAR.TESLA_MODEL_3, CAR.TESLA_MODEL_Y) and
+                                bool(CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.COOP_STEERING))
     self.can_define = CANDefine(DBC[CP.carFingerprint][Bus.party])
     self.shifter_values = self.can_define.dv["DI_systemStatus"]["DI_gear"]
 

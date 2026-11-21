@@ -24,11 +24,13 @@ from openpilot.starpilot.soloist import backend, bluealsa_runtime, bugsink_repor
 from openpilot.starpilot.soloist import now_playing as now_playing_module
 from openpilot.starpilot.soloist.client import PlayerClient
 from openpilot.starpilot.soloist.paths import CONTROL_SOCKET, Layout, private_dir
+from openpilot.starpilot.system import netwatch
 
 A2DP_SINK = '0000110b-0000-1000-8000-00805f9b34fb'
 EXIT_EXPIRED = 10
 STOP_SECONDS = 5.0
 OUTPUT_RETRY_SECONDS = 20.0
+PULL_RETRY_SECONDS = 15.0
 PAIRING_PROFILE_SECONDS = 180.0  # the pairing window plus time for the phone to save the comma's services
 # Phone audio exists only while the car is on. Otherwise the parked comma pages the phone for A2DP every 20 s and
 # advertises itself as a speaker, so a phone in the apartment keeps attaching its audio to an empty car.
@@ -39,6 +41,7 @@ PLAYING_GRACE_SECONDS = 600.0
 LOG_LINES = 200
 LOGIN_RETRY_MAX_SECONDS = 300.0
 LOGIN_REJECTED_AFTER = 3
+NETWORK_RECHECK_SECONDS = 20.0
 
 
 def network_ready() -> bool:
@@ -79,6 +82,20 @@ def parked() -> bool:
     return _params.get_bool('IsOffroad')
   except Exception:
     return False
+
+
+def network_change() -> float:
+  return netwatch.read_status().get('changedAt', 0.0)
+
+
+def cloud_connected(pid: int, run=subprocess.run) -> bool:
+  """True while the player holds a connection to an internet address."""
+  try:
+    listing = run(['ss', '-4tnHp', 'state', 'established'], capture_output=True, text=True, timeout=5).stdout
+  except (OSError, subprocess.SubprocessError):
+    return True
+  lines = '\n'.join(line for line in listing.splitlines() if f'pid={pid},' in line)
+  return any(netwatch.internet(connection, connection[0]) for connection in netwatch.parse_connections(lines))
 
 
 def _kill_group(process: subprocess.Popen | None) -> None:
@@ -151,7 +168,9 @@ class Supervisor:
   def __init__(self, layout: Layout | None = None, *, output: BluetoothOutput | None = None,
                spawn: Callable[..., subprocess.Popen] = subprocess.Popen, clock: Callable[[], float] = time.monotonic,
                make_client: Callable[[Path], PlayerClient] | None = None,
-               network: Callable[[], bool] = network_ready, parked: Callable[[], bool] = parked):
+               network: Callable[[], bool] = network_ready, parked: Callable[[], bool] = parked,
+               network_change: Callable[[], float] = network_change,
+               cloud: Callable[[int], bool] = cloud_connected):
     self.layout = layout or Layout.default()
     self.output = output or BluetoothOutput()
     self.spawn, self.clock, self.network, self.parked = spawn, clock, network, parked
@@ -178,6 +197,7 @@ class Supervisor:
     self.phone_track = None
     self.phone_profile = False
     self.pairing_profile_until = 0.0
+    self.pull_at = 0.0
     self.output_available = True
     self.output_check_at = 0.0
     self.output_lock = threading.Lock()
@@ -194,6 +214,9 @@ class Supervisor:
     self.login_failures = 0
     self.answered = False
     self.last_playing = False
+    self.network_change, self.cloud = network_change, cloud
+    self.network_seen: float | None = None
+    self.network_check_at = 0.0
 
   # ---- status ---------------------------------------------------------------------------------------
   def _set(self, state: str, message: str = '') -> None:
@@ -207,7 +230,8 @@ class Supervisor:
     if state == 'running' and player is not None:
       state = ('connecting' if not player['connected'] else 'waiting' if not player['loggedIn'] else
                'playing' if player['status'] == 'playing' and player['active'] else 'ready')
-    now_playing = (now_playing_module.from_phone(self.phone_track) if self.phone_prefs is not None and self.player is not None
+    phone = self.phone_prefs if self.player is not None else None
+    now_playing = (now_playing_module.from_phone(self.phone_track, device=phone.phone_name) if phone is not None
                    else now_playing_module.from_spotify(player))
     with self.log_lock:
       log = list(self.log)[-20:]
@@ -246,6 +270,7 @@ class Supervisor:
 
   def stop_children(self, *, release_phone: bool = True) -> None:
     self.unresponsive_since = None
+    self.network_check_at = 0.0
     self.login_failed = False
     self.output_generation += 1
     self.output_seen, self.output_flips, self.waiting_for = None, 0, ''
@@ -425,6 +450,7 @@ class Supervisor:
       self.retry_at = 0
     elif self.phone_profile and (prefs.output != 'bluetooth' or self.launched is None) and self.clock() >= self.pairing_profile_until:
       self._release_profile()
+    pull = prefs.pull_onroad
     state, message, launch_key = self.desired()
     now = self.clock()
     if launch_key != self.launched:
@@ -442,6 +468,8 @@ class Supervisor:
           self.retry_at = 0.0
           return
       self._watch(now, target)
+      if pull:
+        self._pull(now)
       return
     if now < self.retry_at:
       return
@@ -514,6 +542,7 @@ class Supervisor:
         self.unresponsive_since = None
       if self.answered and now - self.started_at > 60:
         self.fast_failures = 0
+      self._follow_network(now)
       return
     self.stop_children()
     if code == EXIT_EXPIRED:
@@ -522,6 +551,31 @@ class Supervisor:
       return
     detail = 'audio output closed' if server_dead and code is None else f'player exited ({code})'
     self._fail(now, f'Spotify stopped: {detail}. Retrying…')
+
+  def _follow_network(self, now: float) -> None:
+    """The network watcher closes the player's old connections; restart it only if it stays offline while idle."""
+    changed = self.network_change()
+    if changed != self.network_seen:
+      if self.network_seen is not None:
+        self.network_check_at = now + NETWORK_RECHECK_SECONDS
+        with self.log_lock:
+          self.log.append('network: the comma changed networks; Spotify is reconnecting')
+      self.network_seen = changed
+    if not self.network_check_at or now < self.network_check_at or self.player is None:
+      return
+    self.network_check_at = 0.0
+    if self.last_playing or self.cloud(self.player.pid):
+      return
+    self.stop_children()
+    self.retry_at = now
+    self._set('retrying', 'Reconnecting Spotify on the new network…')
+
+  def _pull(self, now: float) -> None:
+    snapshot = self.client.snapshot() if self.client is not None else {}
+    if now < self.pull_at or not (snapshot.get('connected') and snapshot.get('loggedIn')) or snapshot.get('active') or parked():
+      return
+    self.pull_at = now + PULL_RETRY_SECONDS
+    self.client.send('activate', {})
 
   def _retry_login(self, now: float) -> None:
     self.stop_children()
@@ -642,7 +696,7 @@ def serve(supervisor: Supervisor, path: str = CONTROL_SOCKET, stop: threading.Ev
 
 
 def main() -> None:
-  os.nice(10)  # music yields to everything driving-related; children inherit this
+  os.nice(5)  # music yields to driving-related work; the audio server sets its own priority
   supervisor = Supervisor()
   reap_orphans(supervisor.layout)
   legacy_profile = Path('/run/systemd/system/bluealsa.service.d/90-starpilot-phone.conf')

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import math
 import os
 import time
@@ -58,9 +60,17 @@ def _configure_process() -> None:
 
 
 def _place_inference(params) -> None:
+  from openpilot.common.hardware import PC
   from openpilot.common.realtime import set_core_affinity
+  cores = list(VISION_WITH_VASM if vasm_enabled(params, development=True) else LITTLE_CORES)
   try:
-    set_core_affinity(list(VISION_WITH_VASM if vasm_enabled(params, development=True) else LITTLE_CORES))
+    set_core_affinity(cores)
+    if not PC:
+      for tid in os.listdir('/proc/self/task'):
+        try:
+          os.sched_setaffinity(int(tid), cores)
+        except ProcessLookupError:
+          continue
   except OSError:
     pass
 
@@ -147,6 +157,28 @@ def _send(pm, *, session: str, status: str, stream: str, observed_ns: int = 0,
   pm.send('slcVisionObservation', msg)
 
 
+def _publish_ready_stop(pm, sm, params, stops, *, session, stream, is_metric, offset_ns,
+                        source_observed_ns, eof_boot_ns, frame_id, width, height,
+                        last_result, last_result_session, last_result_observed_ns, last_result_valid_until_ns):
+  sm.update(0)
+  pair = clock_pair_ns()
+  if (params.get_bool('IsMetric') != is_metric or pair is None or
+      abs((pair[1] - pair[0]) - offset_ns) > MAX_PAIR_SKEW_NS or
+      not 0 <= pair[1] - eof_boot_ns <= MAX_RESULT_AGE_NS or
+      not 0 <= pair[0] - source_observed_ns < STOP_MAX_AGE_NS or
+      not _driving_model_ready(sm, pair[0])):
+    return
+  speed_fresh = (last_result is not None and session == last_result_session and
+                 0 < last_result_observed_ns <= pair[0] <= last_result_valid_until_ns)
+  sample = StopEvidence(session, stream, source_observed_ns, eof_boot_ns, frame_id, width, height,
+                        tuple(StopBox(box.confidence, box.bbox) for box in stops))
+  _send(pm, session=session, status='valid' if speed_fresh else 'unknown', stream=stream,
+        observed_ns=last_result_observed_ns if speed_fresh else 0, eof_boot_ns=eof_boot_ns,
+        frame_id=frame_id, result=last_result if speed_fresh else None,
+        valid_until_ns=last_result_valid_until_ns if speed_fresh else None,
+        is_metric=is_metric, stop_sample=sample)
+
+
 def main() -> None:
   import openpilot.cereal.messaging as messaging
   from openpilot.cereal.visionipc import VisionStreamType
@@ -164,6 +196,7 @@ def main() -> None:
   core = None
   last_unavailable = 0.0
   tasks = _requested_tasks(params)
+  _place_inference(params)
   try:
     if cv2 is not None:
       cv2.setNumThreads(1)
@@ -199,6 +232,8 @@ def main() -> None:
           else:
             core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='tasks_changed',
+                       session=session, stream=stream)
         last_result = last_stop_sample = None
         last_result_session = ''
         last_result_observed_ns = last_result_valid_until_ns = 0
@@ -226,6 +261,8 @@ def main() -> None:
         is_metric = core.is_metric = current_metric
         core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='units_changed',
+                       session=session, stream=stream)
         last_result = None
         _send(pm, session=session, status='unknown', stream=stream)
       available = VisionIpcClient.available_streams('camerad', block=False)
@@ -235,6 +272,8 @@ def main() -> None:
         if client is not None:
           core.reset()
           session = uuid.uuid4().hex
+          cloudlog.event('vision.session_reset', reason='camera_stream_unavailable',
+                         session=session, stream=stream)
         client = None
         stream = 'unknown'
         _send(pm, session=session, status='unavailable', stream='unknown')
@@ -244,6 +283,8 @@ def main() -> None:
       if client is None or stream != new_stream:
         core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='camera_stream_changed',
+                       session=session, stream=stream)
         client = VisionIpcClient('camerad', wanted, True)
         stream = new_stream
       if not client.is_connected():
@@ -251,6 +292,8 @@ def main() -> None:
         # session. Earlier sign support cannot confirm a new producer's frame.
         core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='camera_reconnect',
+                       session=session, stream=stream)
         last_inference_ns = 0
         processing_interval_ns = 0
         last_clock_offset_ns = None
@@ -275,6 +318,8 @@ def main() -> None:
         if not model_paused:
           core.reset()
           session = uuid.uuid4().hex
+          cloudlog.event('vision.session_reset', reason='admission_driving_model_unready',
+                         session=session, stream=stream)
           _send(pm, session=session, status='unavailable', stream=stream)
           last_unavailable = admission_pair[0] / 1e9
         elif admission_pair[0] / 1e9 - last_unavailable >= UNAVAILABLE_RETRY_SECONDS:
@@ -307,6 +352,8 @@ def main() -> None:
               not 0 <= heartbeat_pair[1] - eof_boot_ns <= MAX_FRAME_AGE_NS):
             core.reset()
             session = uuid.uuid4().hex
+            cloudlog.event('vision.session_reset', reason='heartbeat_clock_or_age',
+                           session=session, stream=stream)
             last_clock_offset_ns = None
             _send(pm, session=session, status='stale', stream=stream, eof_boot_ns=eof_boot_ns, frame_id=frame_id)
             continue
@@ -318,6 +365,8 @@ def main() -> None:
           if not _driving_model_ready(sm, heartbeat_pair[0]):
             core.reset()
             session = uuid.uuid4().hex
+            cloudlog.event('vision.session_reset', reason='heartbeat_driving_model_unready',
+                           session=session, stream=stream)
             model_paused = True
             last_unavailable = heartbeat_pair[0] / 1e9
             _send(pm, session=session, status='unavailable', stream=stream)
@@ -346,6 +395,8 @@ def main() -> None:
       if last_clock_offset_ns is not None and abs(offset_ns - last_clock_offset_ns) > MAX_PAIR_SKEW_NS:
         core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='clock_offset_changed',
+                       session=session, stream=stream)
         last_inference_ns = 0
         processing_interval_ns = 0
       last_clock_offset_ns = offset_ns
@@ -358,7 +409,16 @@ def main() -> None:
         # The observation belongs to the original camera frame, not the end of
         # CPU inference. Completion never restamps an older camera observation.
         source_observed_ns = eof_boot_ns - offset_ns
-        result = core.observe(frame, now=source_observed_ns / 1e9)
+        core._stop_ready_callback = partial(_publish_ready_stop,
+          pm, sm, params, session=session, stream=stream, is_metric=is_metric, offset_ns=offset_ns,
+          source_observed_ns=source_observed_ns, eof_boot_ns=eof_boot_ns, frame_id=frame_id,
+          width=frame.shape[1], height=frame.shape[0], last_result=last_result,
+          last_result_session=last_result_session, last_result_observed_ns=last_result_observed_ns,
+          last_result_valid_until_ns=last_result_valid_until_ns) if tasks[1] else None
+        try:
+          result = core.observe(frame, now=source_observed_ns / 1e9)
+        finally:
+          core._stop_ready_callback = None
       except Exception as error:
         cloudlog.error('vision SLC inference unavailable: %s', error)
         _send(pm, session=session, status='unavailable', stream=stream)
@@ -380,12 +440,16 @@ def main() -> None:
           not 0 <= observed_pair[1] - eof_boot_ns <= MAX_RESULT_AGE_NS):
         core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='completion_clock_or_age',
+                       session=session, stream=stream)
         last_clock_offset_ns = None
         _send(pm, session=session, status='stale', stream=stream, eof_boot_ns=eof_boot_ns, frame_id=frame_id)
         continue
       if not _driving_model_ready(sm, observed_pair[0]):
         core.reset()
         session = uuid.uuid4().hex
+        cloudlog.event('vision.session_reset', reason='completion_driving_model_unready',
+                       session=session, stream=stream)
         model_paused = True
         last_unavailable = observed_pair[0] / 1e9
         _send(pm, session=session, status='unavailable', stream=stream)
@@ -410,5 +474,7 @@ def main() -> None:
       client = None
       core.reset()
       session = uuid.uuid4().hex
+      cloudlog.event('vision.session_reset', reason='camera_exception',
+                     session=session, stream=stream)
       last_clock_offset_ns = None
       time.sleep(0.1)

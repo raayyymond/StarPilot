@@ -2,13 +2,17 @@
 
 from dataclasses import replace
 from datetime import datetime
+import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
 
 from openpilot.starpilot.ui.raylib import rl
 
+from openpilot.starpilot.conditional_mode.policy import ModeChoice
+from openpilot.starpilot.conditional_mode.preferences import SavedPreferences, encode_preferences
 from openpilot.starpilot.ui import onroad
 from openpilot.starpilot.ui.onroad import axis_status_color, clock_text, driving_mode_description
 from openpilot.starpilot.ui.onroad_customization import MODE_WIDGET
@@ -20,7 +24,7 @@ from openpilot.starpilot.ui.presentation import Profile
 from openpilot.starpilot.ui.preview_shell import reference_onroad
 from openpilot.starpilot.ui.runtime_snapshot import RuntimeSnapshotAdapter
 from openpilot.starpilot.ui.shell import ShellMode
-from openpilot.starpilot.ui.tests.test_runtime_snapshot import NOW, ui_fake
+from openpilot.starpilot.ui.tests.test_runtime_snapshot import NOW, vehicle_ui
 from openpilot.starpilot.ui.tests.test_onroad_torque_draw import record_gpu
 
 
@@ -32,10 +36,10 @@ class TestOnroadAxes(unittest.TestCase):
   def setUp(self):
     for name in ('draw_rectangle_rounded', 'draw_rectangle_rounded_lines_ex', 'draw_circle', 'draw_ring'):
       self.enterContext(patch('openpilot.starpilot.ui.speed_limit_widget.rl.' + name, new_callable=Mock))
-    for name in ('circle', 'arrow', 'outline', 'confirmation'):
+    for name in ('circle', 'arrow', 'outline', 'button'):
       self.enterContext(patch('openpilot.starpilot.ui.speed_limit_shapes.SpeedLimitShapes.' + name, new_callable=Mock))
-    self.ui = ui_fake()
-    self.ui.CP = NS(carFingerprint='', openpilotLongitudinalControl=True, pcmCruise=False)
+    self.ui = vehicle_ui(self.enterContext(TemporaryDirectory()),
+                         carFingerprint='', openpilotLongitudinalControl=True, pcmCruise=False)
     car = self.ui.sm["carState"]
     car.canValid = True
     car.canTimeout = False
@@ -55,7 +59,7 @@ class TestOnroadAxes(unittest.TestCase):
     intent = IntentState('card-ui', 1, NOW, NOW, NOW + 200_000_000, False, True, False, True, armed)
     self.ui.sm.put('aolIntentWire', encode_intent(replace(intent, **changes)))
 
-  def test_latch_keeps_border_blue_through_standstill_min_speed_and_reverse(self):
+  def test_armed_latch_keeps_intent_but_not_active_color_when_steering_pauses(self):
     self.ui.aol_runtime = True
     self.publish_latch()
     for brand in ('hyundai', 'gm', 'toyota', 'ford', 'honda'):
@@ -67,10 +71,43 @@ class TestOnroadAxes(unittest.TestCase):
           paused = self.state(False, False)
           self.assertTrue(getattr(paused, "aol_latched", False))
           self.assertFalse(paused.lateral_active or paused.longitudinal_active or paused.engaged)
-          self.assertEqual(rgba(axis_status_color(paused)), (10, 186, 181, 255))
+          self.assertEqual(rgba(axis_status_color(paused)), (18, 40, 57, 255))
     self.publish_latch(False)
     self.assertFalse(self.state(False, False).aol_latched)
     self.assertEqual(rgba(axis_status_color(self.state(False, False))), (18, 40, 57, 255))
+
+  def test_subaru_armed_stop_has_distinct_standby_border_without_active_axes(self):
+    self.ui.aol_runtime = True
+    self.ui.CP.brand = 'subaru'
+    car = self.ui.sm['carState']
+    car.vEgo, car.standstill, car.gearShifter = 0, True, 'drive'
+    car.steerFaultTemporary = car.steerFaultPermanent = car.accFaulted = False
+    self.publish_latch()
+    stopped = self.state(False, False)
+    self.assertTrue(stopped.aol_armed_at_stop)
+    self.assertFalse(stopped.engaged or stopped.lateral_active or stopped.longitudinal_active)
+    self.assertEqual(rgba(axis_status_color(stopped)), (10, 100, 98, 255))
+    self.assertEqual(driving_mode_description(stopped), 'AOL Armed')
+    self.assertNotEqual(rgba(axis_status_color(stopped)), rgba(axis_status_color(self.state(True, False))))
+    for field, value in (('standstill', False), ('gearShifter', 'reverse'), ('canValid', False), ('steerFaultTemporary', True)):
+      old = getattr(car, field)
+      setattr(car, field, value)
+      with self.subTest(field=field):
+        self.assertFalse(self.state(False, False).aol_armed_at_stop)
+        self.assertEqual(rgba(axis_status_color(self.state(False, False))), (18, 40, 57, 255))
+      setattr(car, field, old)
+    self.publish_latch(False)
+    self.assertFalse(self.state(False, False).aol_armed_at_stop)
+
+  def test_missing_model_cannot_show_armed_aol_as_active_steering(self):
+    self.ui.aol_runtime = True
+    self.publish_latch()
+    self.ui.sm.valid["modelV2"] = False
+    current = self.state(False, False)
+    self.assertTrue(current.aol_latched)
+    self.assertFalse(current.lateral_active)
+    self.assertEqual(rgba(axis_status_color(current)), (18, 40, 57, 255))
+    self.assertEqual(rgba(axis_status_color(self.state(True, False))), (10, 186, 181, 255))
 
   def test_cleared_latch_does_not_borrow_previous_active_steering_color(self):
     self.ui.aol_runtime = True
@@ -113,7 +150,7 @@ class TestOnroadAxes(unittest.TestCase):
         state = self.state(lateral, longitudinal)
         self.assertEqual((state.lateral_active, state.longitudinal_active), (lateral, longitudinal))
         self.assertEqual(rgba(axis_status_color(state)), expected)
-        fonts = Mock()
+        fonts = Mock(profile=Profile.LARGE)
         fonts.measure.return_value = NS(width=20, height=10)
         fonts.vertical_ink.return_value = (0, 10)
         fonts.horizontal_ink.return_value = (0, 20)
@@ -121,7 +158,8 @@ class TestOnroadAxes(unittest.TestCase):
           UnifiedSpeedWidget(fonts).render(rl.Rectangle(30, 30, 1800, 1020), state)
         from openpilot.starpilot.ui.tests.test_unified_speed_native import foreground_calls
         label_color = foreground_calls(fonts.draw)[0].args[-1]
-        self.assertEqual(rgba(label_color), (190, 208, 202, 255))
+        self.assertEqual(rgba(label_color), (255, 255, 255, 255))
+        fonts.profile = Profile.COMPACT
         compact = CompactHudRenderer(fonts, Path("/unused"))
         with patch.object(compact, "prepare"), patch("openpilot.starpilot.ui.onroad_compact_widgets.rl.draw_texture_pro"), \
              patch("openpilot.starpilot.ui.onroad_compact_widgets.rl.draw_circle_gradient"):
@@ -243,7 +281,6 @@ class TestOnroadAxes(unittest.TestCase):
     self.assertTrue(self.state(True, False).longitudinal_overridden)
 
   def test_traffic_returns_after_conditional_stop_without_changing_intent(self):
-    from openpilot.starpilot.conditional_mode.policy import ModeChoice
     from openpilot.starpilot.ui.conditional_status import ConditionalDisplay
 
     traffic = replace(self.state(True, True), traffic_mode=True)
@@ -257,6 +294,8 @@ class TestOnroadAxes(unittest.TestCase):
     self.assertEqual(rgba(axis_status_color(replace(stopping, longitudinal_overridden=True))), (145, 155, 149, 255))
 
   def test_experimental_border_requires_active_combined_axes(self):
+    # These manual ExperimentalMode projections use the explicitly selected stock family.
+    self.ui.params.put('ConditionalModeConfig', json.loads(encode_preferences(SavedPreferences(mode=ModeChoice.STOCK))), block=True)
     combined = replace(self.state(True, True), experimental_enabled=True)
     self.assertEqual(rgba(axis_status_color(combined)), (218, 111, 37, 255))
     self.assertEqual(rgba(axis_status_color(replace(combined, longitudinal_active=False))), (10, 186, 181, 255))
@@ -279,9 +318,9 @@ class TestOnroadAxes(unittest.TestCase):
       (OnroadAlert(size=AlertSize.FULL), blue), (OnroadAlert(size=AlertSize.SMALL, critical=True), blue))]
     cases = [(*case, None) for case in cases]
     cases += [(False, False, False, alert, color, True) for alert, color in (
-      (OnroadAlert(), (10, 186, 181, 255)),
-      (OnroadAlert(size=AlertSize.SMALL, text1='Steering Paused'), (10, 186, 181, 255)),
-      (OnroadAlert(size=AlertSize.MID), (10, 186, 181, 255)),
+      (OnroadAlert(), (18, 40, 57, 255)),
+      (OnroadAlert(size=AlertSize.SMALL, text1='Steering Paused'), (18, 40, 57, 255)),
+      (OnroadAlert(size=AlertSize.MID), (18, 40, 57, 255)),
       (OnroadAlert(size=AlertSize.FULL), blue), (OnroadAlert(size=AlertSize.SMALL, critical=True), blue))]
     cases = [(*case, False) for case in cases]
     cases += [(True, True, override, alert, color, None, True) for override, alert, color in (
@@ -312,16 +351,16 @@ class TestOnroadAxes(unittest.TestCase):
           view.background_layer = None
           view.projection_viewport = None
           view._corner_cache = Mock()
+          view._fade = Mock()
           view.current_speed = Mock()
           view.steering_wheel = Mock()
           view.compact_hud = Mock()
           view.compact_sidebar = Mock()
-          view._fade = None
           with patch.object(onroad.clip, "begin_scissor_mode"), patch.object(onroad.clip, "end_scissor_mode"), \
                patch.object(onroad.rl, "draw_rectangle_rec"), patch.object(onroad.rl, "draw_rectangle_gradient_v"), \
                patch.object(onroad.rl, "draw_rectangle_lines_ex"), patch.object(onroad.rl, "draw_rectangle"), \
                patch.object(onroad.rl, "draw_texture_ex"), patch.object(onroad.rl, "draw_rectangle_rounded_lines_ex") as border, \
-               patch.object(onroad, "render_corner_hint"), patch.object(view, "_prepare_compact_fade"), \
+               patch.object(onroad, "render_corner_hint"), \
                patch.object(view, "_slc_actions"):
             view.render(state)
           expected = compact_color if profile == Profile.COMPACT else rgba(axis_status_color(state))
@@ -330,7 +369,8 @@ class TestOnroadAxes(unittest.TestCase):
             self.assertIn(driving_mode_description(state), [call.args[0] for call in view.fonts.draw.call_args_list])
 
   def test_driving_mode_text_uses_active_axes_and_effective_mode(self):
-    from openpilot.starpilot.conditional_mode.policy import ModeChoice
+    # These manual ExperimentalMode projections use the explicitly selected stock family.
+    self.ui.params.put('ConditionalModeConfig', json.loads(encode_preferences(SavedPreferences(mode=ModeChoice.STOCK))), block=True)
     from openpilot.starpilot.ui.conditional_status import ConditionalDisplay
 
     base = self.state(True, True)
@@ -371,21 +411,23 @@ class TestOnroadAxes(unittest.TestCase):
         view.fonts.draw.assert_not_called()
 
   def test_stock_cruise_is_distinct_from_system_long_and_lateral(self):
-    self.ui.CP = NS(carFingerprint='', openpilotLongitudinalControl=False, pcmCruise=True)
+    self.ui.CP.openpilotLongitudinalControl = False
+    self.ui.CP.pcmCruise = True
     self.ui.sm["carState"].cruiseState.enabled = True
     state = self.state(False, False)
     self.assertTrue(state.stock_cruise_active)
     self.assertTrue(state.cruise_active)
     self.assertFalse(state.longitudinal_active)
     self.assertEqual(rgba(axis_status_color(state)), (18, 40, 57, 255))
-    fonts = Mock()
+    fonts = Mock(profile=Profile.LARGE)
     fonts.measure.return_value = NS(width=20, height=10)
     fonts.vertical_ink.return_value = (0, 10)
     fonts.horizontal_ink.return_value = (0, 20)
     with patch("openpilot.starpilot.ui.onroad_large_widgets.draw_control_card"), patch.object(rl, "draw_line_ex"):
       UnifiedSpeedWidget(fonts).render(rl.Rectangle(30, 30, 1800, 1020), state)
     from openpilot.starpilot.ui.tests.test_unified_speed_native import foreground_calls
-    self.assertEqual(rgba(foreground_calls(fonts.draw)[0].args[-1]), (190, 208, 202, 255))
+    self.assertEqual(rgba(foreground_calls(fonts.draw)[0].args[-1]), (255, 255, 255, 255))
+    fonts.profile = Profile.COMPACT
     compact = CompactHudRenderer(fonts, Path("/unused"))
     with patch("openpilot.starpilot.ui.onroad_compact_widgets.rl.draw_circle_gradient"):
       compact.render(state)
@@ -412,7 +454,7 @@ class TestOnroadAxes(unittest.TestCase):
     self.assertEqual(rgba(axis_status_color(stale)), (18, 40, 57, 255))
     touch.release(120, 530, stale)
     self.assertEqual(requests, [])
-    fonts = Mock()
+    fonts = Mock(profile=Profile.COMPACT)
     fonts.measure.return_value = NS(width=20, height=10)
     fonts.vertical_ink.return_value = (0, 10)
     compact = CompactHudRenderer(fonts, Path("/unused"))

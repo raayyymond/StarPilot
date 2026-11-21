@@ -27,16 +27,25 @@ from openpilot.starpilot.models.catalog import (
 )
 
 RESOURCE_URL = "https://huggingface.co/buckets/StarPilot-Driving/StarPilot-Resources/resolve"
-ROOT = Path("/data/models") / GENERATION
+from openpilot.common.hardware import PC
+from openpilot.starpilot.storage import starpilot_storage_root
+
+_HOST_MODELS = os.environ.get("STARPILOT_MODEL_DIR", "") if PC else ""
+ROOT = (Path(_HOST_MODELS) if _HOST_MODELS else starpilot_storage_root() / "models" if PC else Path("/data/models")) / GENERATION
 MAX_MANIFEST = 2 * 1024 * 1024
 MAX_ARTIFACT = 2 * 1024 * 1024 * 1024
 MODEL_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 SUPPORTED_VERSIONS = {f"v{version}" for version in range(8, 17)}
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 SHIPPED_MODELS = Path(__file__).resolve().parents[2] / "selfdrive/modeld/models"
+DOM_CATALOG_PATH = Path(__file__).with_name("catalog-dom-v25.json")
+DOM_CATALOG_SHA256 = "363dd6d29182186bdaf6a32f0cd6f0bbf7d7720ee77cfd1538e3b82b874d2821"
 MODEL_RUNNER_REVISION = 2
 RUNTIME_ARTIFACT_KEYS = {"min_runner_revision", "artifact_format", "artifact_sha256", "artifact_size",
                          "artifact_chunk_count", "conversion_provenance", "validation"}
+
+
+FAILURE_SHOWN_SECONDS = 600
 
 
 class ModelError(ValueError):
@@ -141,12 +150,57 @@ def validate_manifest(data: object) -> dict[str, dict]:
   return rows
 
 
+def dom_laboratory_catalog() -> dict[str, dict]:
+  # This is the authenticated original Dom publication, not a rebuilt v26 bank.
+  if DOM_CATALOG_PATH.is_symlink() or not DOM_CATALOG_PATH.is_file():
+    raise ModelError('Missing original Dom laboratory catalog')
+  raw = DOM_CATALOG_PATH.read_bytes()
+  if len(raw) > MAX_MANIFEST or hashlib.sha256(raw).hexdigest() != DOM_CATALOG_SHA256:
+    raise ModelError('Original Dom laboratory catalog changed')
+  document = json.loads(raw)
+  if not isinstance(document, dict) or not isinstance(document.get('models'), list):
+    raise ModelError('Invalid original Dom catalog')
+  rows = {}
+  seen = set()
+  for row in document['models']:
+    if not isinstance(row, dict):
+      raise ModelError('Invalid original Dom row')
+    mid = row.get('id')
+    if not isinstance(mid, str) or not MODEL_ID.fullmatch(mid) or mid in seen:
+      raise ModelError('Duplicate or invalid original Dom identity')
+    seen.add(mid)
+    artifact = row.get('accelerator_artifacts', {}).get('chestnut')
+    if artifact is None:
+      continue
+    known = BY_ID.get(mid)
+    if (known is None or known.uses_external_gpu or row.get('model_size') != 'small' or
+        row.get('model_lab_eligible') is not True or row.get('version') != known.version or
+        not isinstance(artifact, dict) or artifact.get('execution_device') != 'AMD' or
+        artifact.get('artifact_format') != 'tinygrad_single_v1' or
+        artifact.get('artifact_filename') != f'{mid}_driving_chestnut_tinygrad.pkl' or
+        'compiler_revision' in artifact or not isinstance(artifact.get('artifact_sha256'), str) or
+        not SHA.fullmatch(artifact['artifact_sha256']) or type(artifact.get('artifact_size')) is not int or
+        not 0 < artifact['artifact_size'] <= MAX_ARTIFACT or type(artifact.get('artifact_chunk_count')) is not int or
+        not 0 <= artifact['artifact_chunk_count'] <= 99):
+      raise ModelError('Invalid original Dom AMD Small artifact')
+    rows[mid] = {**artifact, 'artifact_format': 'dom_v25_protocol5', 'source_format': 'tinygrad_single_v1',
+                 'source_compiler_revision': None, 'target_runtime_revision': COMPILER_REVISION,
+                 'source_manifest_sha256': DOM_CATALOG_SHA256, '_generation': 'v25',
+                 '_runtime_family': 'legacy9d', '_source_contract': 'dom_v25_protocol5'}
+  return rows
+
+
+
 def catalog(root: Path = ROOT) -> dict[str, dict]:
   base = validate_manifest(read_json(CATALOG_PATH))
   try:
     base.update(validate_manifest(read_json(root / "catalog.json")))
   except (OSError, ValueError, TypeError):
     pass
+  for mid, artifact in dom_laboratory_catalog().items():
+    if mid in base and 'amd' not in base[mid].get('accelerator_artifacts', {}):
+      base[mid] = {**base[mid], 'model_lab_eligible': True,
+                   'accelerator_artifacts': {**base[mid].get('accelerator_artifacts', {}), 'amd': artifact}}
   return base
 
 
@@ -179,6 +233,10 @@ def artifact_path(model_id: str, root: Path = ROOT, variant: str = "standard") -
     raise ModelError("Unknown downloadable model")
   if variant not in ("standard", "amd") or (variant == "amd" and entries[model_id].uses_external_gpu):
     raise ModelError("Unknown model artifact variant")
+  if variant == 'amd':
+    artifact = artifact_entry(model_id, catalog(root), variant)
+    if artifact.get('_source_contract') == 'dom_v25_protocol5':
+      return root / 'dom-v25' / model_id / artifact['artifact_filename']
   suffix = "amd_" if variant == "amd" else ""
   return root / model_id / f"{model_id}_driving_{suffix}tinygrad.pkl"
 
@@ -285,7 +343,7 @@ def resolve_runtime(chestnut_available: bool, *, root: Path = ROOT, randomize: b
     shipped = True
     small_path = shipped_default()
   if small_path is None:
-    raise ModelError("Shipped RDFv4 is missing or corrupt; reinstall the validated model package")
+    raise ModelError("Shipped Cheddar is missing or corrupt; reinstall the validated model package")
   big_path = verified_artifact(big, entries, root) if big not in ("", BUNDLED_CURRENT) and chestnut_available else None
   allow_big = chestnut_available and big_path is not None
   return RuntimeSelection(small, small_path, entries[small]["version"], big, big_path,
@@ -364,7 +422,7 @@ class ModelManager:
       return {**job, "downloading": busy,
               "refreshing": busy and job.get("state") == "running" and job.get("operation") == "refresh_manifest"}
 
-  def _publish_job(self, *, progress: str | None = None, model: str | None = None) -> None:
+  def _publish_job(self, *, progress: str | None = None, model: str | None = None, detail: dict | None = None) -> None:
     with state_lock(self.root):
       job = self._read_job()
       if job.get("jobId") != self.job_id or job.get("state") != "running":
@@ -375,6 +433,9 @@ class ModelManager:
       if model is not None:
         self.downloading = model
         job["model"] = model
+      if detail is not None:
+        previous = job.get("detail")
+        job["detail"] = {**(previous if isinstance(previous, dict) else {}), **detail}
       atomic_json(self.root / ".download-job.json", job)
 
   def _check_cancelled(self) -> None:
@@ -393,7 +454,13 @@ class ModelManager:
         try:
           job = self._read_job()
           if job.get("jobId") == self.job_id:
-            job.update(state="failed" if failed else "completed", progress=self.progress[:1000], model="", downloadAll=False)
+            previous = job.get("detail")
+            detail = previous if isinstance(previous, dict) else {}
+            if failed and self.progress != "Download cancelled" and job.get("operation") != "refresh_manifest":
+              detail = {**detail, "phase": "failed", "failed": True, "error": self.progress[:300], "rate": 0, "finishedAt": time.monotonic()}
+            else:
+              detail = {}
+            job.update(state="failed" if failed else "completed", progress=self.progress[:1000], model="", downloadAll=False, detail=detail)
             atomic_json(self.root / ".download-job.json", job)
         finally:
           lock.close()
@@ -519,9 +586,32 @@ class ModelManager:
       self.jetlink = JetlinkSettings()
     return self.jetlink
 
+  def _download_progress(self, job: dict) -> dict | None:
+    detail = job.get("detail")
+    if not isinstance(detail, dict):
+      return None
+
+    def whole(key: str) -> int:
+      value = detail.get(key)
+      return value if type(value) is int and value >= 0 else 0
+
+    rate = detail.get("rate")
+    rate = float(rate) if type(rate) in (int, float) and rate >= 0 else 0.0
+    if job["downloading"]:
+      phase = detail.get("phase") if detail.get("phase") in ("catalog", "downloading", "verifying", "installing") else "downloading"
+      model, error = job.get("model", ""), ""
+    elif (job.get("state") == "failed" and detail.get("failed") is True and
+          0 <= time.monotonic() - (detail.get("finishedAt") if type(detail.get("finishedAt")) in (int, float) else 0) < FAILURE_SHOWN_SECONDS):
+      phase, model, error = "failed", detail.get("model", ""), str(detail.get("error", ""))[:300]
+    else:
+      return None
+    return {"phase": phase, "model": model if model in catalog(self.root) else "", "received": whole("received"), "total": whole("total"),
+            "rate": rate, "index": whole("index"), "count": whole("count"), "error": error}
+
   def snapshot(self) -> dict:
     with self.lock:
       self._refresh_if_needed()
+      from openpilot.starpilot.models.laboratory import configuration
       entries, prefs = catalog(self.root), preferences(self.root)
       parked, gpu = self.parked(), self.gpu_present()
       job = self._job_status()
@@ -548,7 +638,7 @@ class ModelManager:
                        "Download required" if published else f"{GENERATION} download not published"})
       count = sum(bool(row["installed"]) for row in models)
       return {"schemaVersion": 1, "models": models, "activeSmallModel": prefs["small"], "activeBigModel": active_big,
-              "jetlinkBig": jetlink_big, "bigNoneLabel": big_none,
+              "jetlinkBig": jetlink_big, "bigNoneLabel": big_none, "laboratory": configuration(self.root),
               "currentModel": prefs["big"] if gpu and prefs["big"] else prefs["small"], "userFavorites": prefs["userFavorites"],
               "sortMode": prefs["sortMode"], "randomizer": prefs["randomizer"], "blacklistedModels": prefs["blacklistedModels"],
               "summary": {"total": len(models), "installed": count, "missing": len(models)-count},
@@ -556,9 +646,11 @@ class ModelManager:
               "downloadVariant": job.get("variant", "standard"),
               "modelToDownload": job.get("model", ""), "downloadAll": job.get("downloadAll", False),
               "downloading": job["downloading"], "refreshing": job["refreshing"], "progress": job.get("progress", ""),
+              "downloadProgress": self._download_progress(job),
               "isOnroad": not parked, "gpuAvailable": gpu, "jetlink": jetlink,
-              "capabilities": {"select": True, "download": parked, "downloadAll": parked, "cancel": True,
-                               "jetlink": parked, "refresh": parked, "favorites": True, "delete": parked, "randomizer": parked, "exclusions": parked}}
+              "capabilities": {"configureLaboratory": not job["downloading"], "select": True, "download": parked,
+                               "downloadAll": parked, "cancel": True,
+                               "jetlink": parked, "refresh": parked, "favorites": True, "delete": parked, "randomizer": True, "exclusions": True}}
 
   def _require_parked(self) -> None:
     if not self.parked():
@@ -595,20 +687,15 @@ class ModelManager:
           if (not isinstance(values, list) or len(values) > len(model_entries(self.root)) or
               any(not isinstance(x, str) or x not in model_entries(self.root) for x in values)):
             raise ModelError("Unknown model preference")
-        changes_selection = bool(set(payload) & {"randomizer", "blacklistedModels"})
         if "randomizer" in payload and type(payload["randomizer"]) is not bool:
           raise ModelError("Invalid randomizer preference")
-        if changes_selection:
-          self._require_parked()
         if "sortMode" in payload and payload["sortMode"] not in ("name", "date", "date_oldest", "community", "series", "favorites", "released"):
           raise ModelError("Invalid sort mode")
         with state_lock(self.root):
-          if changes_selection:
-            self._require_parked()
           saved = preferences(self.root)
           saved.update(payload)
           atomic_json(self.root / "preferences.json", saved)
-        return {"message": "Model preferences saved"}
+        return {**self.snapshot(), "message": "Model preferences saved"}
       if action != "active":
         self._require_parked()
       if action in ("download", "download_all", "refresh_manifest"):
@@ -698,7 +785,7 @@ class ModelManager:
             return {"message": "Model selected for Jetlink"}
           saved[profile] = mid
           atomic_json(self.root / "preferences.json", saved)
-        return {"message": "Model selected for the next drive"}
+        return {**self.snapshot(), "message": "Model selected for the next drive"}
       if action == "delete":
         if set(payload) != {"model"}:
           raise ModelError("Invalid delete request")
@@ -730,6 +817,7 @@ class ModelManager:
     failed = True
     try:
       self._check_cancelled()
+      self._publish_job(detail={"phase": "catalog"})
       self._refresh()
       self._check_cancelled()
       entries = catalog(self.root)
@@ -737,11 +825,16 @@ class ModelManager:
       ids = [payload["model"]] if action == "download" else [mid for mid, row in entries.items()
             if "artifact_sha256" in row and (not row.get("uses_external_gpu") or self.gpu_present() or payload.get("allowGpuWithoutGpu"))]
       if action != "refresh_manifest":
-        for mid in ids:
+        variants = {mid: ('standard', 'amd') if variant == 'amd' and 'artifact_sha256' in entries[mid] else (variant,) for mid in ids}
+        pending = [mid for mid in ids if any(not self._installed(mid, entries, current) for current in variants[mid])]
+        for index, mid in enumerate(pending, 1):
           self._check_cancelled()
-          if not self._installed(mid, entries, variant):
-            self._publish_job(model=mid)
-            self._download(mid, artifact_entry(mid, entries, variant), variant)
+          for current in variants[mid]:
+            if not self._installed(mid, entries, current):
+              entry = artifact_entry(mid, entries, current)
+              self._publish_job(model=mid, detail={"phase": "downloading", "model": mid, "index": index, "count": len(pending),
+                                                   "received": 0, "total": entry.get("artifact_size", 0), "rate": 0})
+              self._download(mid, entry, current)
       self._check_cancelled()
       self.progress = "Catalog updated" if action == "refresh_manifest" else "Downloaded!"
       failed = False
@@ -765,9 +858,11 @@ class ModelManager:
     fd, temp = tempfile.mkstemp(prefix=".download-", dir=destination.parent)
     try:
       digest, received = hashlib.sha256(), 0
+      rate, sampled_at, sampled_bytes, published_at = 0.0, time.monotonic(), 0, 0.0
       with os.fdopen(fd, "wb") as out:
         for piece in pieces:
-          with self.opener(f"{RESOURCE_URL}/models/{GENERATION}/{mid}/{piece}", timeout=30) as response:
+          generation = 'v25' if entry.get('_source_contract') == 'dom_v25_protocol5' else GENERATION
+          with self.opener(f"{RESOURCE_URL}/models/{generation}/{mid}/{piece}", timeout=30) as response:
             while data := response.read(1024 * 1024):
               self._check_cancelled()
               received += len(data)
@@ -775,13 +870,21 @@ class ModelManager:
                 raise ModelError("Model exceeds its declared size")
               out.write(data)
               digest.update(data)
+              now = time.monotonic()
+              if now - sampled_at >= 0.5:
+                instant = (received - sampled_bytes) / (now - sampled_at)
+                rate = instant if rate == 0 else rate * 0.7 + instant * 0.3
+                sampled_at, sampled_bytes = now, received
               progress = f"{display_name}: {received * 100 // size}%"
-              if progress != self.progress:
-                self._publish_job(progress=progress)
+              if progress != self.progress or now - published_at >= 0.5:
+                published_at = now
+                self._publish_job(progress=progress, detail={"phase": "downloading", "received": received, "total": size, "rate": int(rate)})
+        self._publish_job(detail={"phase": "verifying", "received": received, "total": size, "rate": 0})
         out.flush()
         os.fsync(out.fileno())
       if received != size or digest.hexdigest() != entry["artifact_sha256"]:
         raise ModelError("Model checksum did not match; download discarded")
+      self._publish_job(detail={"phase": "installing"})
       with state_lock(self.root):
         self._require_parked()
         self._check_cancelled()

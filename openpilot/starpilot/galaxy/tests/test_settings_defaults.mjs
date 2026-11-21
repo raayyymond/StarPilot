@@ -1,7 +1,10 @@
 import assert from "node:assert/strict"
-import { SettingsFeed } from "../web/js/settings.js"
+import { SettingsFeed, SETTINGS_SECTIONS } from "../web/js/settings.js"
 import { GalaxySettingRow } from "../web/js/galaxy-setting-row.js"
 import { compile } from "../web/vendor/vue/vue.esm-browser.js"
+
+assert.deepEqual(SETTINGS_SECTIONS.find(section => section.id === 'lateral').pages,
+  ['aol', 'lane_change', 'lane', 'torque', 'torque/developer'], 'Developer Parameters stays last in the requested lateral order')
 
 const requests = [], updates = []
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
@@ -36,7 +39,7 @@ function buttons(node) {
   if (!node || typeof node !== "object") return []
   return [...(node.type === "button" ? [node] : []), ...(Array.isArray(node.children) ? node.children.flatMap(buttons) : [])]
 }
-const context = { row, index: 2, control: "switch", currentValue: "Off", dimmed: false, locked: false, busy: false, updating: false,
+const context = { compact: false, row, index: 2, control: "switch", currentValue: "Off", dimmed: false, locked: false, busy: false, updating: false,
   showDefault: true, onSwitch: () => {}, $emit: (...args) => events.push(args) }
 const events = []
 const button = buttons(render(context, [])).find(node => node.children === "Default")

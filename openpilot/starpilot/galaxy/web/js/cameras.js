@@ -1,7 +1,9 @@
+import { WikiHelp } from './wiki-help.js'
 import { MenuTile } from "./menu-tile.js"
 import { GxNotice } from "./notice.js"
 import { GalaxySelect } from "./galaxy-select.js"
 import { BluetoothNotice, bluetoothConnection } from "./bluetooth-notice.js"
+import { balancedBlobUrl, whiteBalancePref, WhiteBalanceSwitch, BalancedImage } from "./white-balance.js"
 
 export class CameraSnapshotFeed {
   constructor({ publish, unauthorized, fetcher = (...args) => fetch(...args),
@@ -34,7 +36,7 @@ export class CameraSnapshotFeed {
     this.timer = this.later(() => {
       if (this.request !== request) return
       expire(new Error("Snapshot timed out. Try taking a new snapshot."))
-    }, camera === "cabin" ? 26000 : 13500)
+    }, camera === "cabin" ? 26000 : camera === "wide" ? 20500 : 13500)
     try {
       const response = await Promise.race([this.fetcher("./api/cameras/snapshot", { method: "POST", credentials: "same-origin",
         cache: "no-store", signal: request.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ camera }) }), deadline])
@@ -65,7 +67,7 @@ export class CameraSnapshotFeed {
 
 export const CamerasPage = {
   name: "CamerasPage",
-  components: { GxNotice, BluetoothNotice, GalaxySelect, MenuTile },
+  components: { WikiHelp, GxNotice, BluetoothNotice, GalaxySelect, MenuTile, WhiteBalanceSwitch, BalancedImage },
   props: { mode: { type: String, required: true }, go: { type: Function, required: true },
     tools: { type: Array, required: true },
     unauthorized: { type: Function, required: true } },
@@ -81,8 +83,8 @@ export const CamerasPage = {
   beforeUnmount() { document.removeEventListener("visibilitychange", this.visibility); this.snapshots.stop() },
   watch: { mode() { this.snapshots.stop() } },
   template: `
-    <div class="gx-view gx-settings" aria-label="Cameras and Monitoring">
-      <h2>Cameras &amp; Monitoring</h2>
+    <div class="gx-view gx-settings" aria-label="Cameras & Monitoring">
+      <header class="gx-settings__header gx-page-header"><div><h2>Cameras &amp; Monitoring</h2></div><WikiHelp /></header>
       <div class="gx-grid">
         <MenuTile v-for="tool in tools" :key="tool.path" :icon="tool.icon" :title="tool.name" :description="tool.description"
           :disabled="tool.availability === 'local-only' && mode !== 'local'" @select="go(tool.path)" />
@@ -98,7 +100,8 @@ export const CamerasPage = {
           <button class="gx-btn" type="button" :disabled="capturing" @click="snapshots.capture(camera)">{{ capturing ? 'Capturing…' : 'Take snapshot' }}</button>
           <button v-if="image || capturing" class="gx-btn gx-btn--tonal" type="button" @click="snapshots.stop()">{{ capturing ? 'Cancel' : 'Clear' }}</button>
           <GxNotice tone="danger" v-if="error">{{ error }}</GxNotice>
-          <img v-if="image" :src="image" :alt="camera + ' camera snapshot'" class="gx-media gx-media--spaced" />
+          <WhiteBalanceSwitch v-if="camera === 'cabin'" />
+          <BalancedImage v-if="image" :src="image" :balance="camera === 'cabin'" :alt="camera + ' camera snapshot'" class="gx-media gx-media--spaced" />
         </template>
         <p v-else>Camera snapshots are available on the connected device.</p>
         <small>Snapshots are not saved.</small></section>
@@ -153,7 +156,8 @@ export class LiveCameraPreview {
     image.onerror = failed
     this.cancelTimer(this.decodeTimer)
     this.decodeTimer = this.later(failed, 4000)
-    image.src = update.image
+    if (whiteBalancePref.on) balancedBlobUrl(update.image).then(url => { image.src = url }, () => { image.src = update.image })
+    else image.src = update.image
   }
   start() {
     if (bluetoothConnection()) return

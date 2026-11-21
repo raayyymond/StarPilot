@@ -7,6 +7,7 @@ from opendbc.car.toyota.values import ToyotaFlags
 
 from openpilot.selfdrive.selfdrived.events import Events
 from openpilot.starpilot.car.events import event_rules, unsupported_gear
+from openpilot.starpilot.car.ford.aol import stock_conventional_cruise_supported
 
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
@@ -85,7 +86,8 @@ class CarEvents:
           events.add(EventName.buttonEnable)
       # Enabling at a standstill with brake is allowed
       # TODO: verify 17 Volt can enable for the first time at a stop and allow for all GMs
-      if CS.vEgo < self.CP.minEnableSpeed and not (CS.standstill and CS.brakePressed and
+      # Zero permits standstill, including a filtered-speed undershoot below zero.
+      if self.CP.minEnableSpeed > 0. and CS.vEgo < self.CP.minEnableSpeed and not (CS.standstill and CS.brakePressed and
                                                    self.CP.networkLocation == NetworkLocation.fwdCamera):
         events.add(EventName.belowEngageSpeed)
       if CS.cruiseState.standstill:
@@ -137,7 +139,7 @@ class CarEvents:
       events.add(EventName.stockLkas)
     if CS.vEgo > MAX_CTRL_SPEED:
       events.add(EventName.speedTooHigh)
-    if CS.cruiseState.nonAdaptive:
+    if CS.cruiseState.nonAdaptive and not stock_conventional_cruise_supported(self.CP):
       events.add(EventName.wrongCruiseMode)
     if CS.brakeHoldActive and self.CP.openpilotLongitudinalControl:
       events.add(EventName.brakeHold)

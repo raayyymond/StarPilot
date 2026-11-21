@@ -9,7 +9,7 @@ import (
 	"pfeifer.dev/mapd/settings"
 )
 
-const MaxManagedGroups = 64
+const MaxManagedGroups = maxSnapshotTiles / 64
 
 type ManagedRegion struct {
 	Token       string     `json:"token"`
@@ -65,8 +65,8 @@ func BundledManagedRegions() ([]ManagedRegion, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := make([]ManagedRegion, 0, 229)
-	for _, group := range []string{"nation", "us_state"} {
+	result := make([]ManagedRegion, 0, 242)
+	for _, group := range []string{"nation", "us_state", "ca_province"} {
 		for key, data := range menu[group] {
 			if key == "" || strings.Contains(key, ".") || data.FullName == "" {
 				return nil, errors.New("invalid bundled region")

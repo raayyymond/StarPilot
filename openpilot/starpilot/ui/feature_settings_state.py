@@ -1,6 +1,6 @@
 """Immutable saved-feature settings presentation and guarded user intent."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import math
 from collections import deque
@@ -27,6 +27,9 @@ FEATURE_FLICK_DISTANCE = 60
 FEATURE_FLICK_VELOCITY = 800
 FEATURE_FLICK_WINDOW = 0.1
 FEATURE_FLICK_PAUSE = 0.06
+TOOLBAR_CHIP_HEIGHT = FEATURE_ROW_HEIGHT - 2 * 36
+TOOLBAR_LABEL_WIDTH = 110
+TOOLBAR_SLOT_GAP = 40
 
 SOUND_PRESETS = ("0", "10", "25", "50", "75", "100", "Auto")
 SYSTEM_PRESETS = {
@@ -57,6 +60,7 @@ class FeaturePage(StrEnum):
   TRAFFIC = "traffic"
   CURVE = "curve"
   TORQUE = "torque"
+  DEVELOPER_LATERAL = "torque/developer"
   TUNING = "tuning"
   BLUEPILOT = "torque/bluepilot"
   AOL = "aol"
@@ -110,6 +114,11 @@ class FeatureRow:
   actions: tuple[tuple[str, bool], ...] = ()
   presets: tuple[tuple[str, str], ...] = ()
   default_reset_available: bool = False
+  collapsed: bool = False  # a heading whose rows are hidden until it is opened
+  learned_value: str = field(default='', compare=False, repr=False)
+  accepted_finding_value: float | None = None
+  coordinate_locked: bool | None = None
+  learning_eligible: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -124,10 +133,32 @@ class FeatureSettingsState:
   parent_title: str = "StarPilot"
   editor: bool = False
   save_hint: str = "Changes save automatically"
+  subtitle_accent: str = ""
+  subtitle_tone: str = ""
+  # Pinned (title, current value) chips; a tap emits FeatureUiAction("toolbar", direction=index).
+  toolbar: tuple[tuple[str, str], ...] = ()
+
+
+def feature_body_top(state: FeatureSettingsState) -> int:
+  return FEATURE_ROW_TOP + (52 if state.subtitle else 0)
 
 
 def feature_row_top(state: FeatureSettingsState) -> int:
-  return FEATURE_ROW_TOP + (52 if state.subtitle else 0)
+  return feature_body_top(state) + (FEATURE_ROW_HEIGHT if state.toolbar else 0)
+
+
+def feature_page_rows(state: FeatureSettingsState) -> int:
+  return FEATURE_VISIBLE_ROWS - (1 if state.toolbar else 0)
+
+
+def toolbar_rects(state: FeatureSettingsState) -> tuple[tuple[str, str, tuple[float, float, float, float]], ...]:
+  if not state.toolbar:
+    return ()
+  left = (520 if state.sidebar_expanded else 20) + 55
+  slot = (FEATURE_CONTROL_RIGHT - left + TOOLBAR_SLOT_GAP) / len(state.toolbar)
+  y = feature_body_top(state) + (FEATURE_ROW_HEIGHT - TOOLBAR_CHIP_HEIGHT) / 2
+  return tuple((title, value, (left + index * slot + TOOLBAR_LABEL_WIDTH, y, slot - TOOLBAR_SLOT_GAP - TOOLBAR_LABEL_WIDTH,
+                               TOOLBAR_CHIP_HEIGHT)) for index, (title, value) in enumerate(state.toolbar))
 
 
 def value_editor_rect(state: FeatureSettingsState) -> tuple[float, float, float, float]:
@@ -185,7 +216,7 @@ def lane_strength_level(row: FeatureRow) -> float | None:
 def value_reason(row: FeatureRow) -> str:
   if row.available and lane_strength_level(row) is not None:
     return "1–10; 5 is normal. Lower values reduce centering and higher values strengthen it"
-  return row.reason
+  return (row.learned_value + ' · ' + row.reason) if row.learned_value else row.reason
 
 
 def value_text(row: FeatureRow) -> str:
@@ -252,7 +283,7 @@ def feature_page_counter_left(state: FeatureSettingsState) -> float:
 
 
 def feature_footer_top(state: FeatureSettingsState) -> float:
-  return feature_row_top(state) + FEATURE_VISIBLE_ROWS * FEATURE_ROW_HEIGHT
+  return feature_body_top(state) + FEATURE_VISIBLE_ROWS * FEATURE_ROW_HEIGHT
 
 
 def feature_footer_buttons(state: FeatureSettingsState) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]]:
@@ -288,7 +319,7 @@ def feature_parent_page(page: str) -> str | None:
 def feature_parent_title(page: str) -> str:
   parent = feature_parent_page(page)
   return {None: "StarPilot", FeaturePage.HUB: "Driving Controls", FeaturePage.PROFILES: "Long Planner",
-          FeaturePage.CONDITIONAL: "Conditional Driving Modes", FeaturePage.TORQUE: "Steering and Torque"}.get(parent, (parent or "").replace("_", " ").title())
+          FeaturePage.CONDITIONAL: "Conditional Driving Modes", FeaturePage.TORQUE: "Steering & Torque"}.get(parent, (parent or "").replace("_", " ").title())
 
 
 def boolean_value(row: FeatureRow) -> bool | None:
@@ -307,16 +338,17 @@ def feature_action_left(row: FeatureRow) -> float:
 
 
 def feature_action_rects(row: FeatureRow, y: float) -> tuple[tuple[float, float, float, float], ...]:
-  width = 300 if row.key == "drive_state" else FEATURE_CONTROL_RIGHT - FEATURE_CONTROL_LEFT
+  width = (300 if row.key == "drive_state" else 240 if row.key.startswith("model:") or row.key == "models:active" else
+           FEATURE_CONTROL_RIGHT - FEATURE_CONTROL_LEFT)
   margin = 14 if row.key == "drive_state" else FEATURE_ACTION_MARGIN
   left = FEATURE_CONTROL_RIGHT - len(row.actions) * width - max(0, len(row.actions) - 1) * 16
   return tuple((left + index * (width + 16), y + margin, width, FEATURE_ROW_HEIGHT - 2 * margin)
                for index in range(len(row.actions)))
 
 
-def feature_scroll(scroll: int, direction: int, row_count: int) -> int:
-  last_page = max(0, row_count - 1) // FEATURE_VISIBLE_ROWS * FEATURE_VISIBLE_ROWS
-  return max(0, min(last_page, scroll + direction * FEATURE_VISIBLE_ROWS))
+def feature_scroll(scroll: int, direction: int, row_count: int, page: int = FEATURE_VISIBLE_ROWS) -> int:
+  last_page = max(0, row_count - 1) // page * page
+  return max(0, min(last_page, scroll + direction * page))
 
 
 @dataclass(frozen=True)
@@ -370,7 +402,7 @@ class FeatureInput:
     left = (520 if state.sidebar_expanded else 20) + 25
     if include_sidebar and state.sidebar_expanded:
       left = 0
-    return left <= x <= 2125 and feature_row_top(state) <= y < feature_row_top(state) + FEATURE_VISIBLE_ROWS * FEATURE_ROW_HEIGHT
+    return left <= x <= 2125 and feature_row_top(state) <= y < feature_row_top(state) + feature_page_rows(state) * FEATURE_ROW_HEIGHT
 
   @staticmethod
   def target(x: float, y: float, state: FeatureSettingsState) -> FeatureUiAction | None:
@@ -380,7 +412,12 @@ class FeatureInput:
       return None
     if 12 <= y <= 12 + FEATURE_HEADER_HEIGHT:
       return FeatureUiAction("back") if not state.sidebar_expanded and x < left + FEATURE_BACK_WIDTH else None
-    if 12 + FEATURE_HEADER_HEIGHT < y < row_top:
+    if state.toolbar and not state.editor and feature_body_top(state) <= y < row_top:
+      for index, (_, _, (bx, by, width, height)) in enumerate(toolbar_rects(state)):
+        if bx <= x <= bx + width and by <= y <= by + height:
+          return FeatureUiAction("toolbar", direction=index)
+      return None
+    if 12 + FEATURE_HEADER_HEIGHT < y < feature_body_top(state):
       return FeatureUiAction("details") if state.subtitle else None
     if state.editor:
       bx, by, width, height = value_done_rect(state)
@@ -389,7 +426,7 @@ class FeatureInput:
     if not state.editor and y >= feature_footer_top(state):
       direction = feature_footer_target(x, y, state)
       return FeatureUiAction("scroll", direction=direction) if direction is not None else None
-    if not row_top <= y < row_top + FEATURE_VISIBLE_ROWS * FEATURE_ROW_HEIGHT:
+    if not row_top <= y < row_top + feature_page_rows(state) * FEATURE_ROW_HEIGHT:
       return None
     if len(state.rows) == 1 and (controls := value_buttons(state, state.rows[0], row_top)):
       row = state.rows[0]
@@ -497,7 +534,7 @@ class FeatureInput:
       swipe = abs(dx) >= FEATURE_SWIPE_DISTANCE or (abs(dx) >= FEATURE_FLICK_DISTANCE and self._is_flick(px, dx, now))
       if (self._in_body(px, py, state, include_sidebar=True) and
           (self._in_body(px, py, state) or self._in_body(x, y, state)) and swipe and abs(dx) >= 2 * dy and
-          feature_scroll(state.scroll, direction, len(state.rows)) != state.scroll):
+          feature_scroll(state.scroll, direction, len(state.rows), feature_page_rows(state)) != state.scroll):
         action = FeatureUiAction("scroll", direction=direction)
     self.cancel()
     if action is not None:

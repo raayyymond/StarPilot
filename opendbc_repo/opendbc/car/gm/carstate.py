@@ -19,6 +19,7 @@ from opendbc.car.gm.values import (DBC, AccState, CruiseButtons, STEER_THRESHOLD
                                    ASCM_INTERCEPT_CAR, ORDINARY_ASCM_CAR, ORDINARY_SDGM_CAR, GMFlags, GMSafetyFlags, NO_ACC_BOLT_CAR,
                                    CC_GATEWAY_STOCK_CAR, requires_camera_state_sources, is_conventional_cc_pedal_profile, is_silverado_cc_pedal_profile,
                                    is_volt_cc_profile, is_volt_cc_f1_profile, is_silverado_cc_stock_profile, is_ordinary_cc_profile,
+                                   is_ordinary_cc_stock_profile,
                                    is_malibu_cc_f1_profile, VOLT_BSM_CAR, CAR,
                                    is_volt_gateway_profile, is_volt_gateway_alternate_brake, is_bolt_cc_profile, BOLT_CC_WORDS,
                                    is_bolt_pedal_profile, is_bolt_pedal_removed_profile, is_bolt_present_no_acc_pedal_profile, is_volt_camera_removed,
@@ -76,6 +77,7 @@ class CarState(CarStateBase):
     self.pedal_sensor_healthy = False
     self.pedal_sensor_ts_nanos = 0
     self.bolt_pedal_gear_ts_nanos = 0
+    self.bolt_acc_dashboard_paddle = (0, False)
     self.bolt_pedal_main_ts_nanos = 0
     self.pedal_sensor_counter = None
     self.pedal_packer = CANPacker(DBC[CP.carFingerprint][Bus.pt]) if CP.flags & GMFlags.PEDAL_LONG.value else None
@@ -163,6 +165,12 @@ class CarState(CarStateBase):
       self.bolt_pedal_gear_ts_nanos = (self.conventional_cancel_credit.gear_ns if present_no_acc_pedal else
                                      pt_cp.ts_nanos["ECMPRDNL2"]["PRNDL2"])
       self.bolt_pedal_main_ts_nanos = pt_cp.ts_nanos["ECMEngineStatus"]["CruiseMainOn"]
+      gear = pt_cp.vl["ECMPRDNL2"]
+      self.bolt_acc_dashboard_paddle = (
+        pt_cp.ts_nanos["EBCMRegenPaddle"]["RegenPaddle"],
+        gear["PRNDL2"] == 5 and gear["ManualMode"] == 1 and
+        pt_cp.vl["EBCMRegenPaddle"]["RegenPaddle"] == 2,
+      )
 
     if self.camera_pedal_profile is not None:
       analog = (("ECMAcceleratorPos", "BrakePedalPos") if self.camera_pedal_profile.brake_source == BrakeSource.BE else
@@ -219,7 +227,7 @@ class CarState(CarStateBase):
     if (self.CP.carFingerprint in CC_GATEWAY_STOCK_CAR or self.CP.carFingerprint == CAR.CHEVROLET_VOLT_CC):
       self.cc_gateway_buttons_ts_nanos = pt_cp.ts_nanos["ASCMSteeringButton"]["RollingCounter"]
       self.cc_gateway_cruise_ts_nanos = pt_cp.ts_nanos["ECMCruiseControl"]["CruiseActive"]
-    if is_silverado_cc_stock_profile(self.CP):
+    if (is_silverado_cc_stock_profile(self.CP) or is_ordinary_cc_stock_profile(self.CP)):
       fields = (("PSCMStatus", "LKATorqueDelivered", 300_000_000),
                 ("EBCMWheelSpdRear", "RLWheelSpd", 100_000_000),
                 ("ASCMSteeringButton", "RollingCounter", 300_000_000),
@@ -496,7 +504,10 @@ class CarState(CarStateBase):
         elif self.camera_pedal_profile is not None and self.camera_pedal_profile.longitudinal:
           ret.gasPressed = ret.gasPressed or first + second > 1190
         else:
-          ret.gasPressed = (125677 * first + 251976 * second > 198510000 if self.volt_cc_pedal_profile is not None else sum(tracks) / 2. > 23.0)
+          if self.volt_cc_pedal_profile is not None or self.hybrid_profile is not None:
+            ret.gasPressed = 125677 * first + 251976 * second > 198510000
+          else:
+            ret.gasPressed = sum(tracks) / 2. > 23.0
 
     ret.steeringAngleDeg = pt_cp.vl["PSCMSteeringAngle"]["SteeringWheelAngle"]
     ret.steeringRateDeg = pt_cp.vl["PSCMSteeringAngle"]["SteeringWheelRate"]
@@ -555,7 +566,7 @@ class CarState(CarStateBase):
       if not is_conventional_cc_pedal_profile(self.CP):
         ret.cruiseState.standstill = False
       ret.cruiseState.speed = pt_cp.vl["ECMCruiseControl"]["CruiseSetSpeed"] * CV.KPH_TO_MS
-      ret.cruiseState.nonAdaptive = not (is_silverado_cc_stock_profile(self.CP) or
+      ret.cruiseState.nonAdaptive = not ((is_silverado_cc_stock_profile(self.CP) or is_ordinary_cc_stock_profile(self.CP)) or
                                          is_ordinary_cc_profile(self.CP) or is_conventional_cc_pedal_profile(self.CP) or
                                          is_volt_cc_profile(self.CP))
     if self.hybrid_profile is not None:
@@ -682,15 +693,22 @@ class CarState(CarStateBase):
       if self.hybrid_profile.pedal and self.hybrid_profile.longitudinal:
         healthy = (healthy and self.pedal_sensor_healthy and
                    0 < self.pedal_sensor_ts_nanos <= now <= self.pedal_sensor_ts_nanos + 100_000_000)
-      _, semantic, edges = self.hybrid_buttons.update(
-        healthy, enable_ready=healthy and not ret.brakePressed and not ret.gasPressed and not ret.regenBraking)
+      previous_semantic, semantic, edges = self.hybrid_buttons.update(
+        healthy, enable_ready=healthy and not ret.brakePressed and not ret.regenBraking and
+        (self.hybrid_profile.pedal or not ret.gasPressed))
       from opendbc.car.gm.hybrid_cc import HybridPhysical
       self.volt_cc_physical = HybridPhysical(now, tuple(stamp for stamp, _ in self.hybrid_sources),
                                             self.hybrid_buttons.slot.credit_ns)
       self.cruise_buttons = CruiseButtons.INIT if semantic is None else semantic
+      # Physical Cancel stops stock cruise while this exact pedal owner stays enabled.
+      cancel_passthrough = self.hybrid_profile.pedal and self.hybrid_profile.longitudinal
+      button_map = {k: v for k, v in BUTTONS_DICT.items() if k != CruiseButtons.CANCEL} if cancel_passthrough else BUTTONS_DICT
+      side_buttons = (previous_semantic, semantic, *(value for edge in edges for value in edge))
+      suppress_side_buttons = cancel_passthrough and any(b in (CruiseButtons.CANCEL, CruiseButtons.MAIN) for b in side_buttons)
+      distance_events = [] if suppress_side_buttons else create_button_events(
+        self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise})
       ret.buttonEvents = [event for old, new in edges for event in
-                          create_button_events(new, old, BUTTONS_DICT, unpressed_btn=CruiseButtons.UNPRESS)] + create_button_events(
-                            self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise})
+                          create_button_events(new, old, button_map, unpressed_btn=CruiseButtons.UNPRESS)] + distance_events
     if self.flashed_volt_profile:
       lkas_events = []
       for pressed in pt_cp.vl_all["ASCMSteeringButton"]["LKAButton"]:

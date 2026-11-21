@@ -104,7 +104,8 @@ class HardwareH264Encoder:
                library: Path = LIBRARY, rate_control: str = "cbr", max_height: int | None = None):
     # H.264: the opt-in limit when one is passed, else the class limit. A subclass (H.265) keeps its own.
     max_width, max_height = OPT_IN_SIZES.get(max_height, (self.max_width, self.max_height))
-    if not (0 < width <= max_width and 0 < height <= max_height) or width % 2 or height % 2 or fps != HW_FPS:
+    if not (0 < min(width, height) <= max_height and max(width, height) <= max_width) or width % 2 or height % 2 or \
+       fps != HW_FPS:
       raise ValueError(f"Hardware encoder supports even sizes up to {max_width}x{max_height} at 30 fps")
     if margin_height % 4:
       margin_height = 0  # only chroma-aligned black margins may be skipped

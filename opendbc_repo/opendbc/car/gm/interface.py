@@ -1,3 +1,4 @@
+from opendbc.car import ACCEL_MAX_TAKEOFF
 #!/usr/bin/env python3
 from math import fabs, exp
 import numpy as np
@@ -26,6 +27,7 @@ TransmissionType = structs.CarParams.TransmissionType
 NetworkLocation = structs.CarParams.NetworkLocation
 
 NON_LINEAR_TORQUE_PARAMS = {
+  CAR.BUICK_ENVISION_SDGM: [2.4, 1.05, 0.20, 0.0],
   CAR.CHEVROLET_BOLT_EUV: [2.6531724862969748, 1.0, 0.1919764879840985, 0.009054123646805178],
   CAR.GMC_ACADIA: [4.78003305, 1.0, 0.3122, 0.05591772],
   CAR.CHEVROLET_SILVERADO: [3.29974374, 1.0, 0.25571356, 0.0465122]
@@ -51,6 +53,8 @@ class CarInterface(CarInterfaceBase):
     return super().apply(c, now_nanos)
 
   def update(self, can_packets):
+    if self.CC.bolt_pedal_recovery:
+      self.CC.observe_pedal_rejections(can_packets)
     if self.CC.bolt_steering_ack_counter:
       self.CC.observe_steering_receipts(can_packets)
       self.CS.bolt_steering_pending = self.CC.bolt_steering_pending
@@ -135,7 +139,10 @@ class CarInterface(CarInterfaceBase):
     return ret
 
   @staticmethod
-  def get_pid_accel_limits(CP, current_speed, cruise_speed):
+  def get_pid_accel_limits(CP, current_speed, cruise_speed, *, faster_takeoffs=False):
+    if faster_takeoffs:
+      lower, _ = CarInterface.get_pid_accel_limits(CP, current_speed, cruise_speed)
+      return lower, ACCEL_MAX_TAKEOFF
     if is_volt_sdgm_accepted_envelope(CP):
       return CarControllerParams.ACCEL_MIN, volt_sdgm_accepted_accel_max(CP, current_speed)
     profile = camera_acc_pedal_profile(CP)
@@ -487,6 +494,15 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.GMC_ACADIA:
       ret.minEnableSpeed = -1.  # engage speed is decided by pcm
       ret.steerActuatorDelay = 0.2
+      CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
+
+    elif candidate == CAR.BUICK_ENVISION_SDGM:
+      ret.minEnableSpeed = -1.
+      ret.steerActuatorDelay = 0.2
+      ret.alphaLongitudinalAvailable = False
+      ret.openpilotLongitudinalControl = False
+      ret.pcmCruise = True
+      ret.safetyConfigs[0].safetyParam = 0xE900
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate in (CAR.BUICK_LACROSSE, CAR.BUICK_LACROSSE_ASCM, CAR.BUICK_LACROSSE_ASCM_19US):

@@ -4,6 +4,18 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
 source "$DIR/launch_env.sh"
 
+if [ -f "$DIR/scripts/branch-migration.json" ]; then
+  python3 "$DIR/scripts/branch_migration.py" --repo "$DIR" || echo "Branch migration deferred; keeping installed software."
+fi
+
+function run_agnos_updater {
+  if python3 -c "import openpilot.system.ui.updater"; then
+    python3 -m openpilot.system.ui.updater "$@"
+  else
+    "$DIR/openpilot/common/hardware/comma/updater" "$@"
+  fi
+}
+
 function agnos_init {
   if [ "${AGNOS_UPDATE_POLICY:-auto}" = "retain" ] && [ "$(< /VERSION)" != "$AGNOS_VERSION" ]; then
     echo "This StarPilot build retains AGNOS $AGNOS_VERSION; installed OS does not match. No OS update was attempted."
@@ -30,7 +42,7 @@ function agnos_init {
       sudo reboot
     fi
     while true; do
-      "$DIR/openpilot/common/hardware/comma/updater" "$AGNOS_PY" "$MANIFEST"
+      run_agnos_updater "$AGNOS_PY" "$MANIFEST"
     done
   fi
 
@@ -64,12 +76,17 @@ function update_is_ready {
 # A validated legacy return records the OS it was staged against. Check it on
 # every boot before swapping trees, including manual reboots.
 # Keep this in sync with TRUSTED_LEGACY_RELEASES in updated.py.
-TRUSTED_LEGACY_STARPILOT_COMMIT="4a553da9ac22a14e34513c011aed04c1e93b4619"
+TRUSTED_LEGACY_STARPILOT_COMMIT="c2e5e469ee8fefc3cffb514dc2e1a1fb82a421d6"
+TRUSTED_LEGACY_STABLE_MIGRATION="0b2061df8d2a931feaf34943e3460510d160f99e"
+
+function trusted_legacy_commit {
+  [ "$1" = "$TRUSTED_LEGACY_STARPILOT_COMMIT" ] || [ "$1" = "$TRUSTED_LEGACY_STABLE_MIGRATION" ]
+}
 
 function staged_os_is_compatible {
   local staged="$1" marker="$1/.git/starpilot-retain-agnos" commit
   commit="$(git -C "$staged" rev-parse --verify 'HEAD^{commit}')" || return 1
-  if [ "$commit" = "$TRUSTED_LEGACY_STARPILOT_COMMIT" ]; then
+  if trusted_legacy_commit "$commit"; then
     [ -f "$marker" ] && [ -s "$marker" ] && [ ! -L "$marker" ] && [ -r /VERSION ] && [ "$(cat "$marker")" = "$(< /VERSION)" ]
   else
     [ ! -e "$marker" ] && [ ! -L "$marker" ]
@@ -83,7 +100,7 @@ function reset_update_os_environment {
 function maybe_activate_legacy_agnos {
   local repo="$1" verifier="$2" manifest="$3" commit
   commit="$(git -C "$repo" rev-parse --verify 'HEAD^{commit}')" || return 1
-  if [ "$commit" != "$TRUSTED_LEGACY_STARPILOT_COMMIT" ] && [ ! -L "$manifest" ]; then
+  if ! trusted_legacy_commit "$commit" && [ ! -L "$manifest" ]; then
     "$verifier" --verify "$manifest" && sudo reboot
   fi
 }

@@ -59,6 +59,9 @@ class SendingSession:
   def check_progress(self):
     pass
 
+  def keyframe_test_active(self):
+    return False
+
   def stats(self):
     return {}
 

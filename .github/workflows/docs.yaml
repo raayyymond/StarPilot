@@ -6,7 +6,12 @@ on:
       - master
       - Domathon
       - Dom
+      - StarPilot
+      - stable
+      - testing
+      - dev
   pull_request:
+  workflow_dispatch:
   workflow_call:
     inputs:
       run_number:

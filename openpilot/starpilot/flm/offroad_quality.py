@@ -6,13 +6,13 @@ Only complete, input-matched original windows can trigger a withdrawal.
 """
 
 from collections import deque
+from collections.abc import Callable
 import math
+import os
 
 from openpilot.starpilot.flm.offroad_surface import ROUTE_NAMES as NAMES
-from openpilot.starpilot.flm.offroad_analysis import cohort
-from openpilot.starpilot.flm.offroad_evidence import read_point, RouteWindow, window_identity, tracking_metrics
-from openpilot.starpilot.flm.offroad_processor import window_demand
-from openpilot.starpilot.flm.offroad_surface import REVISION
+from openpilot.starpilot.flm.offroad_evidence import cohort, read_point, RouteWindow, window_identity, tracking_metrics, window_demand
+from openpilot.starpilot.flm.offroad_surface import current_revision
 
 from openpilot.starpilot.flm.offroad_surface import stop_marker
 
@@ -38,6 +38,7 @@ class TrialGuard:
     self.last_ns = 0
     self.override_ns = 0
     self.stopped = None
+    self.start_trial: Callable[[], bool] | None = None
     self.cohort = None
     self.baseline = ()
     try:
@@ -100,12 +101,21 @@ class TrialGuard:
       or control.limited
       or control.saturated
       or abs(control.control_ns - stamp) > 30_000_000
-      or control.route_effect_revision != REVISION
+      or not current_revision(control.route_effect_revision)
       or control.route_configuration_scope != self.scope_key
       or dict(control.route_applied_coordinates) != self.values
     ):
       self.rows.clear()
       return None
+    if self.start_trial is not None:
+      start, self.start_trial = self.start_trial, None
+      try:
+        claimed = start()
+      except (OSError, ValueError):
+        claimed = False
+      if not claimed:
+        self.stopped = 'baseline_unavailable'
+        return self.marker
     point = read_point(event, companions, route='current-route-revocation-only', segment=0, context_key=self.scope_key)
     if point is None:
       self.rows.clear()
@@ -152,12 +162,16 @@ class TrialGuard:
 
 
 def from_configuration(cp, params, cache_directory, *, vehicle_session):
-  from openpilot.starpilot.flm.offroad_worker import _current_scope, trial_document
-  from openpilot.starpilot.flm.offroad_store import startup_row
-  from openpilot.starpilot.flm.offroad_cache import AssessmentCache
+  from openpilot.starpilot.flm.offroad_runtime import current_scope
+  from openpilot.starpilot.flm.offroad_store import startup_row, KEY, MAX_BYTES
+  from openpilot.starpilot.flm.offroad_cache import AssessmentCache, trial_document
+  from openpilot.starpilot.saved_source import read_saved
 
   try:
-    scope = _current_scope(cp, params)
+    raw, readable = read_saved(params, KEY, MAX_BYTES)
+    if not readable or raw is None:
+      return None
+    scope = current_scope(cp, params)
     row, _ = startup_row(params, scope)
   except (OSError, KeyError, TypeError, ValueError, AttributeError, OverflowError):
     return None
@@ -167,8 +181,11 @@ def from_configuration(cp, params, cache_directory, *, vehicle_session):
     cache = AssessmentCache(cache_directory)
     trial = trial_document(cache, row['analysis_sha256'])
     guard = TrialGuard(scope.key(), row['values'], trial)
-    if row['state'] == 'ready_for_next_drive' and guard.stopped is None and not cache.claim_trial(row['analysis_sha256'], vehicle_session):
-      guard.stopped = 'baseline_unavailable'
+    if row['state'] == 'ready_for_next_drive' and guard.stopped is None:
+      if os.path.lexists(cache.directory / ('trial-' + row['analysis_sha256'] + '.json')):
+        guard.stopped = 'baseline_unavailable'
+      else:
+        guard.start_trial = lambda digest=row['analysis_sha256'], session=vehicle_session: cache.claim_trial(digest, session)
   except (OSError, KeyError, TypeError, ValueError, OverflowError):
     guard = TrialGuard(scope.key(), row['values'], {})
   return guard

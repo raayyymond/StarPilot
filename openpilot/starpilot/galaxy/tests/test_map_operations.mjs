@@ -12,12 +12,21 @@ const status = { schemaVersion: 1, ownerSession: 's1', operationId: null, state:
   bounds: null, completedGroups: 0, totalGroups: 0, transferredBytes: 0, transferBudgetBytes: 0,
   preparedGeneration: null, selectedGeneration: '', errorCode: null, selectedForNextShadowStart: false }
 assert.equal(validCatalog(catalog), true)
+const largeCatalog = { ...catalog, maxGroups: 1024, regions: [
+  { ...region, token: 'nation.CA', name: 'Canada', bounds: [40, -142, 74, -52], groups: 765 },
+  { ...region, token: 'nation.JP', name: 'Japan', bounds: [30, 128, 46, 146], groups: 72 },
+] }
+assert.equal(validCatalog(largeCatalog), true)
+assert.equal(validCatalog({ ...largeCatalog, regions: [{ ...region, groups: 1025 }] }), false)
 assert.equal(validCatalog({ ...catalog, regions: [{ ...region, available: false, unavailable: 'too_large' }] }), true)
 assert.equal(validCatalog({ ...catalog, regions: [{ ...region, token: '<script>' }] }), false)
 assert.equal(validOperation(status), true)
 assert.equal(validOperation({ ...status, operationId: 's1:1', state: 'transferring' }), true)
 assert.equal(NavigationPage.components.MapOperationsPanel, MapOperationsPanel)
 assert.match(MapOperationsPanel.template, /Start download/)
+assert.match(MapOperationsPanel.template, /Add Offline Coverage/)
+assert.match(MapOperationsPanel.template, /Existing regions are kept/)
+assert.doesNotMatch(MapOperationsPanel.template, /Replace Selected Map|replaces the selected map/)
 assert.doesNotMatch(MapOperationsPanel.template, /Retry maps/)
 assert.match(MapOperationsPanel.template, /next map service start/)
 assert.doesNotMatch(MapOperationsPanel.template, /v-html/)
@@ -169,3 +178,15 @@ await lateStart
 assert.equal(expiredConflict.client.actionError, '')
 assert.equal(expiredConflict.client.active, false)
 console.log('Map operation conflicts: distinct reasons and expired response isolation passed')
+
+// A new provider can expose provinces; an older provider remains valid.
+const ontario = { ...region, token: 'ca_province.ON', name: 'Ontario', groups: 99 }
+const provinceCatalog = { ...largeCatalog, regions: [...largeCatalog.regions, ontario] }
+assert.equal(validCatalog(provinceCatalog), true)
+assert.equal(validCatalog({ ...provinceCatalog, regions: [{ ...ontario, token: 'ca_province.ON.extra' }] }), false)
+const findRegions = (search) => MapOperationsPanel.computed.regions.call({ search, catalog: provinceCatalog })
+assert.equal(findRegions('Ontario').some((r) => r.token === 'ca_province.ON'), true)
+assert.equal(findRegions('Canada').some((r) => r.token === 'ca_province.ON'), true)
+assert.equal(MapOperationsPanel.computed.canadianRegions.call({ regions: findRegions('Canada') }).length, 1)
+assert.equal(MapOperationsPanel.computed.otherRegions.call({ regions: findRegions('Canada') })[0].token, 'nation.CA')
+assert.equal(MapOperationsPanel.computed.canadianRegions.call({ regions: largeCatalog.regions }).length, 0)

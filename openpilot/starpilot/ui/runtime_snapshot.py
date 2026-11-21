@@ -29,8 +29,10 @@ from openpilot.starpilot.longitudinal.profile_runtime import read_traffic_settin
 from openpilot.starpilot.parked_evidence import ParkedEvidence, RESUME_SKEW_NS, fresh_offroad, host_parked
 from openpilot.starpilot.ui.conditional_status import ConditionalDisplayProjector, ConditionalPerceptionProjector, configured_choice
 from openpilot.starpilot.ui.traffic_status import TrafficDisplayProjector
+from openpilot.starpilot.ui.drive_mode_notice import DriveModeNotice
 from openpilot.starpilot.controllers.mode_actions import SwitchbackStatusOwner
 from openpilot.starpilot.ui.wheel_feedback import observe_wheel_acceleration
+from openpilot.starpilot.ui.wheel_rotation import observe_wheel_rotation, read_rotation
 from openpilot.starpilot.ui.torque_feedback import observe_torque_feedback
 from openpilot.starpilot.ui.live_developer_sidebar import DeveloperMetrics
 
@@ -44,9 +46,10 @@ from openpilot.starpilot.models.jetlink_status import JetlinkStatusFeed
 from openpilot.starpilot.ui.onroad_state import conditional_lead_from_message
 from openpilot.starpilot.ui.onroad_state import (AlertSize, BorderSignals, ObservationKind, OnroadAlert,
                                                 OnroadState, SpeedLimitObservation, is_personality_notice, speed_limit_from_message)
-from openpilot.starpilot.ui.unified_speed_presentation import displayed_adjusted_limit_mps, displayed_limit_mps, positive, retaining_limit
+from openpilot.starpilot.ui.unified_speed_presentation import (displayed_adjusted_limit_mps, displayed_limit_mps,
+                                                              positive, retaining_limit)
 from openpilot.starpilot.ui.onroad_stopped_timer import StoppedTimer
-from openpilot.starpilot.speed_limits.vision.stop_observation import StopConfirmation, read_stop_evidence
+from openpilot.starpilot.speed_limits.vision.stop_observation import StopConfirmation
 from openpilot.starpilot.ui.onroad_lane_alerts import lateral_lane_alert
 from openpilot.starpilot.ui.onroad_camera import ReverseDriverCamera
 from openpilot.starpilot.ui.navigation_state import navigation_display, official_navigation_display
@@ -54,9 +57,12 @@ from openpilot.starpilot.ui.settings_state import Destination, DestinationAvaila
 from openpilot.starpilot.ui.shell import ShellMode, ShellSnapshot
 from openpilot.starpilot.ui.software_state import DownloadLabel, SoftwareRequest, SoftwareState
 from openpilot.starpilot.ui.toggles_state import Personality, ToggleKey, TogglesState
+from openpilot.starpilot.saved_source import read_saved
+from openpilot.starpilot.speed_limits import offset_document
 
 
 SLC_SIGN_HOLD_NS = 150_000_000
+SLC_PENDING_HOLD_NS = 3_000_000_000  # map limits drop out for a second or two while a new limit waits for the driver
 EVENTS_DISPLAY_MAX_AGE_NS = 1_500_000_000  # selfdrived sends onroadEvents on every change and at least once a second
 
 
@@ -313,6 +319,7 @@ class RuntimeSnapshotAdapter:
     self._customization_value = default_document()
     self._appearance_value = OnroadAppearance()
     self._appearance_read_ns: int | None = None
+    self._slc_offset_schedule = None
     # A second screen (Android Auto) swaps in its own display choices before anything uses them.
     self.appearance_override: Callable[[OnroadAppearance], OnroadAppearance] | None = None
     self._last_mode: ShellMode | None = None
@@ -332,12 +339,17 @@ class RuntimeSnapshotAdapter:
     self._traffic_map_assigned = False
     self._traffic_profile_valid = False
     self._personality_notice = PersonalityNotice()
+    self._drive_mode_notice = DriveModeNotice(ui_state.params)
     self._stopped_timer = StoppedTimer()
     self._replay_stopped_history = False
     self._developer_metrics = DeveloperMetrics()
+    self._developer_delay = None
+    self._developer_delay_key = None
+    self._developer_delay_read_ns = None
     self._reverse_driver_camera = ReverseDriverCamera()
-    self._vision_stop = StopConfirmation()
+    self._vision_stop = StopConfirmation(display_only=True)
     self._slc_sign_cache: tuple[int, tuple[int, int], str, SpeedLimitObservation] | None = None
+    self._slc_pending_live: tuple[int, tuple, SpeedLimitObservation] | None = None
     self._mono_clock, self._boot_clock = mono_clock, boot_clock
     self._device_after_mono_ns = mono_clock()
     self._device_offset_ns: int | None = None
@@ -417,9 +429,19 @@ class RuntimeSnapshotAdapter:
     if (self._appearance_read_ns is None or now_ns < self._appearance_read_ns or
         now_ns - self._appearance_read_ns >= 1_000_000_000):
       self._customization_value = read_customization(self.ui_state.params)
+      rotation_raw, rotation_readable = read_rotation(self.ui_state.params)
+      self._customization_value['layouts']['large']['steering_wheel'].pop('rotate', None)
+      if rotation_readable and rotation_raw == b'1':
+        self._customization_value['layouts']['large']['steering_wheel']['rotate'] = True
       self._appearance_value = onroad_appearance(self.ui_state.params)
       self._navigation_enabled = _flag(self.ui_state.params, "NavigationEnabled")
       self._show_curve_status = _flag(self.ui_state.params, "ShowCSCStatus")
+      try:
+        raw, readable = read_saved(self.ui_state.params, "SLCOffsetSchedule", offset_document.MAX_DOCUMENT_BYTES)
+        offsets = offset_document.decode(raw) if readable and raw is not None else None
+        self._slc_offset_schedule = offsets.schedule() if isinstance(offsets, offset_document.OffsetDocument) else None
+      except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+        self._slc_offset_schedule = None
       if self.appearance_override is not None:
         self._appearance_value = self.appearance_override(self._appearance_value)
       self._appearance_read_ns = now_ns
@@ -587,12 +609,6 @@ class RuntimeSnapshotAdapter:
     if not display_car_valid:
       curve = None
     cluster_cruise = _finite(display_car.vCruiseCluster) if display_car_valid else None
-    from openpilot.starpilot.speed_limits.toyota import projection as toyota_projection
-    toyota = toyota_projection(sm, now_ns) if started and display_car_valid else None
-    if toyota is not None and not str(toyota.status).startswith('off_') and (
-        slc is None or not slc.enabled or slc.hasPending or toyota.sessionId != slc.sessionId or
-        toyota.acceptedMonoTime != slc.acceptedMonoTime):
-      toyota = None
     cruise = cluster_cruise if cluster_cruise is not None and cluster_cruise > 0 else None
     if cluster_cruise == 0 and display_controls is not None:
       cruise = _finite(getattr(display_controls, "vCruiseDEPRECATED", None), positive=True)
@@ -601,14 +617,29 @@ class RuntimeSnapshotAdapter:
     stock_cruise = bool(display_car_valid and
                         bool(getattr(getattr(display_car, "cruiseState", None), "enabled", False)) and
                         cp is not None and not cp.openpilotLongitudinalControl)
-    observation = speed_limit_from_message(slc) if slc is not None and (slc.enabled or slc.displayOnly) else SpeedLimitObservation()
+    show_slc = slc is not None and (slc.enabled or slc.displayOnly)
+    observation = speed_limit_from_message(slc) if show_slc else SpeedLimitObservation()
     if slc is None and started:
       observation = SpeedLimitObservation(kind=ObservationKind.STALE)
-    if mode != ShellMode.ONROAD or drive_key is None:
+    # A source gap during the same pending decision keeps its live reading, so the prompt does not flash.
+    pending_key = ((drive_key, str(slc.sessionId), int(slc.decisionId))
+                   if show_slc and drive_key is not None and slc.hasPending and getattr(slc, 'decisionId', 0) > 0 else None)
+    if pending_key is None:
+      self._slc_pending_live = None
+    elif observation.kind == ObservationKind.VALID:
+      self._slc_pending_live = (int(sm.logMonoTime['slcState']), pending_key, observation)
+    elif self._slc_pending_live is not None:
+      stamp, key, live = self._slc_pending_live
+      if key == pending_key and 0 <= now_ns - stamp <= SLC_PENDING_HOLD_NS:
+        observation = replace(observation, kind=ObservationKind.VALID, source=live.source,
+                              speed_limit_mps=live.speed_limit_mps, status=live.status)
+      else:
+        self._slc_pending_live = None
+    if mode != ShellMode.ONROAD or drive_key is None or not show_slc:
       self._slc_sign_cache = None
     elif retaining_limit(observation):
       self._slc_sign_cache = None
-    elif observation.kind == ObservationKind.VALID and slc is not None:
+    elif observation.kind == ObservationKind.VALID:
       shown_mps = displayed_limit_mps(observation)
       if positive(shown_mps):
         # Keep only what the sign shows: a proposal or action identity is never retained.
@@ -618,7 +649,7 @@ class RuntimeSnapshotAdapter:
         self._slc_sign_cache = (int(sm.logMonoTime['slcState']), drive_key, observation.session_id or '', sign)
       else:
         self._slc_sign_cache = None
-    elif observation.kind != ObservationKind.VALID and slc is not None and self._slc_sign_cache is not None:
+    elif self._slc_sign_cache is not None:
       stamp, previous_drive, session, previous = self._slc_sign_cache
       if (previous_drive == drive_key and session and session == str(getattr(slc, 'sessionId', '')) and
           0 <= now_ns - stamp <= SLC_SIGN_HOLD_NS and not bool(getattr(slc, 'hasPending', False)) and
@@ -635,8 +666,7 @@ class RuntimeSnapshotAdapter:
         self._slc_sign_cache = None
     else:
       self._slc_sign_cache = None
-    if (slc is not None and (slc.enabled or slc.displayOnly) and observation.kind != ObservationKind.VALID and
-        not retaining_limit(observation)):
+    if show_slc and observation.kind != ObservationKind.VALID and not retaining_limit(observation):
       # SLC is on but has no limit right now: keep the limit half of the card (as "–")
       # instead of letting it come and go with the source.
       observation = SpeedLimitObservation(kind=ObservationKind.STALE, source=observation.source, status=observation.status,
@@ -648,12 +678,10 @@ class RuntimeSnapshotAdapter:
                                       car=display_car if display_car_valid else None, read_message=display_message)
     experimental = bool(display_selfdrive.experimentalMode) if display_selfdrive is not None else _flag(params, "ExperimentalMode")
     observed_experimental = bool(display_selfdrive.experimentalMode) if display_selfdrive is not None else False
-    persona = _personality(_text(params, "LongitudinalPersonality", "1"))
-    if display_selfdrive is not None:
-      try:
-        persona = _personality(log.LongitudinalPersonality.schema.enumerants[str(display_selfdrive.personality)])
-      except (AttributeError, KeyError, TypeError, ValueError):
-        pass
+    try:
+      persona = _personality(log.LongitudinalPersonality.schema.enumerants[str(display_selfdrive.personality)])
+    except (AttributeError, KeyError, TypeError, ValueError):
+      persona = _personality(_text(params, "LongitudinalPersonality", "1"))
     torque = observe_torque_feedback(
       display_car, display_control, display_controls,
       display_message(sm, "carOutput", now_ns, after_frame=after) if started else None,
@@ -671,37 +699,64 @@ class RuntimeSnapshotAdapter:
       display_car_valid and getattr(display_car, 'gasPressed', False) and long_engaged and
       str(getattr(display_selfdrive, 'state', '')) == 'overriding' and
       cp is not None and cp.openpilotLongitudinalControl)
-    cruise_state = getattr(car, 'cruiseState', None)
+    # Display hint only: 100 Hz messages miss the 20 ms action gate on ~10% of frames, which blinked the cue.
+    display_system_long = bool(display_long_active and display_controls is not None and
+                               str(display_controls.longControlState) != "off" and
+                               display_selfdrive is not None and display_selfdrive.enabled and display_car_valid and
+                               ui.CP is not None and ui.CP.openpilotLongitudinalControl)
+    cruise_state = getattr(display_car, 'cruiseState', None)
     wheel_confirmation = bool(
-      system_long and control is not None and getattr(control, 'enabled', False) and
+      display_system_long and display_control is not None and getattr(display_control, 'enabled', False) and
       cruise_state is not None and getattr(cruise_state, 'available', False) and
       not (cp is not None and getattr(cp, 'brand', '') == 'toyota' and
-           (car.standstill or cruise_state.standstill or not cruise_state.enabled)))
-    developer_metrics = self._developer_metrics.observe(
-      drive=after if started else None, car=display_car if display_car_valid else None,
-      delay=current_message(sm, 'lateralDelay', now_ns, after_frame=after) if started else None,
-      torque=current_message(sm, 'lateralTorqueParameters', now_ns, after_frame=after) if started else None,
-      parameters=display_message(sm, 'vehicleParameters', now_ns, after_frame=after) if started else None,
-      metric=bool(ui.is_metric), cp=cp)
-    stop_evidence = (read_stop_evidence(sm, now_ns=now_ns, now_boot_ns=now_ns + pair[2],
-                                      drive_id=drive_id, after_frame=after) if started and pair is not None else None)
-    stop_observed_ns = self._vision_stop.observe(stop_evidence, now_ns=now_ns)
+           (display_car.standstill or cruise_state.standstill or not cruise_state.enabled)))
+    developer_metrics = ()
+    if not (onroad_view_only and stopped_timer_profile == "compact"):
+      delay_key = ((after, str(cp.carFingerprint), str(cp.steerControlType), str(cp.lateralTuning.which()), float(cp.steerActuatorDelay))
+                   if cp is not None else None)
+      if (delay_key != self._developer_delay_key or self._developer_delay_read_ns is None or
+          not 0 <= now_ns - self._developer_delay_read_ns < 1_000_000_000):
+        from openpilot.starpilot.lateral.delay_preferences import read_delay
+        self._developer_delay = read_delay(params, cp) if cp is not None else None
+        self._developer_delay_key, self._developer_delay_read_ns = delay_key, now_ns
+      lateral = current_message(sm, 'starpilotLateralState', now_ns, after_frame=after) if started else None
+      developer_metrics = self._developer_metrics.observe(
+        drive=after if started else None, car=display_car if display_car_valid else None,
+        delay=current_message(sm, 'lateralDelay', now_ns, after_frame=after) if started else None,
+        torque=current_message(sm, 'lateralTorqueParameters', now_ns, after_frame=after) if started else None,
+        parameters=display_message(sm, 'vehicleParameters', now_ns, after_frame=after) if started else None,
+        metric=bool(ui.is_metric), cp=cp, applied=getattr(lateral, 'torqueTuning', None), delay_selection=self._developer_delay)
+    stop_observed_ns = (self._vision_stop.observe_message(
+      sm, now_ns=now_ns, now_boot_ns=now_ns + pair[2], drive_id=drive_id, after_frame=after)
+      if started and pair is not None else self._vision_stop.observe(None, now_ns=now_ns))
     weather_location = None
     if (started and getattr(ui, 'replay_clock', None) is None and
         any(layout.get('weather', {}).get('enabled', False) for layout in self._customization_value['layouts'].values())):
-      from openpilot.starpilot.ui.weather import valid_location
-      for service in ('gpsLocationExternal', 'gpsLocation'):
-        gps = current_message(sm, service, now_ns, after_frame=after)
-        if gps is not None and gps.hasFix and valid_location((gps.latitude, gps.longitude)):
-          weather_location = (gps.latitude, gps.longitude)
+      from openpilot.starpilot.gps.source import GPS_SOURCES, SOURCE_SERVICES, observation as gps_observation
+      # Weather needs a recent location, not the high-frequency driving-message age gate.
+      # Include car/phone fixes when this device has no native GNSS receiver.
+      for service in GPS_SOURCES:
+        carrier = SOURCE_SERVICES.get(service, service)
+        fix = gps_observation(sm, service, now_ns)
+        if fix is not None and int(sm.recv_frame.get(carrier, 0)) > after:
+          weather_location = (fix[1].latitude, fix[1].longitude)
           break
+    aol_latched = (display_aol_latch(sm, now_ns, after_frame=after)
+                   if started and getattr(ui, "aol_runtime", False) else None)
+    armed_at_stop = bool(aol_latched and cp is not None and getattr(cp, 'brand', '') == 'subaru' and display_car_valid and
+                         display_car.standstill and str(display_car.gearShifter) == 'drive' and
+                         not display_car.steerFaultTemporary and not display_car.steerFaultPermanent and not display_car.accFaulted)
+    drive_mode_source = display_message(sm, 'starpilotCarState', now_ns, after_frame=after) if started else None
+    alert = self._drive_mode_notice.update(
+      drive_mode_source, display_car, cp=cp, drive_frame=after,
+      event_ns=int(sm.logMonoTime['starpilotCarState']) if drive_mode_source is not None else 0, now_ns=now_ns,
+      native_alert=alert, traffic_active=bool(traffic is not None and traffic.state == 'active'))
     onroad = OnroadState(weather_location=weather_location, developer_metrics=developer_metrics, stop_sign_observed_ns=stop_observed_ns,
                          engaged=display_lat_active or display_long_active or longitudinal_overridden, camera_available=started,
                          speed_mps=raw_speed, cruise_kph=cruise, speed_limit=observation,
-                         toyota_cruise_status=str(toyota.status) if toyota is not None else '',
-                         toyota_cruise_target_kph=_finite(toyota.targetKph, positive=True) if toyota is not None else None,
+                         speed_display_offset_percent=self._customization_value.get("speedDisplayOffset", 0.),
                          appearance=self._appearance_value, customization=self._customization_value,
-                         alert=alert, metric=bool(ui.is_metric),
+                         alert=alert, metric=bool(ui.is_metric), slc_offset_schedule=self._slc_offset_schedule,
                          experimental_available=bool(ui.has_longitudinal_control),
                          experimental_enabled=observed_experimental,
                          personality=list(Personality).index(persona),
@@ -720,8 +775,8 @@ class RuntimeSnapshotAdapter:
                          torque_is_demand=torque.source == "lateral_acceleration_demand",
                          torque_drive_frame=after if started else None, drive_frame=after if started else None, observed_ns=now_ns,
                          wheel_acceleration=observe_wheel_acceleration(display_car),
-                         aol_latched=(display_aol_latch(sm, now_ns, after_frame=after)
-                                      if started and getattr(ui, "aol_runtime", False) else None),
+                         wheel_rotation=observe_wheel_rotation(display_car),
+                         aol_latched=aol_latched, aol_armed_at_stop=armed_at_stop,
                          lateral_active=display_lat_active, longitudinal_active=display_long_active,
                          longitudinal_overridden=longitudinal_overridden,
                          driver_override_active=bool(display_car_valid and (
@@ -840,9 +895,12 @@ class RuntimeSnapshotAdapter:
     available = _flag(params, "UpdaterFetchAvailable")
     status = "updater status unavailable" if not updater_state else updater_state if updater_state != "idle" else (
       "update available" if available else "up to date, last checked " + ("previously" if _text(params, "LastUpdateTime") else "never"))
+    if updater_state == "idle" and _text(params, "UpdateFailedCount", "0") not in ("", "0"):
+      error = _text(params, "LastUpdateException", "Updater reported a failure")[:4096]
+      status = "Update failed: " + " ".join(error.split())
     software_actions: set[SoftwareRequest] = set()
     if confirmed_offroad:
-      software_actions.add(SoftwareRequest.OPEN_UNINSTALL_CONFIRMATION)
+      software_actions.update((SoftwareRequest.OPEN_UNINSTALL_CONFIRMATION, SoftwareRequest.OPEN_ERROR_LOG))
       if updater_state == "idle":
         software_actions.update((SoftwareRequest.FAST_UPDATE, SoftwareRequest.ROLLBACK))
         software_actions.add(SoftwareRequest.DOWNLOAD_UPDATE if available else SoftwareRequest.CHECK_FOR_UPDATES)

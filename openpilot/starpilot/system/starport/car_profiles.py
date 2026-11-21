@@ -18,6 +18,8 @@ DEFAULTS = {
   "bootstrap_experiments": False,
   "stay_while_projecting": False,
   "dhcp_patience_s": 0.0,
+  "own_handsfree": False,       # the comma keeps its own hands-free link to the adapter (AAWireless)
+  "static_ip": False,           # join on a made-up address beside the adapter's own before asking its DHCP server
 }
 
 FINGERPRINT_KEYS = ("head_unit_make", "head_unit_model", "car_make", "car_model", "car_year")
@@ -25,7 +27,7 @@ FINGERPRINT_KEYS = ("head_unit_make", "head_unit_model", "car_make", "car_model"
 RULES: list[dict] = [
   {"id": "aawireless", "label": "AAWireless", "match": {},
    "tuning": {"max_window": 30, "phone_services": True, "phone_frames": True, "stay_while_projecting": True,
-              "dhcp_patience_s": 6.0}},
+              "dhcp_patience_s": 6.0, "own_handsfree": True, "static_ip": True}},
   # OTTOCAST (Wi-Fi "CAR2-xxxx"), 2020 Honda Accord, 2026-10-28..11-02 over 43 projections. The Honda grants the screen
   # if and only if its own hands-free link to the comma is up (24 of 24 once the Bluetooth channel was open): it then
   # answers the pairing request twice with status 1 and hands over within a second, whether that link came up before
@@ -50,7 +52,7 @@ RULES: list[dict] = [
    "tuning": {"phone_services": True, "reuse_wifi_join": True, "tcp_stops_with_rfcomm": True, "hfp_gate": True,
               "recycle_silent_link": True, "remember_wifi_channel": True, "remember_wifi_address": True,
               "setup_restarts": 2, "max_window": 30}},
-  {"id": "unofficial", "label": "Unofficial dongle", "match": {}, "tuning": {"bootstrap_experiments": True}},
+  {"id": "unofficial", "label": "Unofficial dongle", "match": {}, "tuning": {"bootstrap_experiments": True, "dhcp_patience_s": 6.0}},
 ]
 
 

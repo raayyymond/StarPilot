@@ -6,9 +6,9 @@ import pytest
 
 from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.can_definitions import CanData
+from opendbc.car.honda.bosch_a_radar import bosch_a_range_offset_m
 from opendbc.car.honda.hondacan import CanBus
 from opendbc.car.honda.interface import CarInterface
-from opendbc.car.honda.bosch_a_radar import BOSCH_A_UNITS, _bosch_a_direct_vrel
 from opendbc.car.honda.radar_interface import RadarInterface
 from opendbc.car.honda.values import CAR
 
@@ -53,18 +53,18 @@ def make_aux(frame_idx=0, rawc9=0, rawca=0, direct_vrel_raw=BOSCH_A_DIRECT_VREL_
   return bytes([B0, B1, B2, B3, B4, B5, B6, B7])
 
 
-def sweep(bus, index, timestamp, with_aux=True, range_raw=1000, vrel_raw=864, rawca=0):
+def sweep(bus, index, timestamp, with_aux=True, status=7):
   frames = []
   for slot in range(16):
     base = 0x280 + 4 * slot if slot < 4 else 0x2D0 + 4 * (slot - 4)
     valid = slot == 0
-    frames.extend((CanData(base, make_f0(index, 7 if valid else 15, range_raw, 1024), bus),
+    frames.extend((CanData(base, make_f0(index, status if valid else 15, 1000, 1024), bus),
                    CanData(base + 1, make_f1(index), bus),
                    CanData(base + 2, make_f2(index, 1 + index * 2), bus),
                    CanData(base + 3, make_f3(index, track_id=1 if valid else 255), bus)))
     if with_aux:
       address = 0x2C8 + slot if slot < 8 else 0x290 + slot - 8
-      frames.append(CanData(address, make_aux(index, rawca=rawca, direct_vrel_raw=vrel_raw, direct_vrel_uncertainty_raw=0), bus))
+      frames.append(CanData(address, make_aux(index, direct_vrel_raw=864, direct_vrel_uncertainty_raw=0), bus))
   return [(timestamp, frames)]
 
 
@@ -79,12 +79,33 @@ def test_actual_parser_points_silence_retires_and_new_track_recovers(identity):
   second = ri.update(sweep(bus, 1, 1_066_666_667))
   assert not second.errors.canError
   assert len(second.points) == 1
-  assert second.points[0].dRel == pytest.approx(ri.bosch_a.units.range_scale_m * 1000 - 3.0)
+  # firmware range: raw/16 minus the car's ROM offset n0/128 (Civic 346, CR-V 341)
+  assert second.points[0].dRel == pytest.approx(1000 / 16 + bosch_a_range_offset_m(identity))
   assert second.points[0].yRel == pytest.approx(0.0)
   stale = ri.update([(1_400_000_000, [])])
   assert stale is not None and not stale.points and stale.errors.radarUnavailableTemporary
+  assert ri.point_statuses == {}
   assert not ri.update(sweep(bus, 2, 1_466_666_667)).points
   assert len(ri.update(sweep(bus, 3, 1_533_333_334)).points) == 1
+
+
+@pytest.mark.parametrize("identity", (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+def test_point_status_is_the_status_nibble_of_its_latest_observation(identity):
+  # route 34 T479: the phantom lead's track was STATUS 9 for its first ~4 s, then 7
+  cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], False, False, False)
+  ri = RadarInterface(cp)
+  bus = CanBus(cp).camera
+  assert ri.point_statuses == {}
+  ri.update(sweep(bus, 0, 1_000_000_000, status=9))
+  unconfirmed = ri.update(sweep(bus, 1, 1_066_666_667, status=9))
+  assert ri.point_statuses == {p.trackId: 9 for p in unconfirmed.points} and len(unconfirmed.points) == 1
+  confirmed = ri.update(sweep(bus, 2, 1_133_333_334))
+  assert ri.point_statuses == {p.trackId: 7 for p in confirmed.points} and len(confirmed.points) == 1
+
+
+def test_point_status_is_none_without_a_bosch_a_radar():
+  cp = CarInterface.get_params(CAR.HONDA_CIVIC, gen_empty_fingerprint(), [], False, False, False)
+  assert RadarInterface(cp).point_statuses is None
 
 
 @pytest.mark.parametrize("identity", (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
@@ -141,6 +162,15 @@ def test_actual_card_startup_publishes_radar_preference_before_construction(iden
         card = Car()
       assert card.CP.to_dict() == expected
       assert (RadarInterface(card.CP).rcp is not None) == available
+      if saved_raw is None:
+        car_state = card.CI.update([])
+        car_state.vEgo = 9.6
+        with monkeypatch.context() as input_batch:
+          input_batch.setattr(card_module.messaging, "drain_sock_raw", lambda *args, **kwargs: [])
+          input_batch.setattr(card.CI, "update", lambda frames: car_state)
+          returned, radar_data = card.state_update(defer_radar=True)
+        assert returned is car_state and radar_data is None
+        assert card.RI.v_ego == pytest.approx(9.6)
       with structs.CarParams.from_bytes(saved.get("CarParams")) as published:
         assert published.to_dict() == expected
       for _ in range(10):
@@ -175,50 +205,51 @@ def test_selected_bosch_a_direct_update_uses_its_actual_protocol(candidate):
   assert not result.points
 
 
-def test_accord_units_are_0p05_kph_and_sixteenth_metre():
-  accord = BOSCH_A_UNITS[CAR.HONDA_ACCORD]
-  assert _bosch_a_direct_vrel(864 - 72, 0, accord) == pytest.approx(-1.0)
-  assert _bosch_a_direct_vrel(864 - 72, 0) == pytest.approx(-1.125)
-  # the rails are a clip, not a measurement
-  assert _bosch_a_direct_vrel(0, 0, accord) is None
-  assert _bosch_a_direct_vrel(1728, 0, accord) is None
-  assert _bosch_a_direct_vrel(1, 0, accord) == pytest.approx(-863 / 72)
-  assert _bosch_a_direct_vrel(0, 0) == pytest.approx(-13.5)
+def test_accord_is_a_range_only_bosch_a_car_with_its_fitted_offset():
+  from opendbc.car.honda.bosch_a_radar import BOSCH_A_RANGE_ONLY_CARS, VERIFIED_BOSCH_A_CARS
+  assert CAR.HONDA_ACCORD in VERIFIED_BOSCH_A_CARS and CAR.HONDA_ACCORD in BOSCH_A_RANGE_ONLY_CARS
+  assert bosch_a_range_offset_m(CAR.HONDA_ACCORD) == -3.0
+  cp = CarInterface.get_params(CAR.HONDA_ACCORD, gen_empty_fingerprint(), [], False, False, False)
+  assert RadarInterface(cp).bosch_a.range_offset_m == -3.0
 
 
-def _accord_units_radar():
-  cp = CarInterface.get_params(CAR.HONDA_CIVIC_BOSCH, gen_empty_fingerprint(), [], False, False, False)
-  ri = RadarInterface(cp)
-  ri.bosch_a.units = BOSCH_A_UNITS[CAR.HONDA_ACCORD]
-  return ri, CanBus(cp).camera
-
-
-def test_accord_units_reach_the_published_point():
-  ri, bus = _accord_units_radar()
-  points = []
-  for i in range(3):
-    points = ri.update(sweep(bus, i, 1_000_000_000 + i * 66_666_667, vrel_raw=864 - 72, rawca=1023)).points
-  assert len(points) == 1
-  assert points[0].dRel == pytest.approx(1000 / 16 - 3.0)
-  assert points[0].vRel == pytest.approx(-1.0)
-
-
-def test_accord_clipped_relative_speed_never_becomes_a_point():
-  ri, bus = _accord_units_radar()
-  for i in range(6):
-    assert not ri.update(sweep(bus, i, 1_000_000_000 + i * 66_666_667, vrel_raw=0, rawca=1023)).points
-
-
-def test_rejected_sweep_rebaselines_instead_of_killing_the_track():
-  ri, bus = _accord_units_radar()
-  stamp = 1_000_000_000
-  for i in range(3):
-    points = ri.update(sweep(bus, i, stamp + i * 66_666_667, rawca=1023)).points
-  assert points[0].deprecated.measured and points[0].dRel == pytest.approx(1000 / 16 - 3.0)
-  # a 12.5 m step with no matching relative speed fails the sanity gate: the point is held, unmeasured
-  points = ri.update(sweep(bus, 3, stamp + 3 * 66_666_667, range_raw=800, rawca=1023)).points
-  assert len(points) == 1 and not points[0].deprecated.measured
-  # the next sweep agrees with the rejected one, so the track is back after one sweep, at the new range
-  points = ri.update(sweep(bus, 4, stamp + 4 * 66_666_667, range_raw=800, rawca=1023)).points
-  assert len(points) == 1 and points[0].deprecated.measured
-  assert points[0].dRel == pytest.approx(800 / 16 - 3.0)
+@pytest.mark.parametrize("identity", (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G))
+@pytest.mark.parametrize("alpha", (False, True))
+def test_consumed_signal_projection_matches_full_decoder_and_reduces_decode_work(identity, alpha, monkeypatch):
+  from opendbc.can import CANParser
+  from opendbc.can.dbc import Signal
+  from opendbc.car import Bus
+  from opendbc.car.honda.bosch_a_radar import BOSCH_A_ALL_IDS, BOSCH_A_FREQ_HZ
+  from opendbc.car.honda.values import DBC
+  cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], alpha, False, False)
+  projected, full = RadarInterface(cp), RadarInterface(cp)
+  assert projected.bosch_a is not None and full.bosch_a is not None
+  bus = CanBus(cp).camera
+  full.rcp = full.bosch_a.rcp = CANParser(DBC[cp.carFingerprint][Bus.radar],
+                                        [(address, BOSCH_A_FREQ_HZ) for address in BOSCH_A_ALL_IDS], bus)
+  batches = [sweep(bus, index, 1_000_000_000 + index * 70_000_000) for index in range(4)]
+  batches.append([(1_300_000_000, [])])
+  batches.append([(1_600_000_000, [])])
+  batches += [sweep(bus, index, 1_700_000_000 + index * 70_000_000) for index in range(4, 7)]
+  batches.append(sweep(bus + 1, 7, 2_300_000_000))
+  batches.append(sweep(bus, 8, 2_400_000_000, with_aux=False))
+  original = Signal.get_raw_value
+  counts = []
+  outputs = []
+  for receiver in (projected, full):
+    calls = []
+    def decode(signal, data, _calls=calls):
+      _calls.append(1)
+      return original(signal, data)
+    monkeypatch.setattr(Signal, "get_raw_value", decode)
+    result = []
+    for batch in batches:
+      value = receiver.update(batch)
+      result.append((value.to_bytes() if value is not None else None, receiver.rcp.can_valid,
+                     receiver.rcp.last_nonempty_nanos, receiver.rcp._last_update_nanos,
+                     {address: (state.counter, state.counter_fail, tuple(state.timestamps))
+                      for address, state in receiver.rcp.message_states.items()}))
+    counts.append(len(calls))
+    outputs.append(result)
+  assert outputs[0] == outputs[1]
+  assert counts[0] < counts[1]

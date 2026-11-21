@@ -1,5 +1,6 @@
 """Parked onroad layout preview using the same native view as the driving UI."""
 
+from collections import OrderedDict
 from typing import cast
 
 from pathlib import Path
@@ -21,13 +22,14 @@ from openpilot.starpilot.ui.onroad_customization import (CAMERA_WIDGETS, PROFILE
                                                          validate_document, widget_size)
 from openpilot.starpilot.ui.onroad_widget_style import draw_widget_frame
 from openpilot.starpilot.curve_speed.status import CurveObservation
-from openpilot.starpilot.ui.onroad_state import ConditionalLead
+from openpilot.starpilot.ui.onroad_state import ConditionalLead, speed_limit_bounds
 from openpilot.starpilot.ui.onroad_state import AlertSize, ObservationKind, OnroadAlert, OnroadState, SourceReading, SpeedLimitObservation
 from openpilot.starpilot.ui.appearance_preferences import CameraViewChoice, OnroadAppearance
 from openpilot.starpilot.ui.onroad_dm import draw_monitor_art, monitor_bounds, monitor_visible
 from openpilot.starpilot.ui.onroad_stopped_timer import PREVIEW_DURATION_S
 from openpilot.starpilot.ui.layout_preview_sidebar import SIDEBAR_WIDTH, render_sidebar
 from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile, default_font_directory
+from openpilot.starpilot.speed_limits.speed_domain import OffsetBand, OffsetSchedule
 from openpilot.starpilot.ui.rainbow_path import RainbowPath
 from openpilot.starpilot.ui.road_colors import edge_gradient, lane_color, path_mode, solid_gradient
 from openpilot.starpilot.ui.onroad_customization import ROAD_COLORS
@@ -36,6 +38,7 @@ from openpilot.system.ui.lib.shader_polygon import Gradient, draw_polygon
 
 CEM_SCENE_REASONS = {"cem_stop_light": "STOP LIGHT", "cem_lead": "LEAD", "cem_curve": "CURVE"}
 IDLE_SECONDS = 30.0
+MAX_SHEET_WIDTH = 2048
 ASSET_DIRECTORY = Path(__file__).parents[2] / "selfdrive/assets"
 
 
@@ -77,11 +80,12 @@ def sample_state(scene: str, document: dict) -> OnroadState:
   from openpilot.starpilot.ui.weather import WeatherReading
   state = OnroadState(weather=WeatherReading(21, 2, True), engaged=lateral or longitudinal, camera_available=False,
                      speed_mps=0.0 if scene in ("cem_lead", "stopped") else 22.0, cruise_kph=88.0,
+                     slc_offset_schedule=OffsetSchedule((OffsetBand(0., None, 2.),)),
                      stopped_duration_s=PREVIEW_DURATION_S if scene == "stopped" else None,
                      speed_limit=SpeedLimitObservation(kind=ObservationKind.VALID, source="dashboard",
                                                        speed_limit_mps=22.0 if pending else 20.0,
                                                        accepted_speed_limit_mps=20.0, accepted_source='dashboard',
-                                                       accepted_adjusted_limit_mps=22.0, effective_cluster_target_mps=22.0,
+                                                       accepted_adjusted_limit_mps=22.0, effective_cluster_target_mps=22.0, effective_cap_mps=22.0,
                                                        offset_mps=2.0, limiting_max_set=True,
                                                        pending_adjusted_limit_mps=24.0 if pending else None,
                                                        presentation_adjusted_limit_mps=24.0 if pending else 22.0,
@@ -114,11 +118,12 @@ def sample_state(scene: str, document: dict) -> OnroadState:
     observation = replace(observation, limiting_max_set=False)
   elif scene == 'slc_equal':
     state = replace(state, cruise_kph=79.2)
+    observation = replace(observation, limiting_max_set=False)
   elif scene == 'slc_pedal':
     state = replace(state, longitudinal_overridden=True)
   elif scene == 'slc_retained':
     observation = replace(observation, driver_override_active=True,
-                          override_basis='persistent', retained_override=True)
+                          override_basis='persistent', retained_override=True, effective_cluster_target_mps=24.0)
   elif scene == 'slc_unavailable':
     observation = SpeedLimitObservation(kind=ObservationKind.STALE, status='display_hold')
   elif scene == 'slc_disengaged':
@@ -135,10 +140,14 @@ def _chunk(kind: bytes, data: bytes) -> bytes:
 
 def _straight_rgba(pixels: bytes) -> bytes:
   """PNG uses straight alpha; the transparent GL scratch target stores premultiplied RGB."""
-  values = np.frombuffer(pixels, dtype=np.uint8).reshape(-1, 4).astype(np.uint16)
-  alpha = values[:, 3:4]
-  values[:, :3] = np.where(alpha > 0, np.minimum(255, (values[:, :3] * 255 + alpha // 2) // np.maximum(alpha, 1)), 0)
-  return values.astype(np.uint8).tobytes()
+  values = np.frombuffer(pixels, dtype=np.uint8).reshape(-1, 4).copy()
+  alpha = values[:, 3]
+  values[alpha == 0, :3] = 0
+  translucent = (alpha > 0) & (alpha < 255)
+  colors = values[translucent, :3].astype(np.uint16)
+  coverage = alpha[translucent, None].astype(np.uint16)
+  values[translucent, :3] = np.minimum(255, (colors * 255 + coverage // 2) // coverage)
+  return values.tobytes()
 
 
 def _png_rgba(width: int, height: int, pixels: bytes, *, widget_art: dict | None = None) -> bytes:
@@ -188,10 +197,11 @@ class _DriverMonitorArt:
       self.close()
       raise
 
-  def render(self, _content: rl.Rectangle, state: OnroadState, *, top_icons: bool = False) -> None:
-    if not monitor_visible(self.profile, state, fresh=True, onroad=True, top_icons=top_icons):
+  def render(self, _content: rl.Rectangle, state: OnroadState, *, top_icons: bool = False, y_offset=0) -> None:
+    bounds = monitor_bounds(state.customization, self.profile, state.right_hand_drive)
+    bounds.y += y_offset
+    if not monitor_visible(self.profile, state, fresh=True, onroad=True, top_icons=top_icons, bounds=bounds):
       return
-    bounds = monitor_bounds(state.customization, self.profile, False)
     draw_widget_frame(bounds, state.customization, self.profile, "driver_monitor")
     draw_monitor_art(self.renderer, bounds, self.profile)
 
@@ -224,14 +234,17 @@ class _Canvas:
         from openpilot.starpilot.system.starport.projection_exit import ProjectionExit
         self.view.projection_exit_layer = ProjectionExit(rl).render
         self.view.now_playing.track = {'source': 'spotify', 'status': 'playing', 'title': 'Midnight City', 'artist': 'M83', 'album': '',
-                                       'durationMs': 243000, 'position': {'ms': 92000, 'at': 0, 'speed': 0.0}}
+                                       'durationMs': 243000, 'position': {'ms': 92000, 'at': 0, 'speed': 0.0},
+                                       'shuffle': False, 'repeat': 'off', 'artwork': '', 'device': 'StarPilot'}
       if profile == Profile.LARGE:
         from openpilot.starpilot.ui.onroad_map import MapOverlay, SampleTileReader
         self.map = MapOverlay(reader=SampleTileReader(), fonts=self.fonts)
         self.view.map_layer = self._render_map
         from openpilot.starpilot.models.jetlink_status import JetlinkStatus
         from openpilot.starpilot.ui.onroad_jetlink import JetlinkStatusWidget
-        cast(JetlinkStatusWidget, self.view.jetlink_status).status = JetlinkStatus('iPhone', 'active', 24.6, 'connected')
+        cast(JetlinkStatusWidget, self.view.jetlink_status).status = JetlinkStatus('iPhone', 'active', 24.6, 'connected', model='Cinque v3')
+        from openpilot.starpilot.ui.network_signal import Signal
+        self.view.network_signal.preview = Signal(2, 4, 'wifi', 'LTE', 'connected', ('iPhone 15',), 'Home Wi-Fi')
       self.monitor = _DriverMonitorArt(profile)
       self.view.driver_monitor_layer = self._render_driver_monitor
       self.view.preview_pip_layer = self._render_preview_pip
@@ -244,8 +257,6 @@ class _Canvas:
 
   def _render_background(self, rect: rl.Rectangle, state: OnroadState) -> None:
     render_sample_road(rect, state, self.profile)
-    if not state.customization.get("widgetOrder", {}).get(str(self.profile)) and self.viewport is None:
-      self._render_side_cameras(state)
 
   @staticmethod
   def _map_placement(state: OnroadState):
@@ -259,9 +270,11 @@ class _Canvas:
       self.map.draw(rl.Rectangle(placed["x"] + shift, placed["y"], placed["width"], placed["height"]), placed["opacity"] / 100.0)
 
   def _render_preview_pip(self, rect, state, *, submit=None):
-    if submit is not None:
-      for key in CAMERA_WIDGETS:
-        submit(key, lambda key=key: self._render_side_cameras(state, only=key))
+    if submit is None:
+      self._render_side_cameras(state)
+      return
+    for key in CAMERA_WIDGETS:
+      submit(key, lambda key=key: self._render_side_cameras(state, only=key))
 
   def _render_side_cameras(self, state: OnroadState, only=None) -> None:
     for key in CAMERA_WIDGETS:
@@ -272,8 +285,9 @@ class _Canvas:
         continue
       widget = PROFILES[str(self.profile)]["widgets"][key]
       radius = widget["width"] / 2
-      center = rl.Vector2(position["x"] + radius, position["y"] + radius)
-      rl.draw_circle_v(center, radius, rl.Color(21, 44, 57, 230))
+      shift = state.viewport_width - 1860 if self.profile == Profile.LARGE and key == "pip_right" and self.viewport is None else 0
+      center = rl.Vector2(position["x"] + shift + radius, position["y"] + radius)
+      rl.draw_circle_v(center, radius, rl.Color(21, 44, 57, 90))
       rl.draw_ring(center, radius - 3, radius, 0, 360, 64, rl.Color(94, 229, 238, 255))
 
   def _render_driver_monitor(self, rect: rl.Rectangle, state: OnroadState, *, general: bool = False) -> None:
@@ -281,15 +295,7 @@ class _Canvas:
                  state.appearance.camera_view != CameraViewChoice.DRIVER and not state.reverse_driver_camera and
                  self.view.compact_hud._set_speed_alpha.x > 0.01 and
                  placement(state.customization, self.profile, "max_speed")["enabled"])
-    if self.viewport is None:
-      self.monitor.render(rect, state, top_icons=top_icons)
-    else:
-      rl.rl_push_matrix()
-      rl.rl_translatef(0, self.viewport[1] - 1080, 0)
-      try:
-        self.monitor.render(rect, state, top_icons=top_icons)
-      finally:
-        rl.rl_pop_matrix()
+    self.monitor.render(rect, state, top_icons=top_icons, y_offset=self.viewport[1] - 1080 if self.viewport else 0)
 
   def render(self, state: OnroadState, scene: str) -> bytes:
     if self.view is None or self.fonts is None or self.target is None:
@@ -339,14 +345,31 @@ class _Canvas:
     # A bounded subset covers the edited widgets without adding an onroad render loop.
     x = y = row_height = 0
     captures = []
-    for key in RUNTIME_PREVIEW_WIDGETS[str(self.profile)]:
-      logical_width, logical_height = widget_size(state.customization, self.profile, key)
+    keys, extra = RUNTIME_PREVIEW_WIDGETS[str(self.profile)], {}
+    if self.viewport is not None:
+      from openpilot.starpilot.system.starport.projection_layout import SPRITE_WIDGETS, layout_metadata_for_viewport, placement_size
+      metadata = layout_metadata_for_viewport(self.viewport)['widgets']
+      extra = {key: metadata[key] for key in SPRITE_WIDGETS if positions.get(key, {}).get('enabled')}
+      keys = (*keys, *extra)
+    for key in keys:
       position = positions[key]
-      widget = PROFILES[str(self.profile)]['widgets'][key]
+      if key in extra:
+        widget = extra[key]
+        logical_width, logical_height = placement_size(key, widget, position)
+      else:
+        widget = PROFILES[str(self.profile)]['widgets'][key]
+        logical_width, logical_height = widget_size(state.customization, self.profile, key)
       crop_x = max(0, math.floor(position['x'] - widget.get('visualInsetLeft', 0)))
       crop_y = max(0, math.floor(position['y'] - widget.get('visualInsetTop', 0)))
       offset_x, offset_y = crop_x - position['x'], crop_y - position['y']
       width, height = math.ceil(logical_width - offset_x), math.ceil(logical_height - offset_y)
+      if (key == ('speed_limit' if self.profile == Profile.COMPACT else 'cruise_limits') and
+          state.speed_limit.pending_speed_limit_mps is None and (area := speed_limit_bounds(self.profile, state)) is not None):
+        # The existing padded touch area includes the raised and SET-limited outlines.
+        crop_x, crop_y = max(0, math.floor(min(crop_x, area[0]))), max(0, math.floor(min(crop_y, area[1])))
+        width = math.ceil(max(position['x'] + logical_width, area[2]) - crop_x)
+        height = math.ceil(max(position['y'] + logical_height, area[3]) - crop_y)
+        offset_x, offset_y = crop_x - position['x'], crop_y - position['y']
       if state.speed_limit.pending_speed_limit_mps is not None and (area := widget.get('confirmation')) is not None:
         crop_x = math.floor(min(crop_x, position['x'] + area['x']))
         crop_y = math.floor(min(crop_y, position['y'] + area['y']))
@@ -355,12 +378,9 @@ class _Canvas:
         offset_x, offset_y = crop_x - position['x'], crop_y - position['y']
       if self.profile == Profile.COMPACT and key == 'speed_limit' and 0 <= crop_y < canvas_height:
         height = min(height, canvas_height - crop_y)
-      if x + width > 1024:
-        x, y, row_height = 0, y + row_height, 0
-      sprites[key] = {'x': x, 'y': y, 'width': width, 'height': height, 'offsetX': offset_x, 'offsetY': offset_y}
-      x += width
-      row_height = max(row_height, height)
       if not (0 <= crop_x <= canvas_width - width and 0 <= crop_y <= canvas_height - height):
+        if key in extra:
+          continue
         raise ValueError("Widget art crop lies outside the canvas")
       rl.begin_texture_mode(self.target)
       try:
@@ -374,8 +394,11 @@ class _Canvas:
           else:
             # General edit shows a representative CEM sample even though its backdrop
             # remains engaged. Driving scenes always use their unmodified state.
-            sample = {'cem_gauge': 'cem_curve', 'speed_limit_actions': 'slc_pending'}.get(key) if general else None
+            sample = 'cem_curve' if general and key == 'cem_gauge' else None
             widget_state = sample_state(sample, state.customization) if sample is not None else state
+            if key == "rear_fog":
+              from openpilot.starpilot.car.ford.rear_fog import boot_time_ns
+              widget_state = replace(widget_state, ford_rear_fog_on=True, ford_rear_fog_source_ns=boot_time_ns())
             self._settle(widget_state)
             self.view._ordered_widgets(content, widget_state, only_widget=key)
         finally:
@@ -384,15 +407,38 @@ class _Canvas:
         rl.end_texture_mode()
       image = rl.load_image_from_texture(self.target.texture)
       try:
+        # The render texture is bottom-up. Crop first so only the sprite is flipped.
+        rl.image_crop(image, rl.Rectangle(crop_x, canvas_height - crop_y - height, width, height))
         rl.image_format(image, rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8)
         rl.image_flip_vertical(image)
-        rl.image_crop(image, rl.Rectangle(crop_x, crop_y, width, height))
-        captures.append((key, _straight_rgba(bytes(image.data[:width * height * 4]))))
+        data = _straight_rgba(bytes(image.data[:width * height * 4]))
       finally:
         rl.unload_image(image)
+      # StarPort widgets with nothing to show keep the editor's sketch.
+      if key in extra and not any(data[3::4]):
+        continue
+      if x + width > MAX_SHEET_WIDTH:
+        x, y, row_height = 0, y + row_height, 0
+      sprites[key] = {'x': x, 'y': y, 'width': width, 'height': height, 'offsetX': offset_x, 'offsetY': offset_y,
+                      'visible': any(data[3::4])}
+      if key in ('cruise_limits', 'speed_limit', 'current_speed') and sprites[key]['visible']:
+        alpha = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 4)[:, :, 3]
+        cols = np.flatnonzero(alpha.any(axis=0))
+        rows = np.flatnonzero(alpha.any(axis=1))
+        left, right = int(cols[0]), int(cols[-1] + 1)
+        if key == 'current_speed' and self.fonts is not None:
+          # Room for a three-digit km/h speed, centered like the HUD draws it
+          for text, role, size in (('888', FontRole.SPEED, 176), ('000', FontRole.SPEED, 176), ('km/h', FontRole.NORMAL, 28)):
+            start = (width - self.fonts.measure(text, role, size).width) / 2
+            ink_left, ink_right = self.fonts.horizontal_ink(text, role, size)
+            left, right = min(left, max(0, math.floor(start + ink_left))), max(right, min(width, math.ceil(start + ink_right)))
+        sprites[key]['ink'] = [left, int(rows[0]), right - left, int(rows[-1] - rows[0] + 1)]
+      x += width
+      row_height = max(row_height, height)
+      captures.append((key, data))
     sheet_width = max(slot['x'] + slot['width'] for slot in sprites.values())
     sheet_height = y + row_height
-    if not (0 < sheet_width <= 1024 and 0 < sheet_height <= 1440):
+    if not (0 < sheet_width <= MAX_SHEET_WIDTH and 0 < sheet_height <= 1440):
       raise ValueError("Widget art sheet exceeds preview bounds")
     pixels = bytearray(sheet_width * sheet_height * 4)
     for key, data in captures:
@@ -456,10 +502,14 @@ class _Canvas:
     self.fonts = None
 
 
+SHEET_CACHE_SIZE = 8  # widget sheets and backdrops for the last few scenes
+
+
 class LayoutPreviewRenderer:
   def __init__(self):
     self._canvas: _Canvas | None = None
     self._last_use = 0.0
+    self._sheets: OrderedDict[str, bytes] = OrderedDict()
 
   @property
   def has_resources(self) -> bool:
@@ -470,6 +520,12 @@ class LayoutPreviewRenderer:
       raise ValueError("Invalid layout preview request")
     if "art" in payload and not (payload["art"] is True or payload["art"] == "backdrop"):
       raise ValueError("Invalid widget art request")
+    sheet_key = None
+    if 'art' in payload:
+      sheet_key = json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False)
+      if sheet_key in self._sheets:
+        self._sheets.move_to_end(sheet_key)
+        return self._sheets[sheet_key]
     viewport = None
     if payload['profile'] == 'projection':
       from openpilot.starpilot.system.starport.projection_layout import projection_customization
@@ -490,6 +546,9 @@ class LayoutPreviewRenderer:
     state = sample_state(scene, document)
     if profile == Profile.LARGE and viewport is None:
       state = replace(state, viewport_width=width, appearance=replace(state.appearance, show_developer_sidebar=sidebar))
+    elif viewport is not None:
+      # Match ProjectionOnroad, which draws at the car canvas width.
+      state = replace(state, viewport_width=viewport[0])
     if profile == Profile.LARGE:
       from openpilot.starpilot.ui.navigation_state import NavigationDisplay
       state = replace(state, navigation=NavigationDisplay(("preview", 1), "Turn left onto Desert Inn Road", "turn", "left",
@@ -502,15 +561,20 @@ class LayoutPreviewRenderer:
       self.close()
       self._canvas = _Canvas(profile, viewport)
     self._last_use = time.monotonic()
-    if payload.get('art') is True:
+    if sheet_key is None:
+      return self._canvas.render(state, scene)
+    if payload['art'] is True:
       positions = payload['document']['layout']['widgets'] if viewport else document['layouts'][str(profile)]
-      return self._canvas.render_widget_art(state, positions, general=scene == 'general')
-    if payload.get('art') == 'backdrop':
+      image = self._canvas.render_widget_art(state, positions, general=scene == 'general')
+    else:
       # Everything the car draws except the movable widgets, which the editor places over it.
       # A non-empty order that names no widget keeps the ordered path and draws none of them.
       order = {**state.customization.get('widgetOrder', {}), str(profile): ['backdrop']}
-      return self._canvas.render(replace(state, customization={**state.customization, 'widgetOrder': order}), scene)
-    return self._canvas.render(state, scene)
+      image = self._canvas.render(replace(state, customization={**state.customization, 'widgetOrder': order}), scene)
+    self._sheets[sheet_key] = image
+    if len(self._sheets) > SHEET_CACHE_SIZE:
+      self._sheets.popitem(last=False)
+    return image
 
   def expire(self) -> None:
     if self._canvas is not None and time.monotonic() - self._last_use >= IDLE_SECONDS:
@@ -520,3 +584,4 @@ class LayoutPreviewRenderer:
     if self._canvas is not None:
       self._canvas.close()
     self._canvas = None
+    self._sheets.clear()

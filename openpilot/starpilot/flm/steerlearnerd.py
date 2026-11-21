@@ -19,6 +19,7 @@ from openpilot.common.params import Params
 from openpilot.starpilot.flm.fullrate_collector import FullrateCollector, PairedDrainState, drain_pair, ControlEvidence, AppliedEvidence
 from openpilot.starpilot.flm.learning_wire import read_control, read_applied, result_message, write_source_receipt
 from openpilot.starpilot.flm.runtime_adapter_registry import SOURCE_LEASE_NS
+from openpilot.starpilot.flm.calibration_lifecycle import configuration_calibration as _configuration_calibration
 
 
 class _SourceDelivery:
@@ -150,21 +151,10 @@ def _collect_applied_output(collector, applied, sm, cp, now_ns):
   return collector.output(applied, now_ns)
 
 
-def _configuration_calibration(sm, calibration_lifecycle, now):
-  # Calibration describes the vehicle frame, not a per-message command lease.
-  # Like torqued's PoseCalibrator, retain a valid calibrated transform between
-  # deliveries. Sample freshness and current native authority are checked
-  # independently when admitting physical observations and applying offers.
-  stamp = int(sm.logMonoTime['extrinsicsCalibration'])
-  receipt = int(round(sm.recv_time['extrinsicsCalibration'] * 1e9))
-  if not (sm.seen['extrinsicsCalibration'] and sm.valid['extrinsicsCalibration'] and
-          0 < stamp <= now and 0 < receipt <= now):
-    return calibration_lifecycle.observe(None, current=False)
-  return calibration_lifecycle.observe(sm['extrinsicsCalibration'], current=True)
 
 def _source_config_binding(source):
   return (source.cp_sha256, source.source_epoch, source.reset, source.calibration_generation,
-          source.enabled, source.manual, source.persistent_source_epoch, tuple(source.manual_baseline))
+          source.enabled, source.manual, source.persistent_source_epoch, tuple(source.manual_baseline), source.manual_kp)
 
 
 def _source_config_known(source, now_ns):
@@ -183,7 +173,8 @@ def _source_config_known(source, now_ns):
     type(source.persistent_source_epoch) is str and (not source.persistent_source_epoch or
       len(source.persistent_source_epoch) == 64 and not source.persistent_source_epoch.strip('0123456789abcdef')) and
     type(source.manual_baseline) is tuple and len(source.manual_baseline) in (0, 3) and
-    all(type(value) in (int, float) and math.isfinite(value) for value in source.manual_baseline))
+    all(type(value) in (int, float) and math.isfinite(value) for value in source.manual_baseline) and
+      (source.manual_kp is None or type(source.manual_kp) in (int, float) and math.isfinite(source.manual_kp)))
 
 
 def _pause_historical_collector(collector, reason):

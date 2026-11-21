@@ -32,6 +32,16 @@ LABELS = {
   "patient": "Waiting longer for the car",
   "experiments": "Adapter handshake variations",
 }
+DESCRIPTIONS = {
+  "standard": "Answers the way StarPilot normally does.",
+  "other_reply": "Answers with the other version reply some receivers expect.",
+  "modern_dual": "Answers like a current Android phone and offers both 2.4 and 5 GHz Wi-Fi.",
+  "modern_24ghz": "Answers like a current Android phone and asks for 2.4 GHz Wi-Fi only.",
+  "phone_identity": "Answers like a real phone, with this comma's own name and Bluetooth address.",
+  "patient": "Waits up to twice as long for the receiver to send its Wi-Fi details.",
+  "experiments": "Tries the extra message variations some adapters need.",
+}
+UNOFFICIAL_FIRST = "other_reply"  # the reply known unofficial dongles answer
 MODERN_RUNGS = ("other_reply", "modern_dual", "modern_24ghz", "phone_identity")  # only mean something to a car that speaks protocol 4 or newer
 
 
@@ -131,6 +141,7 @@ class SetupLadder:
     self.path = path or STATE_PATH
     self.boot_id, self.clock = boot_id, clock
     self.cars: dict[str, dict] = {}
+    self.live: dict[str, dict[str, dict]] = {}   # tries and last reason per rung this drive; never saved
     self.load()
 
   def load(self) -> None:
@@ -163,6 +174,7 @@ class SetupLadder:
     """A new ignition cycle: the passes are used up per drive, not per boot (the comma can stay powered between drives).
 
     A dropped strategy is replaced by the last one that streamed; otherwise resumes at the first untried rung."""
+    self.live.pop(address.upper(), None)
     entry = self.cars.get(address.upper())
     if not entry:
       return
@@ -187,16 +199,28 @@ class SetupLadder:
 
   def forget(self, address: str) -> bool:
     """A car's pairing was deleted: drop what was learned about it."""
+    self.live.pop(address.upper(), None)
     removed = self.cars.pop(address.upper(), None) is not None
     if removed:
       self.save()
     return removed
 
+  def _live(self, address: str, rung: str) -> dict:
+    return self.live.setdefault(address.upper(), {}).setdefault(rung, {"tries": 0, "reason": ""})
+
+  def tried(self, address: str, rung: str) -> int:
+    record = self._live(address, rung)
+    record["tries"] += 1
+    return record["tries"]
+
+  def note(self, address: str, rung: str, reason: str) -> None:
+    self._live(address, rung)["reason"] = str(reason)[:160]
+
   def exhausted(self, address: str) -> bool:
     entry = self.cars.get(address.upper())
     return bool(entry) and entry["boot"] == self.boot_id() and entry["passes"] >= MAX_PASSES and not entry["working"]
 
-  def strategy(self, address: str, base_modern: bool) -> Strategy:
+  def strategy(self, address: str, base_modern: bool, unofficial: bool = False) -> Strategy:
     """What to try now: the strategy that worked, else the current rung (standard once the passes are used up)."""
     entry = self._entry(address)
     working = _valid_strategy(entry["working"])
@@ -204,6 +228,8 @@ class SetupLadder:
       return working
     if entry["passes"] >= MAX_PASSES:
       return resolve("standard", base_modern)
+    if unofficial and entry["rung"] == "standard" and not entry["results"] and not entry["passes"]:
+      entry["rung"] = UNOFFICIAL_FIRST
     return resolve(entry["rung"], base_modern)
 
   def failed(self, address: str, strategy: Strategy, *, ladder_failure: bool, video_seen: bool, version_major: int,
@@ -276,12 +302,15 @@ class SetupLadder:
     working = _valid_strategy(entry["working"])
     current = working.rung if working else entry["rung"]
     passes = entry["passes"] if entry["boot"] == self.boot_id() else 0   # passes belong to one ignition cycle
+    live = self.live.get(address.upper(), {}) if address else {}
     steps = []
     for rung in RUNGS:
       if (rung == "experiments" and not adapter) or (rung == "phone_identity" and not unofficial):
         continue
       state = entry["results"].get(rung) or ("current" if rung == current else "waiting")
-      steps.append({"id": rung, "label": LABELS[rung], "state": state})
+      record = live.get(rung, {})
+      steps.append({"id": rung, "label": LABELS[rung], "state": state, "description": DESCRIPTIONS[rung],
+                    "tries": record.get("tries", 0), "reason": record.get("reason", "")})
     return {"steps": steps, "current": current, "learned": bool(working), "passes": passes, "max_passes": MAX_PASSES,
             "exhausted": passes >= MAX_PASSES and not working, "successes": entry["successes"],
             "t_ready_s": entry["t_ready"][-1] if entry["t_ready"] else None}

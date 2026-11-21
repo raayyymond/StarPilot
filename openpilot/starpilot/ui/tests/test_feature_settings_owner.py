@@ -95,7 +95,7 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.owner.configuration_vehicle = lambda: False
     self.assertTrue(self.owner.apply(required_change(self._row('aol', 'AlwaysOnLateral'))))
     self.assertFalse(self.params.get_bool('AlwaysOnLateral'))
-    self.assertFalse(self._row('aol', 'AlwaysOnLateral').available)
+    self.assertTrue(self._row('aol', 'AlwaysOnLateral').available)
     ordinary = CarInterface.get_params(CAR.TOYOTA_PRIUS, gen_empty_fingerprint(), [], False, False, False)
     self.owner.vehicle_params = lambda: ordinary
     self.fingerprint = ordinary.carFingerprint
@@ -106,7 +106,7 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     unconfigured = ordinary.as_reader().as_builder()
     unconfigured.safetyConfigs = []
     self.owner.vehicle_params = lambda: unconfigured
-    self.assertFalse(self._row('aol', 'AlwaysOnLateral').available)
+    self.assertTrue(self._row('aol', 'AlwaysOnLateral').available)
     self.assertFalse(policy_for(unconfigured).runtime_supported)
     self.assertFalse(policy_for(unconfigured).intent_supported)
     fw = [structs.CarParams.CarFw(ecu=structs.CarParams.Ecu.eps, address=0x7A1, brand='toyota', bus=0,
@@ -263,7 +263,7 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertTrue(self.owner.apply(request))
     self.assertFalse(self.owner.apply(request))
     preset = self._row("standard/acceleration", "profile:standard:acceleration")
-    self.assertEqual(preset.default_value, "Selected Profile")
+    self.assertEqual(preset.default_value, "Use global preset")
     self.assertEqual(self._row("profiles", "profile:global_braking").default_value, "Comfort")
 
   def test_strength_has_actual_runtime_admission_percent_range_and_source_guard(self):
@@ -454,6 +454,7 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertIsNone(self.params.get("QOLLongitudinal"))
 
   def test_force_stop_preserves_cruise_master_and_offset_bounds(self):
+    self.params.put_bool("ForceStops", False, block=True)
     self.assertTrue(self._row("profiles", "ForceStops").available)
     self.params.put_bool("QOLLongitudinal", True, block=True)
     force = self._row("profiles", "ForceStops")
@@ -486,8 +487,8 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
 
   def test_readable_presets_keep_saved_tokens_and_numeric_help(self):
     preset = self._row("aggressive/acceleration", "profile:aggressive:acceleration")
-    self.assertEqual(preset.value, "Selected Profile")
-    self.assertEqual(preset.choices, ("Selected Profile", "StarPilot Default", "Normal", "Comfort", "Sport", "Sport+"))
+    self.assertEqual(preset.value, "Use global preset")
+    self.assertEqual(preset.choices, ("Use global preset", "StarPilot Default", "Normal", "Comfort", "Sport", "Sport+"))
     self.assertTrue(self.owner.apply(FeatureSettingsRequest(preset.key, preset.source, "Sport+",
                                                           vehicle_fingerprint=preset.vehicle_fingerprint)))
     document = required_document(Path(self.params.get_param_path("LongitudinalPersonalityProfiles")).read_bytes())
@@ -541,6 +542,28 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertEqual(saved.read_bytes(), b"0")
     self.assertTrue(self._row("profiles", "LeadApproachBuffer").available)
 
+  def test_confirmation_is_one_guarded_choice(self):
+    from openpilot.starpilot.speed_limits.runtime_settings import read_params
+    self.assertEqual(self._row('slc', 'SLCConfirmation').value, 'Off')
+    for expected, label, lower, higher in (
+        (1, 'Both', True, True), (3, 'Higher only', False, True),
+        (4, 'Lower only', True, False), (0, 'Off', False, False),
+    ):
+      request = required_change(self._row('slc', 'SLCConfirmation'))
+      self.assertTrue(self.owner.apply(request))
+      self.assertFalse(self.owner.apply(request))
+      self.assertEqual(self.params.get('SLCConfirmation'), expected)
+      self.assertEqual(self._row('slc', 'SLCConfirmation').value, label)
+      policy = read_params(self.params).acceptance
+      self.assertEqual((policy.confirm_lower, policy.confirm_higher), (lower, higher))
+
+  def test_invalid_confirmation_can_be_repaired_to_both(self):
+    Path(self.params.get_param_path('SLCConfirmation')).write_bytes(b'2')
+    row = self._row('slc', 'SLCConfirmation')
+    self.assertEqual(row.repair_value, 'Both')
+    self.assertTrue(self.owner.apply(required_change(row)))
+    self.assertEqual(self.params.get('SLCConfirmation'), 1)
+
   def test_parent_and_units_guards(self):
     from opendbc.car.car_helpers import interfaces
     from opendbc.car.toyota.values import CAR
@@ -552,7 +575,7 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
     self.assertFalse(self.owner.apply(FeatureSettingsRequest('SLCConfirmationLower', None, 'On', vehicle_fingerprint=self.fingerprint)))
     parent = self._row("slc", "SLCConfirmation")
     self.assertTrue(self.owner.apply(required_change(parent)))
-    self.assertTrue(self.params.get_bool('SLCConfirmation'))
+    self.assertTrue(self.params.get('SLCConfirmation'))
     authority = self._row("lane", "LaneCenteringE2EAuthority")
     self.assertEqual(authority.value, "50.0")
     self.assertTrue(self.owner.apply(required_change(authority, -1)))
@@ -581,6 +604,59 @@ class FeatureSettingsOwnerTests(unittest.TestCase):
         self.assertFalse(self.owner.apply(FeatureSettingsRequest('SLCFallback', raw, 'Off',
                                                                   vehicle_fingerprint=self.fingerprint)))
         self.assertEqual(path.read_bytes(), raw)
+
+  def test_match_speed_limit_on_engage_uses_the_software_cruise_setting(self):
+    from opendbc.car.structs import car
+    cp = car.CarParams(carFingerprint=self.fingerprint, openpilotLongitudinalControl=True, pcmCruise=False)
+    self.owner.vehicle_params = lambda: cp
+    self.params.put_bool('SpeedLimitController', True, block=True)
+    row = self._row('slc', 'SLCOnEngage')
+    self.assertEqual((row.label, row.value, row.default_value), ('Match Speed Limit on Engage', 'Off', 'Off'))
+    request = required_change(row)
+    cp.pcmCruise = True
+    self.assertFalse(self.owner.apply(request))
+    cp.pcmCruise = False
+    self.assertTrue(self.owner.apply(request))
+    self.assertTrue(self.params.get_bool('SLCOnEngage'))
+    self.assertEqual(self._row('slc', 'SLCOnEngage').value, 'On')
+
+  def test_gas_pedal_override_uses_the_shared_slc_settings_owner(self):
+    row = self._row('slc', 'SLCOverrideMode')
+    choices = ('Resume the adjusted limit', 'Hold the speed you reached', 'Use your SET speed')
+    self.assertEqual((row.label, row.value), ('After an accelerator override', choices[1]))
+    self.assertEqual(row.choices, choices)
+    self.allowed = False
+    self.assertFalse(self.owner.apply(required_change(row)))
+    self.allowed = True
+    for mode in (2, 0, 1):
+      self.assertTrue(self.owner.apply(required_change(row)))
+      self.assertEqual(self.params.get('SLCOverrideMode'), mode)
+      row = self._row('slc', 'SLCOverrideMode')
+      self.assertEqual(row.value, choices[mode])
+
+    Path(self.params.get_param_path('SLCOverrideMode')).write_bytes(b'9')
+    repair = required_change(self._row('slc', 'SLCOverrideMode'))
+    self.assertEqual(repair.value, choices[0])
+    self.assertFalse(self.owner.apply(replace(repair, value=choices[2])))
+    self.assertTrue(self.owner.apply(repair))
+    self.assertEqual(self.params.get('SLCOverrideMode'), 0)
+
+  def test_wheel_override_is_off_and_only_configurable_for_software_set(self):
+    from opendbc.car.structs import car
+    cp = car.CarParams(carFingerprint=self.fingerprint, openpilotLongitudinalControl=True, pcmCruise=False)
+    self.owner.vehicle_params = lambda: cp
+    self.params.put_bool('SpeedLimitController', True, block=True)
+    row = self._row('slc', 'SLCWheelOverride')
+    self.assertEqual((row.label, row.value, row.default_value), ('Override speed limit with +', 'Off', 'Off'))
+    request = required_change(row)
+    cp.pcmCruise = True
+    self.assertFalse(self.owner.apply(request))
+    cp.pcmCruise = False
+    self.params.put_bool('SpeedLimitController', False, block=True)
+    self.assertFalse(self.owner.apply(request))
+    self.params.put_bool('SpeedLimitController', True, block=True)
+    self.assertTrue(self.owner.apply(request))
+    self.assertTrue(self.params.get_bool('SLCWheelOverride'))
 
   def test_limit_sign_preference_needs_parked_authority_not_long_control_or_vehicle(self):
     self.fingerprint = None

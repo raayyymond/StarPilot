@@ -12,7 +12,7 @@ from openpilot.starpilot.system.starport.projection_layout import (
   projection_customization, ProjectionLayoutSource,
   PROJECTION_WIDGETS, NAV_CARD, NAV_MAP, FAVORITE_WIDGETS, BOOKMARK_WIDGET, CAR_EXIT, ACTION_WIDGETS, placement_size,
 )
-from openpilot.starpilot.ui.onroad_customization import CLOCK_WIDGET, MODE_WIDGET, STOPPED_TIMER_WIDGET, default_document, customization_metadata
+from openpilot.starpilot.ui.onroad_customization import CLOCK_WIDGET, MODE_WIDGET, STOPPED_TIMER_WIDGET, default_document, customization_metadata, NAV_CARD_SIZE
 from openpilot.starpilot.saved_document import commit_exact
 
 SCREEN = {'version': 1, 'width': 1280, 'height': 720, 'margin_width': 0,
@@ -35,6 +35,26 @@ class TestProjectionLayout(unittest.TestCase):
           self.assertGreaterEqual(placed[axis], metadata['bounds'][axis])
           self.assertLessEqual(placed[axis] + widget[extent], metadata['bounds'][axis] + metadata['bounds'][extent])
 
+  def test_saved_layout_survives_a_new_widget_and_a_stale_one(self):
+    document = default_layout(SCREEN)
+    document['widgets']['steering_wheel'].update(x=500, y=400, enabled=False)
+    del document['widgets']['weather']
+    document['widgets']['retired_widget'] = {'x': 0, 'y': 0, 'enabled': True}
+    document['widgets']['nav_card']['x'] = 99999
+    decoded = decode_layout(json.dumps(document).encode(), SCREEN)
+    self.assertEqual({key: decoded['widgets']['steering_wheel'][key] for key in ('x', 'y', 'enabled')}, {'x': 500, 'y': 400, 'enabled': False})
+    self.assertEqual(decoded['widgets']['weather'], default_layout(SCREEN)['widgets']['weather'])
+    self.assertNotIn('retired_widget', decoded['widgets'])
+    metadata = layout_metadata(SCREEN)
+    bounds, card = metadata['bounds'], metadata['widgets']['nav_card']
+    self.assertEqual(decoded['widgets']['nav_card']['x'], bounds['x'] + bounds['width'] - card['width'])
+
+  def test_salvage_still_rejects_a_different_screen(self):
+    document = default_layout(SCREEN)
+    document['canvas'] = {'width': 1, 'height': 1}
+    with self.assertRaises(ValueError):
+      decode_layout(json.dumps(document).encode(), SCREEN)
+
   def test_unsaved_layer_order_draws_the_editor_default(self):
     document = default_layout(SCREEN)
     self.assertNotIn('widgetOrder', document)
@@ -44,47 +64,49 @@ class TestProjectionLayout(unittest.TestCase):
     saved = [NAV_MAP, *(key for key in order if key != NAV_MAP)][::-1]
     self.assertEqual(projection_customization({**document, 'widgetOrder': saved}, default_document())['widgetOrder']['large'], saved)
 
-  def test_sources_save_actual_attached_actions_inside_each_projection_screen(self):
-    from openpilot.starpilot.ui.onroad_customization import default_document, placement
+  def test_sources_keep_the_card_where_it_fits_on_each_projection_screen(self):
     for viewport in ((1860, 1080), (2880, 1080), (1920, 1440)):
       for separate in (False, True):
         with self.subTest(viewport=viewport, separate=separate):
           document = default_layout_for_viewport(viewport, {'speedSources': True, 'speedSourcesCard': separate})
-          actions = document['widgets']['speed_limit_actions']
-          self.assertEqual(actions['y'], 367 if separate else 359)
           self.assertEqual(validate_layout_for_viewport(document, viewport), document)
-          native = projection_customization(document, default_document())
-          self.assertEqual(placement(native, 'large', 'speed_limit_actions'), actions)
-          document['widgets']['cruise_limits']['y'] = 690
-          actions['y'] = 882
+          document['widgets']['cruise_limits']['y'] = 200
           saved = validate_layout_for_viewport(document, viewport)
-          card, actions = (saved['widgets'][key] for key in ('cruise_limits', 'speed_limit_actions'))
-          self.assertEqual(actions['y'], card['y'] + 284 + (8 if separate else 0))
-          self.assertLessEqual(actions['y'] + 168, viewport[1] - 30)
+          self.assertEqual(saved['widgets']['cruise_limits']['y'], 200)
           self.assertEqual(validate_layout_for_viewport(saved, viewport), saved)
 
-  def test_v4_large_sign_migration_clamps_old_bottom_placement_without_losing_custom_actions(self):
+  def test_v4_large_sign_migration_clamps_old_bottom_placement_and_drops_actions(self):
     document = default_layout(SCREEN)
     document['version'] = 4
     bounds = layout_metadata(SCREEN)['bounds']
     bottom = bounds['y'] + bounds['height']
     document['widgets']['cruise_limits']['y'] = bottom - 132
-    document['widgets']['speed_limit_actions'].update(x=250, y=400)
+    document['widgets']['speed_limit_actions'] = {'x': 250, 'y': 400, 'enabled': True}
+    document['widgetOrder'] = [*layout_metadata(SCREEN)['widgetOrder'][:-1], 'speed_limit_actions', 'car_exit']
     before = copy.deepcopy(document)
     migrated = validate_layout(document, SCREEN)
     self.assertEqual(document, before)
-    self.assertEqual(migrated['version'], 5)
-    self.assertEqual(migrated['widgets']['cruise_limits']['y'], bottom - 192)
-    self.assertEqual(migrated['widgets']['speed_limit_actions'], document['widgets']['speed_limit_actions'])
+    self.assertEqual(migrated['version'], 7)
+    self.assertEqual(migrated['widgets']['cruise_limits']['y'], bottom - 309)
+    self.assertNotIn('speed_limit_actions', migrated['widgets'])
+    self.assertEqual(migrated['widgetOrder'], layout_metadata(SCREEN)['widgetOrder'])
     self.assertEqual(validate_layout(migrated, SCREEN), migrated)
 
-  def test_v4_moves_actions_only_when_they_follow_the_old_default_sign_position(self):
+  def test_v5_portrait_upgrade_with_hidden_actions_makes_room_for_the_sign_chooser(self):
     document = default_layout(SCREEN)
-    document['version'] = 4
-    card = document['widgets']['cruise_limits']
-    document['widgets']['speed_limit_actions'].update(x=card['x']+12, y=card['y']+173)
+    document['version'] = 5
+    bottom = sum(layout_metadata(SCREEN)['bounds'][key] for key in ('y', 'height'))
+    document['widgets']['cruise_limits']['y'] = bottom - 168
+    document['widgets']['speed_limit_actions'] = {'x': 250, 'y': 400, 'enabled': False}
+    before = copy.deepcopy(document)
     migrated = validate_layout(document, SCREEN)
-    self.assertEqual(migrated['widgets']['speed_limit_actions']['y'], card['y']+192)
+    expected = copy.deepcopy(document)
+    del expected['widgets']['speed_limit_actions']
+    expected['version'] = 7
+    expected['widgets']['cruise_limits']['y'] = bottom - 309
+    self.assertEqual(document, before)
+    self.assertEqual(migrated, expected)
+    self.assertEqual(validate_layout(migrated, SCREEN), migrated)
 
   def test_jetlink_widget_migrates_and_preserves_placement_and_order(self):
     document = default_layout(SCREEN)
@@ -337,7 +359,7 @@ class TestProjectionLayout(unittest.TestCase):
     before = copy.deepcopy(base)
     document = default_layout(SCREEN)
     converted = projection_customization(document, base)
-    own = (*PROJECTION_WIDGETS, 'jetlink_status')
+    own = (*PROJECTION_WIDGETS, 'jetlink_status', 'pip_left', 'pip_right')
     native = {key: value for key, value in converted['layouts']['large'].items() if key not in own}
     self.assertEqual(native, {key: value for key, value in base['layouts']['large'].items() if key not in own})
     shift = document['canvas']['width'] - 1860
@@ -399,11 +421,14 @@ class TestProjectionLayout(unittest.TestCase):
       source = ProjectionLayoutSource(Path(directory) / 'layouts/document.json')
       source.prepare()
       raw = json.dumps(default_layout(SCREEN)).encode()
-      args = {'key': 'projection', 'max_bytes': 16384, 'raw': raw, 'expected': None, 'temp_prefix': '.aa-test-'}
-      self.assertFalse(commit_exact(source, authorized=lambda: False, **args).committed)
-      result = commit_exact(source, authorized=lambda: True, **args)
+      def commit(authorized):
+        return commit_exact(source, key='projection', max_bytes=16384, raw=raw, expected=None,
+                            authorized=lambda: authorized, temp_prefix='.aa-test-')
+
+      self.assertFalse(commit(False).committed)
+      result = commit(True)
       self.assertTrue(result.committed and result.verified)
-      self.assertFalse(commit_exact(source, authorized=lambda: True, **args).committed)
+      self.assertFalse(commit(True).committed)
 
   def test_starport_widgets_are_added_to_older_layouts(self):
     document = default_layout(SCREEN)
@@ -477,8 +502,8 @@ class TestProjectionLayout(unittest.TestCase):
     small, wide = default_layout_for_viewport((1860, 1080)), default_layout_for_viewport((2880, 1080))
     for document in (small, wide):
       card, overlay = document['widgets'][NAV_CARD], document['widgets'][NAV_MAP]
-      self.assertEqual(card['x'] + 560, overlay['x'] + overlay['width'], 'right edges line up')
-      self.assertGreaterEqual(overlay['y'], card['y'] + 195)
+      self.assertEqual(card['x'] + NAV_CARD_SIZE[0], overlay['x'] + overlay['width'], 'right edges line up')
+      self.assertGreaterEqual(overlay['y'], card['y'] + NAV_CARD_SIZE[1])
       self.assertLessEqual(overlay['y'] + overlay['height'], document['canvas']['height'] - 30)
     self.assertLess(small['widgets'][NAV_MAP]['width'], wide['widgets'][NAV_MAP]['width'])
 
@@ -489,7 +514,37 @@ class TestNowPlayingWidget(unittest.TestCase):
     self.assertTrue(placement['enabled'])
     self.assertEqual(placement['opacity'], 85)
     self.assertFalse(placement['collapse'])
-    self.assertEqual(set(placement), {'x', 'y', 'enabled', 'opacity', 'collapse'})
+    self.assertEqual(placement['size'], 'small')
+    self.assertEqual(set(placement), {'x', 'y', 'enabled', 'opacity', 'collapse', 'size'})
+
+  def test_size_is_validated_and_older_layouts_stay_small_in_place(self):
+    document = default_layout(SCREEN)
+    metadata = layout_metadata(SCREEN)
+    self.assertEqual(metadata['widgets']['now_playing']['sizes'], {'small': [520, 96], 'big': [640, 264]})
+    for bad in ('medium', 1, None, True):
+      broken = copy.deepcopy(document)
+      broken['widgets']['now_playing']['size'] = bad
+      with self.assertRaises(ValueError):
+        validate_layout(broken, SCREEN)
+    bounds = metadata['bounds']
+    old = copy.deepcopy(document)
+    del old['widgets']['now_playing']['size']
+    old['widgets']['now_playing'].update(x=bounds['x'] + bounds['width'] - 520, y=bounds['y'] + bounds['height'] - 96)
+    placed = validate_layout(old, SCREEN)['widgets']['now_playing']
+    self.assertEqual((placed['size'], placed['x'], placed['y']),
+                     ('small', bounds['x'] + bounds['width'] - 520, bounds['y'] + bounds['height'] - 96))
+
+  def test_saved_spot_slides_back_on_screen_when_the_card_grows(self):
+    document = default_layout(SCREEN)
+    bounds = layout_metadata(SCREEN)['bounds']
+    right, bottom = bounds['x'] + bounds['width'], bounds['y'] + bounds['height']
+    document['widgets']['now_playing'].update(x=right - 520, y=bottom - 96, size='big')
+    placed = validate_layout(document, SCREEN)['widgets']['now_playing']
+    self.assertEqual((placed['x'], placed['y']), (right - 640, bottom - 264))
+    self.assertEqual(placement_size('now_playing', layout_metadata(SCREEN)['widgets']['now_playing'], placed), (640, 264))
+    document['widgets']['now_playing'].update(x=bounds['x'], y=bounds['y'])
+    placed = validate_layout(document, SCREEN)['widgets']['now_playing']
+    self.assertEqual((placed['x'], placed['y']), (bounds['x'], bounds['y']))
 
   def test_opacity_is_validated_and_old_layouts_gain_the_card(self):
     document = default_layout(SCREEN)
@@ -602,3 +657,35 @@ class TestProjectionBirdsEyeLayout(unittest.TestCase):
                      'default: { x: 1310, y: 290, width: 520, height: 600, enabled: true, opacity: 90, display: "overlay" }'):
       self.assertIn(fragment, source)
     self.assertEqual(widget['default'], {'x': 1310, 'y': 290, 'width': 520, 'height': 600, 'enabled': True, 'opacity': 90, 'display': 'overlay'})
+
+
+def test_resize_migrates_and_roundtrips_without_touching_native_layout():
+  for viewport in ((1860, 1080), (2880, 1080), (1860, 2160)):
+    original = default_layout_for_viewport(viewport)
+    legacy = copy.deepcopy(original)
+    for key in ('nav_card', 'pip_left', 'pip_right'):
+      legacy['widgets'][key].pop('width')
+      legacy['widgets'][key].pop('height')
+    assert validate_layout_for_viewport(legacy, viewport) == original
+    for factor in (.5, 1, 1.5):
+      doc = copy.deepcopy(original)
+      for key in ('nav_card', 'pip_left', 'pip_right'):
+        at = doc['widgets'][key]
+        at.update(x=30, y=30, width=round(at['width'] * factor), height=round(at['height'] * factor))
+      assert validate_layout_for_viewport(doc, viewport) == doc
+      assert validate_layout_for_viewport(json.loads(json.dumps(doc)), viewport) == doc
+      base = default_document()
+      before = copy.deepcopy(base)
+      projected = projection_customization(doc, base)
+      assert base == before
+      for key in ('nav_card', 'pip_left', 'pip_right'):
+        assert projected['layouts']['large'][key]['width'] == doc['widgets'][key]['width']
+
+
+def test_resize_rejects_distortion_and_invalid_sizes():
+  import pytest
+  for width, height in ((True, 300), (0, 0), (9999, 9999), (300, 700)):
+    doc = default_layout_for_viewport((1860, 1080))
+    doc['widgets']['pip_left'].update(x=30, y=30, width=width, height=height)
+    with pytest.raises(ValueError):
+      validate_layout_for_viewport(doc, (1860, 1080))

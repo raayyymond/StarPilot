@@ -116,7 +116,9 @@ class TestBoltManualGain(unittest.TestCase):
       profiles = replace_field(profiles, str(cp.carFingerprint), basis.torque_basis, "friction", "custom", .08)
       saved.put(DOCUMENT_KEY, json.loads(serialize_document(profiles)), block=True)
       owner = FeatureSettingsOwner(saved, lambda _: True, vehicle_fingerprint=lambda: cp.carFingerprint, vehicle_params=lambda: cp)
-      before = owner.snapshot("torque", parked=True, system_long=True, lateral_context=True, metric=False)
+      normal = owner.snapshot("torque", parked=True, system_long=True, lateral_context=True, metric=False)
+      self.assertFalse(any(row.key == 'torque:gain:value' for row in normal.rows))
+      before = owner.snapshot("torque/developer", parked=True, system_long=True, lateral_context=True, metric=False)
       edit = next(row for row in before.rows if row.key == "torque:gain:value")
       omitted = FeatureSettingsRequest(edit.key, edit.source, "0.8", vehicle_fingerprint=cp.carFingerprint, capability=edit.capability)
       self.assertFalse(owner.apply(omitted))
@@ -124,7 +126,7 @@ class TestBoltManualGain(unittest.TestCase):
       request = FeatureSettingsRequest(edit.key, edit.source, "0.8",
                                        vehicle_fingerprint=cp.carFingerprint, capability=edit.capability, dependencies=edit.dependencies)
       self.assertFalse(owner.apply(request))
-      rows = owner.snapshot("torque", parked=True, system_long=True, lateral_context=True, metric=False).rows
+      rows = owner.snapshot("torque/developer", parked=True, system_long=True, lateral_context=True, metric=False).rows
       self.assertTrue(any(row.key == "torque_gain_rebase" for row in rows))
       withdrawal = next(row for row in rows if row.key == "torque:gain:mode")
       request = FeatureSettingsRequest(withdrawal.key, withdrawal.source, "Selected controller",
@@ -163,6 +165,7 @@ class TestBoltManualGain(unittest.TestCase):
   def test_confirmation_handlers_keep_gain_review_intent(self):
     # Execute the real handler bodies with dialog rendering replaced; no display is opened.
     from openpilot.starpilot.ui import feature_settings_state as state
+    from openpilot.starpilot.ui.feature_reset_question import feature_reset_question
     from openpilot.starpilot.galaxy.settings import _question
     row = state.FeatureRow("torque_gain_rebase", "Review steering response", "Changed controller", b"document",
                            capability=("vehicle",), dependencies=(("LateralControllerSelection", b"selection"),))
@@ -188,7 +191,7 @@ class TestBoltManualGain(unittest.TestCase):
       namespace: dict = {"FeatureSettingsRequest": FeatureSettingsRequest, "FeatureRow": state.FeatureRow,
                    "LANE_CHANGE_RESET": "lane_change:reset", "CONDITIONAL_CONFIRM_ACTIONS": frozenset(),
                    "SETUP_ACTION": "torque_prepare_firestar", "SETUP_QUESTION": "Prepare",
-                   "long_confirm_question": lambda _: "Other action",
+                   "long_confirm_question": lambda _: "Other action", "feature_reset_question": feature_reset_question,
                    "gui_app": SimpleNamespace(push_widget=pushed.append, texture=lambda *args: None),
                    "BigConfirmationDialog": lambda question, texture, callback, red: SimpleNamespace(question=question, callback=callback)}
       exec(compile(ast.Module(body=[function], type_ignores=[]), str(file), "exec"), namespace)

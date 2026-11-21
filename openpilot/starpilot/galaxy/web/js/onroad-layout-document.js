@@ -8,6 +8,8 @@ export const PATH_MODES = ["default", "color", "rainbow", "acceleration"]
 export const HEX = /^#[0-9a-fA-F]{8}$/
 const keysEqual = (value, keys) => value && typeof value === "object" && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+const largeWheel = (widget, profile, projection) => !projection && profile === "large" && widget?.kind === "steering_wheel"
+export const wheelRotationAvailable = (widget, profile, projection) => largeWheel(widget, profile, projection) && widget.rotateToggle === true
 const positive = (value) => Number.isFinite(value) && value > 0 && value <= 8192
 const object = (value) => value && typeof value === "object" && !Array.isArray(value)
 const frontmostOrder = (order, profile) => {
@@ -42,6 +44,12 @@ export const withAlpha = (color, factor) => color.slice(0, 7) + Math.floor(parse
 // Steering wheels resize as a square ("size"); box widgets such as the Android Auto map take a width and height.
 export function widgetSize(widget, position) {
   if (widget.iconSize && position?.display === "icons") return [widget.iconSize, widget.iconSize]
+  if (widget.sizes && Array.isArray(widget.sizes[position?.size])) {
+    // A widget with a size percentage (the signal widget) shrinks its chosen style.
+    const scale = widget.scale && Number.isInteger(position?.scale) ? position.scale / 100 : 1
+    const [width, height] = widget.sizes[position.size]
+    return [width, height + (widget.wifiNameHeight && position.wifiName === true ? widget.wifiNameHeight : 0)].map(side => Math.round(side * scale))
+  }
   if (widget.box) return [position?.width ?? widget.width, position?.height ?? widget.height]
   if (widget.resizable) return [position?.size ?? widget.width, position?.size ?? widget.height]
   return [widget.width, widget.height]
@@ -55,8 +63,7 @@ export function placementLimits(profile, id, layout = null) {
     minY: bounds.y, maxY: bounds.y + bounds.height - height
   }
   const confirmation = widget.confirmation
-  if (confirmation && (layout?.[id]?.enabled ?? widget.default.enabled) &&
-    (layout?.speed_limit_actions?.enabled ?? profile.widgets.speed_limit_actions.default.enabled)) {
+  if (confirmation && (layout?.[id]?.enabled ?? widget.default.enabled)) {
     limits.minX = Math.max(limits.minX, bounds.x - confirmation.x)
     limits.maxX = Math.min(limits.maxX, bounds.x + bounds.width - confirmation.x - confirmation.width)
     limits.minY = Math.max(limits.minY, bounds.y - confirmation.y)
@@ -69,6 +76,13 @@ export function placementLimits(profile, id, layout = null) {
 export function clampBox(profile, id, position, width, height) {
   const widget = profile.widgets[id], box = widget.box, bounds = widget.bounds || profile.bounds
   if (!box || !Number.isFinite(width) || !Number.isFinite(height)) return null
+  if (widget.aspectRatio) {
+    const ratio = widget.aspectRatio
+    const scale = width !== position.width ? width : height * ratio
+    width = Math.max(box.minWidth, box.minHeight * ratio, Math.min(scale, box.maxWidth,
+      box.maxHeight * ratio, bounds.x + bounds.width - position.x, (bounds.y + bounds.height - position.y) * ratio))
+    height = width / ratio
+  }
   return {
     width: Math.round(Math.max(box.minWidth, Math.min(box.maxWidth, bounds.x + bounds.width - position.x, width))),
     height: Math.round(Math.max(box.minHeight, Math.min(box.maxHeight, bounds.y + bounds.height - position.y, height)))
@@ -86,7 +100,7 @@ export function overlapsReserved(profile, id, x, y, layout = null) {
   const widget = profile.widgets[id]
   const owner = Object.keys(profile.widgets).find(key => profile.widgets[key].confirmation)
   const positions = layout || Object.fromEntries(Object.entries(profile.widgets).map(([key, item]) => [key, item.default]))
-  if (owner && positions[owner]?.enabled && positions.speed_limit_actions?.enabled) {
+  if (owner && positions[owner]?.enabled) {
     const area = profile.widgets[owner].confirmation, at = positions[owner]
     const critical = owner === "speed_limit" ? ["max_speed", "torque_bar"] : ["torque_bar"]
     const overlaps = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
@@ -101,27 +115,17 @@ export function overlapsReserved(profile, id, x, y, layout = null) {
       if ((id !== owner && id !== key) || !positions[key]?.enabled) return false
       const [width, height] = widgetSize(profile.widgets[key], positions[key])
       const obstacle = profile.widgets[key].confirmationObstacle || { x: 0, y: 0, width, height }
-      return overlaps(panel, { x: (id === key ? x : positions[key].x) + obstacle.x,
-        y: (id === key ? y : positions[key].y) + obstacle.y, width: obstacle.width, height: obstacle.height })
+      return overlaps(panel, {
+        x: (id === key ? x : positions[key].x) + obstacle.x,
+        y: (id === key ? y : positions[key].y) + obstacle.y, width: obstacle.width, height: obstacle.height
+      })
     })) return true
   }
   if (widget.layer === "underlay") return false
   const [width, height] = widgetSize(widget, layout?.[id])
   const intersects = (left, top, otherWidth, otherHeight) => x < left + otherWidth && x + width > left &&
     y < top + otherHeight && y + height > top
-  if (profile.reservedZones.some((zone) => intersects(zone.x, zone.y, zone.width, zone.height))) return true
-  const actions = profile.widgets.speed_limit_actions
-  if (!actions || profile.protectedWidget !== "speed_limit_actions") return false
-  if (id === "speed_limit_actions") return Object.entries(profile.widgets).some(([key, other]) => {
-    const at = positions[key]
-    return key !== id && key !== "speed_limit" && key !== "stopped_timer" && other.layer !== "underlay" && at &&
-      at.enabled && Number.isFinite(at.x) && Number.isFinite(at.y) &&
-      intersects(at.x, at.y, ...widgetSize(other, at))
-  })
-  if (id === "speed_limit" || id === "stopped_timer") return false
-  const at = positions.speed_limit_actions
-  if (!at || !Number.isFinite(at.x) || !Number.isFinite(at.y)) return true
-  return intersects(at.x, at.y, actions.width, actions.height)
+  return profile.reservedZones.some((zone) => intersects(zone.x, zone.y, zone.width, zone.height))
 }
 
 export function previewPoint(event, rect, profile) {
@@ -140,13 +144,14 @@ export const PROJECTION_DISPLAY_SWITCHES = ["blindSpotBorder", "signalBorder", "
 export function validDocument(document, metadata) {
   if (!object(document)) return false
   const profiles = metadata?.projection === true ? ["large"] : PROFILES
-  if (!keysEqual(document, ["version", "palette", "layouts", "widgetColors", "roadColors", ...(Object.hasOwn(document, "widgetOrder") ? ["widgetOrder"] : []), ...(Object.hasOwn(document, "speedSources") ? ["speedSources"] : []), ...(Object.hasOwn(document, "speedSourcesCard") ? ["speedSourcesCard"] : []), ...(Object.hasOwn(document, "speedAlign") ? ["speedAlign"] : []), ...(Object.hasOwn(document, "clock24Hour") ? ["clock24Hour"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "reduceMotion") ? ["reduceMotion"] : []), ...(Object.hasOwn(document, "showMaxSpeed") ? ["showMaxSpeed"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "display") ? ["display"] : []), ...(metadata?.projection === true && Object.hasOwn(document, "largeUiGammaTrial") ? ["largeUiGammaTrial"] : []), ...(metadata?.projection === true ? PROJECTION_DISPLAY_SWITCHES.filter(key => Object.hasOwn(document, key)) : []), ...(metadata?.projection === true && Object.hasOwn(document, "leadInfo") ? ["leadInfo"] : [])]) || (metadata?.projection === true ? document.version !== 8 : ![11, 12].includes(document.version)) ||
+  if (!keysEqual(document, ["version", "palette", "layouts", "widgetColors", "roadColors", ...(Object.hasOwn(document, "widgetOrder") ? ["widgetOrder"] : []), ...(Object.hasOwn(document, "speedSources") ? ["speedSources"] : []), ...(Object.hasOwn(document, "speedSourcesCard") ? ["speedSourcesCard"] : []), ...(Object.hasOwn(document, "speedAlign") ? ["speedAlign"] : []), ...(Object.hasOwn(document, "clock24Hour") ? ["clock24Hour"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "reduceMotion") ? ["reduceMotion"] : []), ...(Object.hasOwn(document, "showMaxSpeed") ? ["showMaxSpeed"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "speedDisplayOffset") ? ["speedDisplayOffset"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "display") ? ["display"] : []), ...(metadata?.projection === true && Object.hasOwn(document, "largeUiGammaTrial") ? ["largeUiGammaTrial"] : []), ...(metadata?.projection === true ? PROJECTION_DISPLAY_SWITCHES.filter(key => Object.hasOwn(document, key)) : []), ...(metadata?.projection === true && Object.hasOwn(document, "leadInfo") ? ["leadInfo"] : [])]) || (metadata?.projection === true ? document.version !== 8 : document.version !== 16) ||
     (Object.hasOwn(document, "speedSources") && typeof document.speedSources !== "boolean") ||
     (Object.hasOwn(document, "speedSourcesCard") && typeof document.speedSourcesCard !== "boolean") ||
     (Object.hasOwn(document, "speedAlign") && !SPEED_ALIGNMENTS.includes(document.speedAlign)) ||
     (Object.hasOwn(document, "clock24Hour") && typeof document.clock24Hour !== "boolean") ||
     (Object.hasOwn(document, "reduceMotion") && typeof document.reduceMotion !== "boolean") ||
     (Object.hasOwn(document, "showMaxSpeed") && typeof document.showMaxSpeed !== "boolean") ||
+    (Object.hasOwn(document, "speedDisplayOffset") && (!Number.isFinite(document.speedDisplayOffset) || document.speedDisplayOffset < -5 || document.speedDisplayOffset > 5)) ||
     (Object.hasOwn(document, "display") && (!object(document.display) || !Object.values(document.display).every((value) => typeof value === "string"))) ||
     (Object.hasOwn(document, "largeUiGammaTrial") && typeof document.largeUiGammaTrial !== "boolean") ||
     PROJECTION_DISPLAY_SWITCHES.some(key => Object.hasOwn(document, key) && typeof document[key] !== "boolean") ||
@@ -172,16 +177,23 @@ export function validDocument(document, metadata) {
     return keysEqual(layout, Object.keys(profile.widgets)) && Object.entries(layout).every(([id, position]) => {
       const widget = profile.widgets[id], limits = placementLimits(profile, id, layout)
       const resizable = widget.resizable, box = widget.box, opacity = widget.opacity
+      const rotate = wheelRotationAvailable(widget, name, metadata?.projection === true) && object(position) && Object.hasOwn(position, "rotate")
       return keysEqual(position, ["x", "y", "enabled", ...(resizable ? ["size"] : []), ...(box ? ["width", "height"] : []),
-        ...(opacity ? ["opacity"] : []), ...(widget.iconSize || widget.displayModes ? ["display"] : []), ...(widget.backgroundToggle ? ["background"] : []), ...(widget.collapseToggle ? ["collapse"] : [])]) &&
+        ...(opacity ? ["opacity"] : []), ...(widget.iconSize || widget.displayModes ? ["display"] : []), ...(widget.backgroundToggle ? ["background"] : []), ...(widget.collapseToggle ? ["collapse"] : []), ...(widget.bluetoothToggle ? ["bluetooth"] : []), ...(widget.wifiNameHeight ? ["wifiName"] : []), ...(widget.sizes ? ["size"] : []), ...(widget.scale ? ["scale"] : []), ...(rotate ? ["rotate"] : [])]) &&
+        (!rotate || typeof position.rotate === "boolean") &&
         (!widget.iconSize || ["words", "icons"].includes(position.display)) &&
         (!widget.displayModes || widget.displayModes.includes(position.display)) &&
         (!widget.backgroundToggle || typeof position.background === "boolean") &&
         (!widget.collapseToggle || typeof position.collapse === "boolean") &&
+        (!widget.bluetoothToggle || typeof position.bluetooth === "boolean") &&
+        (!widget.wifiNameHeight || typeof position.wifiName === "boolean") &&
+        (!widget.sizes || Object.hasOwn(widget.sizes, position.size)) &&
+        (!widget.scale || (Number.isInteger(position.scale) && position.scale >= widget.scale.min && position.scale <= widget.scale.max)) &&
         (!opacity || (Number.isInteger(position.opacity) && position.opacity >= opacity.min && position.opacity <= opacity.max)) &&
         (!resizable || (Number.isInteger(position.size) && position.size >= resizable.min && position.size <= resizable.max)) &&
         (!box || (Number.isInteger(position.width) && position.width >= box.minWidth && position.width <= box.maxWidth &&
           Number.isInteger(position.height) && position.height >= box.minHeight && position.height <= box.maxHeight)) &&
+        (!widget.aspectRatio || Math.abs(position.height - position.width / widget.aspectRatio) <= 1) &&
         typeof position.enabled === "boolean" && (!widget.required || position.enabled === true) &&
         Number.isFinite(position.x) && Number.isFinite(position.y) &&
         position.x >= limits.minX && position.x <= limits.maxX && position.y >= limits.minY && position.y <= limits.maxY &&
@@ -203,7 +215,7 @@ export function validSnapshot(data) {
     new Set(data.metadata.roadColorFields.map((field) => field.id)).size !== ROAD_COLORS.length ||
     !data.metadata.roadColorFields.every((field) => ROAD_COLORS.includes(field.id) && typeof field.label === "string" && HEX.test(field.default)) ||
     (data.activeProfile != null && !profiles.includes(data.activeProfile))) return false
-  for (const profile of Object.values(data.metadata.profiles)) {
+  for (const [name, profile] of Object.entries(data.metadata.profiles)) {
     if (profile.widgetOrder != null && (!Array.isArray(profile.widgetOrder) ||
       profile.widgetOrder.length !== Object.keys(profile.widgets || {}).length ||
       new Set(profile.widgetOrder).size !== profile.widgetOrder.length ||
@@ -219,8 +231,6 @@ export function validSnapshot(data) {
         zone.y + zone.height > profile.bounds.y + profile.bounds.height))) return false
     const bounds = profile.bounds
     if (projection && (profile.widgets?.car_exit?.kind !== "car_exit" || profile.widgets.car_exit.required !== true)) return false
-    if (profile.protectedWidget != null && (profile.protectedWidget !== "speed_limit_actions" ||
-      profile.widgets?.[profile.protectedWidget]?.kind !== "speed_limit_actions")) return false
     if (!positive(profile.width) || !positive(profile.height) || typeof profile.label !== "string" ||
       !bounds || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) || bounds.x < 0 || bounds.y < 0 ||
       !positive(bounds.width) || !positive(bounds.height) || bounds.x + bounds.width > profile.width ||
@@ -232,6 +242,7 @@ export function validSnapshot(data) {
         zone.x + zone.width > bounds.x + bounds.width || zone.y + zone.height > bounds.y + bounds.height) return false
     }
     for (const widget of Object.values(profile.widgets)) {
+      if (widget.hidden != null && (widget.kind !== "rear_fog" || typeof widget.hidden !== "boolean")) return false
       for (const area of [widget.confirmation, widget.confirmationObstacle]) {
         if (area != null && (!keysEqual(area, ["x", "y", "width", "height"]) ||
           !Number.isFinite(area.x) || Math.abs(area.x) > profile.width ||
@@ -247,21 +258,30 @@ export function validSnapshot(data) {
         !positive(area.width) || !positive(area.height) || area.x + area.width > profile.width ||
         area.y + area.height > profile.height || typeof widget.label !== "string" || typeof widget.kind !== "string" ||
         !positive(widget.width) || !positive(widget.height) || widget.width > area.width || widget.height > area.height) return false
-      if (widget.box && (!["nav_map", "birds_eye"].includes(widget.kind) || !object(widget.opacity) ||
+      if (widget.box && (!(["nav_map", "birds_eye"].includes(widget.kind) || projection && ["nav_card", "pip_camera"].includes(widget.kind)) ||
+        (["nav_map", "birds_eye"].includes(widget.kind) ? !object(widget.opacity) : !positive(widget.aspectRatio)) ||
         ![widget.box.minWidth, widget.box.maxWidth, widget.box.minHeight, widget.box.maxHeight].every(Number.isInteger) ||
         widget.box.minWidth < 24 || widget.box.minHeight < 24 || widget.box.minWidth > widget.box.maxWidth ||
-        widget.box.minHeight > widget.box.maxHeight || widget.box.maxWidth > area.width || widget.box.maxHeight > area.height ||
-        ![widget.opacity.min, widget.opacity.max, widget.opacity.default].every(Number.isInteger) ||
-        widget.opacity.min < 0 || widget.opacity.max > 100 || widget.opacity.min > widget.opacity.default ||
-        widget.opacity.default > widget.opacity.max)) return false
-      if (widget.opacity && (!(["nav_map", "jetlink_status"].includes(widget.kind) || projection && widget.kind === "birds_eye" || projection && ["nav_home", "nav_work", "bookmark", "car_exit", "cruise_limits", "now_playing"].includes(widget.kind)) ||
+        widget.box.minHeight > widget.box.maxHeight || widget.box.maxWidth > area.width || widget.box.maxHeight > area.height)) return false
+      if (widget.aspectRatio != null && (!projection || !widget.box || !["nav_card", "pip_camera"].includes(widget.kind) ||
+        !positive(widget.aspectRatio) || widget.aspectRatio !== widget.width / widget.height)) return false
+      if (widget.opacity && (!(["nav_map", "jetlink_status", "network_signal"].includes(widget.kind) || projection && widget.kind === "birds_eye" || projection && ["nav_home", "nav_work", "bookmark", "car_exit", "cruise_limits", "now_playing"].includes(widget.kind)) ||
         !object(widget.opacity) || ![widget.opacity.min, widget.opacity.max, widget.opacity.default].every(Number.isInteger) ||
         widget.opacity.min < 0 || widget.opacity.max > 100 || widget.opacity.min > widget.opacity.default ||
         widget.opacity.default > widget.opacity.max)) return false
       if (widget.displayModes != null && (!projection || widget.kind !== "birds_eye" || !Array.isArray(widget.displayModes) ||
         widget.displayModes.length < 2 || !widget.displayModes.every(mode => ["overlay", "full"].includes(mode)) ||
         !widget.displayModes.includes(widget.default?.display))) return false
+      if (Object.hasOwn(widget, "rotateToggle") && !wheelRotationAvailable(widget, name, projection)) return false
       if (widget.collapseToggle != null && (!projection || widget.kind !== "now_playing" || widget.collapseToggle !== true)) return false
+      if (widget.bluetoothToggle != null && (widget.kind !== "network_signal" || widget.bluetoothToggle !== true)) return false
+      if (widget.wifiNameHeight != null && (widget.kind !== "network_signal" || !positive(widget.wifiNameHeight))) return false
+      if (widget.sizes != null && (!(projection && widget.kind === "now_playing" || widget.kind === "network_signal") || !object(widget.sizes) ||
+        !Object.values(widget.sizes).every(size => Array.isArray(size) && size.length === 2 && size.every(positive) &&
+          size[0] <= area.width && size[1] <= area.height))) return false
+      if (widget.scale != null && (widget.kind !== "network_signal" || !widget.sizes || !object(widget.scale) ||
+        ![widget.scale.min, widget.scale.max, widget.scale.default].every(Number.isInteger) || widget.scale.min < 10 ||
+        widget.scale.max > 100 || widget.scale.min > widget.scale.default || widget.scale.default > widget.scale.max)) return false
       if (widget.backgroundToggle != null && (!projection || !["nav_home", "nav_work", "bookmark", "car_exit"].includes(widget.kind) ||
         widget.backgroundToggle !== true || !widget.opacity)) return false
       if (widget.resizable && (!["steering_wheel", "driver_monitor"].includes(widget.kind) || !Number.isInteger(widget.resizable.min) ||

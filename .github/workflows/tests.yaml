@@ -6,6 +6,10 @@ on:
       - master
       - Domathon
       - Dom
+      - StarPilot
+      - stable
+      - testing
+      - dev
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -35,12 +39,15 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Validate published device build receipt
-      if: github.event_name == 'push' && github.ref == 'refs/heads/Dom'
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/Dom' || github.ref == 'refs/heads/StarPilot' || github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing' || github.ref == 'refs/heads/dev')
       run: python3 tools/ci/check_prebuilt_receipt.py --revision HEAD
     - name: Check shipped device runtime dependencies
       run: |
         python3 -m unittest tools.laptop_device_build.tests.test_runtime_dependencies -v
         python3 -c 'from pathlib import Path; assert b"starting pandad (comma hardware)" in Path("openpilot/selfdrive/pandad/pandad").read_bytes(), "Shipped pandad must use the comma hardware build profile"'
+        python3 -c 'from pathlib import Path; paths = ("openpilot/system/camerad/camerad", "msgq_repo/msgq/visionipc/_visionipc.so", "openpilot/system/loggerd/encoderd", "openpilot/tools/replay/replay"); assert all(b"/dev/ion\0" in Path(p).read_bytes() for p in paths), "Shipped camera buffers must use ION"'
+    - name: Test one-shot branch migration
+      run: python3 -m unittest discover -s scripts/tests -v
     - name: Validate tracked dependencies
       run: python3 tools/vendor/check.py --revision HEAD
     - run: ./tools/op.sh setup
@@ -57,6 +64,9 @@ jobs:
     - name: Test CI tools
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
       run: python3 -m unittest discover -s tools/ci/tests -v
+    - name: Test authenticated monitoring release artifacts
+      if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+      run: python3 -m pytest -q tools/ci/tests/test_stock_monitoring_release.py
     - name: Test updater
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
       run: python3 -m unittest discover -s openpilot/system/updated/tests -v
@@ -292,11 +302,17 @@ jobs:
       run: |
         uv pip install --python .venv/bin/python --only-binary av av==19.0.1
         .venv/bin/python -c "import av; assert 'libx264' in av.codecs_available"
+    - name: Provide Mesa software graphics for pixel-level tests
+      if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+      run: sudo apt-get update && sudo apt-get install -y libegl1 libgles-dev libgl1-mesa-dri
     - name: Test every assigned custom pytest node serially
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-      timeout-minutes: 15
+      timeout-minutes: 20
       env:
         RAYLIB_BACKEND: headless
+        STARPILOT_AUTO_GL_TEST: "1"
+        STARPILOT_TEST_SOFTWARE_EGL: "1"
+        LIBGL_ALWAYS_SOFTWARE: "1"
       run: .venv/bin/python -m tools.ci.custom_pytest_shards run --index "${{ matrix.shard }}" --count 32 --output "ci-results/custom-pytest-${{ matrix.shard }}"
     - name: Save collection, every outcome, JUnit and durable worker diagnostics
       if: always()
@@ -347,7 +363,7 @@ jobs:
     - name: Build native host dependencies
       run: scons
     - name: Gate every assigned lifecycle module serially
-      timeout-minutes: 10
+      timeout-minutes: 15
       env:
         RAYLIB_BACKEND: headless
       run: python3 tools/ci/run_vehicle_tests.py --suite aol-lifecycle --shard-index "${{ matrix.shard }}" --shard-count 16 --output "ci-results/aol-lifecycle-${{ matrix.shard }}"

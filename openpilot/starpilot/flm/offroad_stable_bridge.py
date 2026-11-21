@@ -6,8 +6,9 @@ atomic source-bound save and next-drive comparison/rollback.
 """
 
 import hashlib
+import math
 from pathlib import Path
-from typing import Any
+from statistics import fmean
 
 from openpilot.starpilot.flm.offroad_stable_policy import (
   FLMSample,
@@ -26,10 +27,104 @@ from openpilot.starpilot.flm.log_decode import decode_full_rlog_segment
 from openpilot.starpilot.galaxy.drive_analysis import _closed_source
 
 
+def independent_profile_support(training, heldout, previous):
+  """Held-out estimates must support the frozen training step, not match its bits."""
+  if training is None or heldout is None:
+    return False
+  if any(type(row.get('values')) is not dict or set(row['values']) != set(previous) for row in (training, heldout)):
+    return False
+  changed = False
+  for name, baseline in previous.items():
+    values = (baseline, training['values'][name], heldout['values'][name])
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
+      return False
+    proposed, observed = values[1] - baseline, values[2] - baseline
+    if proposed:
+      changed = True
+      if proposed * observed <= 0 or abs(proposed) > abs(observed):
+        return False
+  return changed
+
+
+def coordinate_review(training, heldout, previous):
+  """Review each frozen setting without letting a failed bundle hide usable ideas."""
+  observed = {}
+  for proposal in heldout:
+    if proposal is not None:
+      for name, value in proposal['values'].items():
+        if value != previous[name]:
+          observed.setdefault(name, []).append(value - previous[name])
+  result = {}
+  for proposal in training:
+    if proposal is None:
+      continue
+    for name, value in proposal['values'].items():
+      delta = value - previous[name]
+      if delta == 0:
+        continue
+      support = observed.get(name, ())
+      reason = 'training_candidate_not_independently_confirmed'
+      if any(delta * other < 0 for other in support):
+        reason = 'conflicting_recorded_candidates'
+      elif any(delta * other > 0 and abs(delta) <= abs(other) for other in support):
+        reason = 'independent_support_for_frozen_training_profile'
+      result[name, value] = {'parameter': name, 'target': value, 'reason': reason}
+  return list(result.values())
+
+
+def profile_sections(windows, rows, contexts):
+  """Join adjacent observations within ONE role; never fill a source gap."""
+  if any(not rows.get(key) for key in windows):
+    raise ValueError('Original profile samples required')
+  ordered = sorted(windows, key=lambda key: (rows[key][0].route, rows[key][0].segment, rows[key][0].t))
+  sections, owners = [], {}
+  previous_context = None
+  for key in ordered:
+    values = rows[key]
+    if not values:
+      raise ValueError('Original profile samples required')
+    first = values[0]
+    previous = sections[-1][-1] if sections else None
+    if previous is not None and (first.route, first.segment) == (previous.route, previous.segment) and first.t <= previous.t:
+      raise ValueError('Profile roles cannot repeat or overlap original samples')
+    if (
+      previous is None or contexts[key] != previous_context
+      or (first.route, first.segment) != (previous.route, previous.segment)
+      or first.t - previous.t > MAX_GAP_NS / 1e9 + 1e-9
+    ):
+      sections.append([])
+    for sample in values:
+      stamp = (sample.route, sample.segment, sample.t)
+      if stamp in owners:
+        raise ValueError('Profile samples cannot be counted twice')
+      owners[stamp] = key
+    sections[-1].extend(values)
+    previous_context = contexts[key]
+  return sections, owners
+
+
 class StableRouteSelector:
   def __init__(self, assessment, root, previous, scope, *, permitted):
-    if type(assessment) is not CompletedAssessment:
-      raise ValueError('Original completed-route assessment required')
+    from openpilot.starpilot.flm.offroad_prior_inputs import PriorOriginals
+    from openpilot.starpilot.flm.offroad_route import SelectedSourceReceipt
+
+    if type(assessment) is CompletedAssessment:
+      groups = []
+      for group in (*assessment.stable_groups, *assessment.groups):
+        ids = {
+          wid for c in group['cohorts'] if all(role in c for role in ('training', 'heldout')) for role in ('training', 'heldout') for wid in c[role]['windows']
+        }
+        ids.update(w['identity'] for w in group.get('observed_original_windows', ()))
+        groups.append((group, ids))
+    elif type(assessment) is PriorOriginals and type(assessment.receipt) is SelectedSourceReceipt and assessment.profile_metadata is not None:
+      groups = [
+        (
+          {'original_metadata': assessment.profile_metadata, 'selected_original_windows': assessment.profile_windows},
+          {w['identity'] for w in assessment.profile_windows},
+        )
+      ]
+    else:
+      raise ValueError('Original completed route or explicit selected independent inputs required')
     if assessment.cp.lateralTuning.which() != 'torque' or scope.controller_domain != 'torque':
       raise ValueError('Original Stable policy uses torque lateral-acceleration units')
     scope.validate()
@@ -50,31 +145,56 @@ class StableRouteSelector:
     # No old platform preset or invented baseline/friction curve is installed.
     self.policy = StablePolicy(self.catalog, {self.family: factors})
     self.rows: dict[str, list[FLMSample] | None] | None = None
-    self.spans = {}
-    self.contexts = {}
-    for group in assessment.stable_groups:
+    self.spans: dict[str, dict] = {}
+    self.contexts: dict[str, str] = {}
+    for group, ids in groups:
       if group['original_metadata']['domain'] != 'lateral_acceleration':
         continue
-      for cohort in group['cohorts']:
-        if not all(role in cohort for role in ('training', 'heldout')):
-          continue
-        ids = set(cohort['training']['windows']) | set(cohort['heldout']['windows'])
-        for window in group['selected_original_windows']:
-          if window['identity'] in ids:
-            if window['identity'] in self.spans and self.spans[window['identity']] != window:
+      for window in (*group['selected_original_windows'], *group.get('observed_original_windows', ())):
+        if window['identity'] in ids:
+          if window['identity'] in self.spans and self.spans[window['identity']] != window:
+            binding = ('identity', 'route', 'segment', 'start_ns', 'end_ns')
+            if any(self.spans[window['identity']].get(name) != window.get(name) for name in binding):
               raise ValueError('Conflicting original window identity')
-            self.spans[window['identity']] = window
-            comparison = dict(group['original_metadata'])
-            comparison.pop('route_values')
-            comparison.pop('route_revision')
-            context_key = hashlib.sha256(repr(comparison).encode()).hexdigest()
-            if window['identity'] in self.contexts and self.contexts[window['identity']] != context_key:
-              raise ValueError('Original comparison context changed')
-            self.contexts[window['identity']] = context_key
+          self.spans.setdefault(window['identity'], window)
+          context = group.get('original_window_contexts', {}).get(window['identity'])
+          original = group['original_metadata'] if context is None else group['original_contexts'][context]
+          comparison = dict(original)
+          comparison.pop('route_values')
+          comparison.pop('route_revision')
+          context_key = hashlib.sha256(repr(comparison).encode()).hexdigest()
+          if window['identity'] in self.contexts and self.contexts[window['identity']] != context_key:
+            raise ValueError('Original comparison context changed')
+          self.contexts[window['identity']] = context_key
     if len(self.spans) > 4096:
       raise ValueError('Original whole-window bound')
 
+  def include_observations(self, context, windows):
+    if self.rows is not None or len(self.spans) + len(windows) > 4096:
+      raise ValueError('Observation sources must be frozen before original reads')
+    for window in windows:
+      key = window['identity']
+      if key in self.spans and self.spans[key] != window:
+        raise ValueError('Conflicting original observation identity')
+      self.spans[key] = window
+      self.contexts[key] = context
+
   def _load(self):
+    if getattr(self.assessment, 'evidence_sources', None):
+      from copy import copy
+
+      self.rows = {}
+      for route, source in self.assessment.evidence_sources.items():
+        reader = copy(self)
+        reader.assessment = source
+        reader.spans = {key: span for key, span in self.spans.items() if span['route'] == route}
+        try:
+          reader._load()
+        except FileNotFoundError:
+          reader.rows = dict.fromkeys(reader.spans)
+        assert reader.rows is not None
+        self.rows.update(reader.rows)
+      return
     rows = {key: [] for key in self.spans}
     original_points = {key: [] for key in self.spans}
     invalid = set()
@@ -165,6 +285,110 @@ class StableRouteSelector:
         invalid.add(key)
     self.rows = {key: None if key in invalid else values for key, values in rows.items()}
 
+  def profile(self, windows, cohort, *, observations_only=False):
+    if not (1 if observations_only else 3) <= len(windows) <= 12 or len(set(windows)) != len(windows):
+      raise ValueError('Bounded unique original profile windows required')
+    if self.rows is None:
+      self._load()
+    assert self.rows is not None
+    rows = self.rows
+    if any(key not in rows or rows[key] is None for key in windows):
+      return None, {'reason': 'original_stable_input_fields_missing', 'original_windows': windows}
+    brand = str(self.assessment.cp.brand)
+    family = 'gm' if brand == 'gm' else 'standard'
+    if brand == 'hyundai':
+      from opendbc.car.hyundai.values import HyundaiFlags
+
+      if self.assessment.cp.flags & HyundaiFlags.CANFD:
+        family = 'hkg_canfd'
+    capabilities = {'richProfileKey': 'torque_universal', 'frictionFamily': family, 'nonlinearTorqueMap': {'asymmetric': False}}
+    current = {'FLMActiveOverrides': {}}
+    selected = []
+    unavailable = []
+    observations = []
+    from openpilot.starpilot.flm.offroad_coordinate_policy import coordinate_candidates, recorded_observation
+
+    sections, owners = profile_sections(windows, rows, self.contexts)
+    for values in sections:
+      for run in cadenced_runs(values):
+        summaries, _ = classify_current_stable(list(run))
+        for summary in summaries:
+          if not summary['events']:
+            continue
+          for event in summary['events']:
+            event_samples = run[event['startIdx']:event['endIdx'] + 1]
+            sample = event_samples[0]
+            key = owners[(sample.route, sample.segment, sample.t)]
+            observations.append((key, recorded_observation(
+              summary['bucket'], event['direction'], event['peakScore'], fmean(sample.v_ego for sample in event_samples),
+            )))
+          # This is a finding's source, not a second count for an event that
+          # crosses two adjacent original windows in the same role.
+          sample = run[summary['events'][0]['startIdx']]
+          key = owners[(sample.route, sample.segment, sample.t)]
+          # Capability-based exclusions affect proposals only. No scored
+          # window is discarded; ALL original spans go to the native checker.
+          if summary['bucket'] == 'saturation_limited':
+            unavailable.append({'window': key, 'dimension': summary['dimensionId'], 'reason': 'legacy_base_or_friction_curve_application_not_verified'})
+            continue
+          try:
+            adjustment = self.policy._primary_delta_from_summary(summary, capabilities, current)
+          except KeyError:
+            unavailable.append({'window': key, 'dimension': summary['dimensionId'], 'reason': 'original_numeric_base_value_not_available'})
+            continue
+          if adjustment is not None:
+            if adjustment['type'] not in ('vehicle_knob', 'friction_curve'):
+              unavailable.append({'window': key, 'dimension': summary['dimensionId'], 'reason': 'legacy_parameter_has_no_verified_canonical_conversion'})
+              continue
+            selected.append({**summary, 'original_window': key, 'primaryAdjustmentRaw': adjustment})
+    profiles = self.policy.build_trial_profiles('stable:' + cohort, selected, {}, capabilities)
+    recommended = next((p for p in profiles if p['label'] == 'Recommended'), None)
+    if recommended is not None:
+      recommended['frictionCurveUnits'] = 'relative_actual_selected_threshold'
+    report = {'original_windows': windows, 'supported_dimensions': len(selected), 'unavailable_dimensions': unavailable, 'profile': recommended}
+    report['coordinate_candidates'] = coordinate_candidates(observations, self.previous)
+    if observations_only:
+      report['coordinate_observations'] = observations
+    if recommended is None:
+      mapped = None
+    else:
+      try:
+        mapped = recommended_route_profile(recommended, self.previous, self.scope.baseline_revision, domain='torque')
+      except ValueError as error:
+        mapped = None
+        report['conversion_refusal'] = str(error)
+    return mapped, report
+
+  def observe(self, windows):
+    """Pool original symptoms across maneuvers without granting native fit credit."""
+    from openpilot.starpilot.flm.offroad_coordinate_policy import coordinate_candidates
+    from openpilot.starpilot.flm.offroad_observed import curve_candidates
+
+    if not 1 <= len(windows) <= 4096 or len(set(windows)) != len(windows) or any(key not in self.spans for key in windows):
+      raise ValueError('Bounded unique original observations required')
+    if self.rows is None:
+      self._load()
+    assert self.rows is not None
+    ordered = sorted(windows, key=lambda key: (self.spans[key]['route'], self.spans[key]['segment'], self.spans[key]['start_ns']))
+    available = [key for key in ordered if self.rows.get(key) is not None]
+    available_ids = set(available)
+    observations = []
+    profiles = []
+    # Four seconds of shared original context preserve the existing 3.6 s
+    # curve detector at batch edges. Votes still count each source window once.
+    for start in range(0, len(available), 10):
+      if not self.permitted():
+        raise ValueError('Parked observation analysis cancelled')
+      mapped, proof = self.profile(tuple(available[start:start + 12]), 'observed_maneuvers', observations_only=True)
+      observations.extend(proof['coordinate_observations'])
+      profiles.append((mapped, proof['coordinate_observations']))
+    return {
+      'original_windows': ordered,
+      'unavailable_original_windows': [key for key in ordered if key not in available_ids],
+      'coordinate_candidates': coordinate_candidates(observations, self.previous) + curve_candidates(profiles, self.previous),
+      'automatic_application_allowed': False,
+    }
+
   def propose(self, group, cohort):
     ids = {role: tuple(cohort[role]['windows']) for role in ('training', 'heldout')}
     if (
@@ -180,67 +404,53 @@ class StableRouteSelector:
     all_ids = ids['training'] + ids['heldout']
     if any(key not in rows or rows[key] is None for key in all_ids):
       return None, {'reason': 'original_stable_input_fields_missing', 'original_windows': all_ids}
-    mapped = {}
-    reports: dict[str, dict[str, Any]] = {}
-    brand = str(self.assessment.cp.brand)
-    family = 'gm' if brand == 'gm' else 'standard'
-    if brand == 'hyundai':
-      from opendbc.car.hyundai.values import HyundaiFlags
+    training, training_report = self.profile(ids['training'], cohort['cohort'])
+    selection = 'training_values_only_no_heldout_resizing'
+    if training is not None:
+      from openpilot.starpilot.flm.offroad_surface import CURVE_NAMES
 
-      if self.assessment.cp.flags & HyundaiFlags.CANFD:
-        family = 'hkg_canfd'
-    capabilities = {'richProfileKey': 'torque_universal', 'frictionFamily': family, 'nonlinearTorqueMap': {'asymmetric': False}}
-    current = {'FLMActiveOverrides': {}}
-    for role, windows in ids.items():
-      selected = []
-      unavailable = []
-      for key in windows:
-        values = rows[key]
-        assert values is not None
-        for run in cadenced_runs(values):
-          summaries, _ = classify_current_stable(list(run))
-          for summary in summaries:
-            # Capability-based exclusions affect proposals only. No scored
-            # window is discarded; ALL original spans go to the native checker.
-            if summary['bucket'] == 'saturation_limited':
-              unavailable.append({'window': key, 'dimension': summary['dimensionId'], 'reason': 'legacy_base_or_friction_curve_application_not_verified'})
-              continue
-            try:
-              adjustment = self.policy._primary_delta_from_summary(summary, capabilities, current)
-            except KeyError:
-              unavailable.append({'window': key, 'dimension': summary['dimensionId'], 'reason': 'original_numeric_base_value_not_available'})
-              continue
-            if adjustment is not None:
-              if adjustment['type'] not in ('vehicle_knob', 'friction_curve'):
-                unavailable.append({'window': key, 'dimension': summary['dimensionId'], 'reason': 'legacy_parameter_has_no_verified_canonical_conversion'})
-                continue
-              selected.append({**summary, 'original_window': key, 'primaryAdjustmentRaw': adjustment})
-      profiles = self.policy.build_trial_profiles('stable:' + cohort['cohort'], selected, {}, capabilities)
-      recommended = next((p for p in profiles if p['label'] == 'Recommended'), None)
-      if recommended is not None:
-        recommended['frictionCurveUnits'] = 'relative_actual_selected_threshold'
-      reports[role] = {'original_windows': windows, 'supported_dimensions': len(selected), 'unavailable_dimensions': unavailable, 'profile': recommended}
-      if recommended is None:
-        mapped[role] = None
-      else:
-        try:
-          mapped[role] = recommended_route_profile(recommended, self.previous, self.scope.baseline_revision, domain='torque')
-        except ValueError as error:
-          mapped[role] = None
-          reports[role]['conversion_refusal'] = str(error)
-    training, heldout = mapped['training'], mapped['heldout']
-    agrees = training is not None and heldout is not None and training['values'] == heldout['values']
+      if any(training['values'][name] != self.previous[name] for name in CURVE_NAMES):
+        # Quieting is one trial; unrelated turn changes need their own evidence.
+        values = dict(self.previous)
+        for name in CURVE_NAMES:
+          if training['values'][name] != self.previous[name]:
+            values[name] = round(self.previous[name] + 0.6 * (training['values'][name] - self.previous[name]), 12)
+        training = dict(
+          training,
+          values=values,
+          changed_parameters=tuple(name for name in CURVE_NAMES if values[name] != self.previous[name]),
+          maximum_coordinate_step=max(abs(values[name] - self.previous[name]) for name in CURVE_NAMES),
+          bounded_profile_scale=training['bounded_profile_scale'] * 0.6,
+        )
+        selection = 'training_only_conservative_friction_trial_before_heldout'
+    # These alternatives are frozen before held-out summaries are read.
+    coordinate_training = training_report.get('coordinate_candidates', [])
+    heldout, heldout_report = self.profile(ids['heldout'], cohort['cohort'])
+    feedback = coordinate_review([training, *coordinate_training], [heldout, *heldout_report.get('coordinate_candidates', ())], self.previous)
+    independent = {p['parameter']: p for p in heldout_report.get('coordinate_candidates', [])}
+    coordinate_supported = [p for p in coordinate_training if independent_profile_support(p, independent.get(p['parameter']), self.previous)]
+    # A one-coordinate recipe plus the recorded prior is exact; avoid repeating
+    # thirty complete maps in both role reports and exhausting the cache bound.
+    for report in (training_report, heldout_report):
+      report['coordinate_candidates'] = [{k: v for k, v in p.items() if k != 'values'} for p in report.get('coordinate_candidates', [])]
+    agrees = independent_profile_support(training, heldout, self.previous)
     proof = {
       'source_policy_commit': ORIGINAL_COMMIT,
       'source_classifier_commit': CURRENT_CLASSIFIER_SOURCE,
       'policy': 'original_stable_recommended_bounded_route_v1',
-      'reason': 'replicated_recommended_profile' if agrees else 'independent_stable_profiles_do_not_agree',
-      'roles': reports,
+      'reason': 'independent_support_for_frozen_training_profile' if agrees else 'heldout_profile_does_not_support_training_step',
+      'selection': selection,
+      'frozen_training_profile': training,
+      'observed_candidate': heldout if training is None else None,
+      'roles': {'training': training_report, 'heldout': heldout_report},
       'all_original_windows_still_required': True,
       'physical_improvement_proven': False,
+      'coordinate_candidates': coordinate_supported,
+      'coordinate_review': feedback,
     }
     if not agrees:
       return None, proof
+    assert training is not None
     return {
       'parameter': 'stable:' + ','.join(training['changed_parameters']),
       'delta': training['maximum_coordinate_step'],

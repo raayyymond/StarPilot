@@ -73,7 +73,7 @@ export const SEND_URL = `${LOGS_URL}/send`
 export const MESSAGE_LIMIT = 60
 const POLL_MS = 1500
 
-// "Send logs": the device builds the same zip as Download all logs and posts it to the developer's Discord.
+// "Send StarPort logs": the device builds the same zip as Download all logs and posts it to the developer's Discord.
 // Only small JSON crosses the connection, so this also works over Bluetooth.
 export class StarPortLogSend {
   constructor({ publish, unauthorized = () => {}, fetcher = (...args) => fetch(...args), schedule = (fn, ms) => setTimeout(fn, ms),
@@ -113,7 +113,7 @@ export class StarPortLogSend {
 
   apply(body) {
     if (!this.active || !body) return
-    this.publish({ state: body.state, message: body.message || "", available: body.available !== false, error: "" })
+    this.publish({ state: body.state, message: body.message || "", available: body.available !== false, fork: body.fork === true, error: "" })
     this.queuePoll(body.state === "sending")
   }
 
@@ -135,9 +135,14 @@ export class StarPortLogSend {
     }
   }
 
-  async send(message) {
+  async send(message, discord = "") {
     if (!this.active) return false
     const text = String(message ?? "").trim()
+    const handle = String(discord ?? "").trim()
+    if (!text) {
+      this.publish({ error: "Add a short note about what happened." })
+      return false
+    }
     if (text.length > MESSAGE_LIMIT) {
       this.publish({ error: `Keep the message to ${MESSAGE_LIMIT} characters.` })
       return false
@@ -146,7 +151,7 @@ export class StarPortLogSend {
     this.queuePoll(false)
     this.publish({ state: "sending", message: "Starting", error: "" })
     try {
-      const body = await this.call({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) }, generation)
+      const body = await this.call({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(handle ? { message: text, discord: handle } : { message: text }) }, generation)
       if (body === null) return false
       this.apply(body)
       return true

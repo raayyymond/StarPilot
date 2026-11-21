@@ -10,7 +10,6 @@ import time
 from functools import cache
 from pathlib import Path
 import importlib
-from opendbc.car.car_helpers import interfaces
 from openpilot.starpilot.lateral.learning_preferences import read_preference, KEY as PREFERENCE_KEY
 from openpilot.starpilot.lateral.torque_settings import DOCUMENT_KEY, LEGACY_KEYS, MAX_DOCUMENT_BYTES, parse_document, interpret_legacy
 from openpilot.starpilot.saved_source import read_saved
@@ -19,38 +18,22 @@ REVISION = 'actual-controller-registry-v2'
 
 
 @cache
-def implementation_revision(controller_type, interface_type):
-  """Startup/optional-process source identity; never invoked by Controls.tick.
-
-  Bind shaping and conversion implementation changes as well as numeric CP
-  values. Formatting changes conservatively discard stored priors too.
-  """
-  here = Path(__file__).resolve().parent
-  controller_root = Path(cast(str, importlib.import_module(controller_type.__module__).__file__)).resolve().parent
-  brand_root = Path(cast(str, importlib.import_module(interface_type.__module__).__file__)).resolve().parent
-  common_root = here.parents[1] / 'common'
-  inherited_roots = tuple(
-    Path(cast(str, importlib.import_module(base.__module__).__file__)).resolve().parent
-    for base in controller_type.__mro__
-    if base.__module__.startswith('openpilot.')
-  )
-  roots = (here, here.parent / 'lateral', controller_root, brand_root, brand_root.parent, common_root, *inherited_roots)
-  files = tuple(sorted({path for root in roots for path in root.glob('*.py')}))
-  if not files or len(files) > 512:
-    raise ValueError('controller implementation identity bound')
-  result = hashlib.sha256()
-  result.update((controller_type.__module__ + '.' + controller_type.__qualname__).encode('utf-8'))
-  result.update((interface_type.__module__ + '.' + interface_type.__qualname__).encode('utf-8'))
-  for path in files:
-    data = path.read_bytes()
-    if len(data) > 2 * 1024 * 1024:
-      raise ValueError('implementation source bound')
-    result.update(path.name.encode('utf-8'))
-    result.update(hashlib.sha256(data).digest())
+def implementation_revision(controller_type, interface_type, *, vin_compatible=False):
+  """Selected steering semantics; startup only, never Controls.tick."""
   from openpilot.starpilot.flm.native_primitives import native_identity
+  from openpilot.starpilot.flm.steering_compatibility import revision
 
-  result.update(native_identity().encode('utf-8'))
-  return REVISION + ':' + result.hexdigest()
+  here = Path(__file__).resolve().parent
+  controller = Path(cast(str, importlib.import_module(controller_type.__module__).__file__)).resolve()
+  interface = Path(cast(str, importlib.import_module(interface_type.__module__).__file__)).resolve()
+  names = (controller_type.__module__ + '.' + controller_type.__qualname__, interface_type.__module__ + '.' + interface_type.__qualname__)
+  native = native_identity()
+  if vin_compatible:
+    from openpilot.starpilot.flm.identity_transition import known_vin_revision
+    previous = known_vin_revision(here.parents[2], controller, interface, names, native)
+    if previous is not None:
+      return previous
+  return revision(here.parents[2], controller, interface, names, native)
 
 
 SOURCE_LEASE_NS = 500_000_000
@@ -252,11 +235,13 @@ class SourceState:
   manual_baseline: tuple[float, ...] = field(default=(), compare=False, repr=False)
   # Internal only: absent current configuration proof is not an explicit OFF.
   configuration_known: bool = True
+  manual_kp: float | None = field(default=None, compare=False, repr=False)
 
 
 def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_session="", calibration_generation=''):
   """Only startup/separate-process settings work; errors disable learning."""
   cp_sha256 = car_params_digest(cp) if cp_sha256 is None else cp_sha256
+  from openpilot.starpilot.flm.vehicle_identity import REGISTRATION_KEY, identity_keys, known_vin, persistent_unit
   try:
     keys = tuple(
       dict.fromkeys(
@@ -269,16 +254,18 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
           'OpenpilotEnabledToggle',
           'SafeMode',
           'TurnAssist',
+          'SteeringDelayPreferences',
           *LEGACY_KEYS,
+          *identity_keys(cp),
         )
       )
     )
     snapshots = []
     for key in keys:
       raw, readable = read_saved(params, key, MAX_DOCUMENT_BYTES)
-      if not readable:
+      if not readable and key != REGISTRATION_KEY:
         raise ValueError('unreadable source')
-      snapshots.append((key, raw))
+      snapshots.append((key, raw if readable else None))
     raw_by_key = dict(snapshots)
     preference = read_preference(params, cp, preference_snapshot=(raw_by_key[PREFERENCE_KEY], True), legacy_snapshot=(raw_by_key['ForceAutoTuneOff'], True))
     if not preference.valid:
@@ -287,7 +274,8 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
       raise ValueError('invalid actual startup turn-assist choice')
     from openpilot.starpilot.lateral.controller_selection import selection_from_bytes
 
-    if selection_from_bytes(cp, raw_by_key['LateralControllerSelection']).source == 'invalid':
+    selection = selection_from_bytes(cp, raw_by_key['LateralControllerSelection'])
+    if selection.source == 'invalid':
       raise ValueError('invalid saved controller configuration')
     reset_raw = raw_by_key['AutoSteeringLearningReset']
     reset = '0' if reset_raw is None else reset_raw.decode('ascii')
@@ -296,9 +284,12 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
     document = raw_by_key[DOCUMENT_KEY]
     manual = False
     fixed_manual = ()
+    manual_kp = None
     if document is not None:
       profile = parse_document(document).get(str(cp.carFingerprint))
       if profile is not None:
+        from openpilot.starpilot.lateral.gain_runtime import fixed_kp_from_profile
+        manual_kp = fixed_kp_from_profile(cp, selection, profile)
         if cp.lateralTuning.which() == 'torque':
           tune = cp.lateralTuning.torque
           if profile.basis != (float(tune.latAccelFactor), float(tune.latAccelOffset), float(tune.friction)):
@@ -317,11 +308,9 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
               float(tune.latAccelOffset),
               float(tune.friction) if friction is None else friction,
             )
-        # Scalar and geometry choices are immutable baseline inputs. Automatic
-        # FF residuals never write them; a manually owned FLM surface stays fixed.
-        manual = profile.flm is not None
-        if profile.geometry is not None and profile.geometry.learning == 'force_off':
-          preference = type(preference)(False, preference.valid, preference.source, preference.raw)
+        # Geometry choices still control the selected baseline. The separate
+        # Auto Learn preference controls FLM, which cannot replace an active manual surface.
+        manual = profile.active_legacy_flm
     else:
       # Validate legacy scalar choices and bind their exact bytes to the source
       # epoch. They stay fixed baseline inputs, not automatic profile ownership.
@@ -338,6 +327,9 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
             float(tune.latAccelOffset),
             float(tune.friction) if legacy.friction is None else legacy.friction,
           )
+    from openpilot.starpilot.lateral.delay_preferences import read_delay
+    if raw_by_key['SteeringDelayPreferences'] is not None and not read_delay(params, cp, snapshot=(raw_by_key['SteeringDelayPreferences'], True)).valid:
+      raise ValueError('invalid steering delay baseline')
     if not preference.enabled or manual:
       # Honor an independently parsed explicit OFF/manual even when physical
       # calibration is unavailable. This cannot authorize collection or output.
@@ -345,10 +337,9 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
     calibration = tuple(calibration)
     if len(calibration) != 3 or not all(math.isfinite(v) for v in calibration):
       raise ValueError("uncertain calibration")
-    from opendbc.car.vin import is_valid_vin, VIN_UNKNOWN
-
-    vin = str(cp.carVin)
-    if not is_valid_vin(vin) or vin == VIN_UNKNOWN:
+    vin = known_vin(cp)
+    binding = persistent_unit(cp, raw_by_key)
+    if vin is None:
       if not vehicle_session or len(vehicle_session) > 64:
         raise ValueError('unknown vehicle needs a fresh drive session')
       unit = vehicle_session
@@ -358,11 +349,15 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
       calibration_generation and (len(calibration_generation) != 32 or any(c not in '0123456789abcdef' for c in calibration_generation))
     ):
       raise ValueError('invalid calibration lifecycle')
+    if vin is None and binding is not None and read_saved(params, REGISTRATION_KEY, MAX_DOCUMENT_BYTES) != (raw_by_key[REGISTRATION_KEY], True):
+      raise ValueError('device registration changed')
     frame_identity = calibration if not calibration_generation else ('live_vehicle_frame_v2', calibration_generation)
-    epoch = digest((tuple((key, None if raw is None else raw.hex()) for key, raw in snapshots), frame_identity, unit))
+    identity_settings = tuple((key, None if raw is None else raw.hex()) for key, raw in snapshots
+                              if key != 'SteeringDelayPreferences' or raw is not None)
+    epoch = digest((identity_settings, frame_identity, unit))
     persistent_epoch = (
-      digest(('persistent_vehicle_source_v1', cp_sha256, tuple((key, None if raw is None else raw.hex()) for key, raw in snapshots), vin))
-      if is_valid_vin(vin) and vin != VIN_UNKNOWN and calibration_generation
+      digest(('persistent_vehicle_source_v1', cp_sha256, identity_settings, binding))
+      if binding is not None and calibration_generation
       else ''
     )
     return SourceState(
@@ -377,6 +372,7 @@ def read_source(cp, params, *, now_ns, cp_sha256=None, calibration=(), vehicle_s
       calibration_generation=calibration_generation,
       persistent_source_epoch=persistent_epoch,
       manual_baseline=fixed_manual,
+      manual_kp=manual_kp,
     )
   except (AttributeError, UnicodeError, TypeError, ValueError, OSError, OverflowError):
     return SourceState(False, False, '', '', now_ns, now_ns + SOURCE_LEASE_NS, cp_sha256, configuration_known=False)
@@ -396,6 +392,7 @@ class ControllerDescriptor:
 
 def selected_descriptor(cp, ci, controller):
   """Use the registered constructor plus the object actually selected by Controls."""
+  from opendbc.car.car_helpers import interfaces
   from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
   from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle
   from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
@@ -433,7 +430,10 @@ def selected_descriptor(cp, ci, controller):
   turn_assist = bool(
     getattr(controller, 'turn_assist', None) or getattr(getattr(getattr(controller, 'starpilot_extension', None), 'policy', None), 'turn_assist', False)
   )
-  return ControllerDescriptor(domain, mode, policy, implementation_revision(type(controller), type(ci)), stage, car_params_digest(cp), conversion, turn_assist)
+  from opendbc.car.vin import VIN_UNKNOWN, is_valid_vin
+  vin_compatible = is_valid_vin(str(cp.carVin)) and str(cp.carVin) != VIN_UNKNOWN
+  implementation = implementation_revision(type(controller), type(ci), vin_compatible=vin_compatible)
+  return ControllerDescriptor(domain, mode, policy, implementation, stage, car_params_digest(cp), conversion, turn_assist)
 
 
 def baseline_values(controller):
@@ -459,6 +459,18 @@ def baseline_revision(descriptor, values):
   return hashlib.sha256(repr((descriptor, tuple(values))).encode('ascii')).hexdigest()
 
 
+def compatibility_for(cp, ci, controller):
+  """Actual selected semantics for explicit recovery; not learned qualification."""
+  from openpilot.starpilot.flm.offroad_surface import ROUTE_MANIFEST_SHA256
+  descriptor = selected_descriptor(cp, ci, controller)
+  if descriptor is None:
+    raise ValueError('Actual registered steering controller required')
+  return {'cp_sha256': descriptor.cp_sha256, 'controller_revision': descriptor.controller_revision,
+          'baseline_revision': baseline_revision(descriptor, baseline_values(controller)),
+          'controller_mode': descriptor.controller_mode, 'controller_domain': descriptor.domain,
+          'manifest_sha256': ROUTE_MANIFEST_SHA256}
+
+
 def selected_identity(descriptor, source_epoch, baseline=""):
   if len(source_epoch) != 64:
     raise ValueError('source epoch')
@@ -468,6 +480,7 @@ def selected_identity(descriptor, source_epoch, baseline=""):
 def ford_downstream(cp):
   # The BluePilot lateral library owns Ford steering when its bit is in the final admitted CP safety word;
   # no settings read or generic angle-output inference establishes this role.
+  from opendbc.car.car_helpers import interfaces
   from opendbc.car.ford.aol import BP_LATERAL, aol_safety_config
 
   config = aol_safety_config(cp) if cp.brand == 'ford' else None

@@ -8,6 +8,7 @@ import pytest
 
 from openpilot.cereal import messaging
 from openpilot.starpilot.ui.navigation_state import NavigationDisplay, distance_text, navigation_display
+from openpilot.starpilot.ui.onroad_customization import NAV_CARD_SIZE
 from openpilot.starpilot.ui.onroad_navigation import ASSETS, MANIFEST, NavigationCard, arrival_time, icon_name
 from openpilot.starpilot.ui.onroad_state import AlertSize, OnroadAlert, OnroadState, SpeedLimitObservation
 from openpilot.starpilot.ui.presentation import FontRole, Profile
@@ -40,7 +41,7 @@ def test_large_navigation_optional_widget_controls_draw_and_touch_bounds():
   placed = observed.customization['layouts']['large']['nav_card']
   placed.update(x=900, y=650)
   bounds = card.bounds(observed)
-  assert (bounds.x, bounds.y, bounds.width, bounds.height) == (900, 650, 560, 195)
+  assert (bounds.x, bounds.y, bounds.width, bounds.height) == (900, 650, *NAV_CARD_SIZE)
   assert card.bounds(replace(observed, viewport_width=2160)).x == 1200
   assert card.press(920, 670, observed)
   placed['enabled'] = False
@@ -73,6 +74,21 @@ def test_bad_distance_and_empty_instruction_do_not_render():
   assert navigation_display(nav, now_ns=NOW, drive_id=DRIVE) is None
   nav.status = 'arrived'
   assert navigation_display(nav, now_ns=NOW, drive_id=DRIVE).text == 'You have arrived'
+
+
+def test_reaching_the_arrive_maneuver_reads_arrived_before_the_car_stops():
+  nav = message()
+  nav.instruction = {'text': 'Arrive at your destination', 'maneuverType': 'arrive', 'maneuverModifier': 'straight',
+                     'distanceMeters': 150, 'remainingDistanceMeters': 150, 'remainingDurationSeconds': 20}
+  nav.nextManeuver = {'maneuverType': 'arrive', 'maneuverModifier': 'straight', 'distanceMeters': 150}
+  approaching = navigation_display(nav, now_ns=NOW, drive_id=DRIVE)
+  assert approaching is not None and not approaching.arrived and approaching.text == 'Arrive at your destination'
+  nav.instruction.distanceMeters = nav.instruction.remainingDistanceMeters = 0
+  there = navigation_display(nav, now_ns=NOW, drive_id=DRIVE)
+  assert there is not None and there.arrived and there.text == 'You have arrived' and there.then_type == '', "no '0 ft' while still rolling"
+  nav.instruction.maneuverType = 'turn'
+  turning = navigation_display(nav, now_ns=NOW, drive_id=DRIVE)
+  assert turning is not None and not turning.arrived, "only the final maneuver means arrival"
 
 
 @pytest.mark.parametrize('meters,metric,expected', [(120, False, '400 ft'), (120, True, '125 m'),
@@ -118,9 +134,7 @@ def test_slc_decision_keeps_its_touch_priority_only_where_it_overlaps():
   pending = SpeedLimitObservation(kind=ObservationKind.VALID, source='map', speed_limit_mps=22., pending_speed_limit_mps=22.,
                                   session_id='s', decision_id=1, presentation_id=1, action_enabled=True)
   observed = replace(state(), slc_prompt_open=True, longitudinal_active=True, speed_limit=pending)
-  observed.customization['layouts']['compact']['speed_limit_actions']['y'] = 180
-  assert card.bounds(observed) is None  # The chooser now follows the sign, not this old action placement.
-  observed.customization['layouts']['compact']['speed_limit_actions']['y'] = 4
+  assert card.bounds(observed) is None
   observed.customization['layouts']['compact']['max_speed']['y'] = 58
   assert card.bounds(observed) is None
   assert card.bounds(replace(observed, longitudinal_active=False)) is not None  # No confirmation chooser while LONG is disengaged.
@@ -303,8 +317,8 @@ def test_progress_bar_tracks_the_longest_remaining_distance_per_trip():
     card.render(observed)
     card.render(replace(observed, navigation=replace(observed.navigation, remaining_distance_m=2150.)))
   track, fill = (call.args[0] for call in rounded.call_args_list[-2:])
-  eta_width = len('ETA 3:50 PM') * 28 * .48
-  assert track.width == pytest.approx(560 - 48 - eta_width - 18), 'the bar stops short of the ETA beside it'
+  eta_width = len('ETA 3:50 PM') * 32 * .48
+  assert track.width == pytest.approx(NAV_CARD_SIZE[0] - 48 - eta_width - 18), 'the bar stops short of the ETA beside it'
   assert fill.width == pytest.approx(track.width * .5)
   card.bounds(replace(observed, navigation=replace(observed.navigation, key=('other', 1))))
   assert card._total == 0
@@ -339,3 +353,37 @@ def test_lane_strip_shows_near_the_turn_and_replaces_the_then_chip():
     rounded.reset_mock()
     card.render(replace(state(), navigation=replace(nav, distance_m=900., then_distance_m=1200.)))
     assert rounded.call_count == 1 + 1 + 1, 'too far for lanes: the card, the Then chip and the progress track'
+
+
+def test_compact_navigation_widget_visibility_placement_and_touch():
+  card, observed = NavigationCard(Mock(profile=Profile.COMPACT)), state()
+  placed = observed.customization['layouts']['compact']['nav_card']
+  rect = card.bounds(observed)
+  assert (rect.x, rect.y, rect.width, rect.height) == (96, 16, 368, 142)
+  assert card.press(100, 20, observed)
+  placed['enabled'] = False
+  assert card.bounds(observed) is None
+  assert not card.press(100, 20, observed)
+  placed.update(enabled=True, x=50, y=10)
+  assert (card.bounds(observed).x, card.bounds(observed).y) == (50, 10)
+
+
+@pytest.mark.parametrize('scale', [.5, 1, 1.5, 2])
+def test_projection_navigation_resize_scales_draw_and_touch_together(scale):
+  card, observed = NavigationCard(Mock(profile=Profile.LARGE)), replace(state(), viewport_width=1860)
+  placed = observed.customization['layouts']['large']['nav_card']
+  placed.update(x=100, y=500, width=round(NAV_CARD_SIZE[0] * scale), height=round(NAV_CARD_SIZE[1] * scale))
+  bounds = card.bounds(observed)
+  assert (bounds.width, bounds.height) == (placed['width'], placed['height'])
+  assert card.press(bounds.x + bounds.width - 1, bounds.y + bounds.height - 1, observed)
+  card.release(bounds.x + bounds.width - 1, bounds.y + bounds.height - 1, observed)
+  collapsed = card.bounds(observed)
+  assert collapsed.width == collapsed.height == 112 * scale
+  assert collapsed.x + collapsed.width == bounds.x + bounds.width
+  card.collapsed = False
+  with patch.object(card, '_render_card') as draw, patch.object(rl, 'rl_push_matrix'), \
+       patch.object(rl, 'rl_pop_matrix'), patch.object(rl, 'rl_translatef'), patch.object(rl, 'rl_scalef'):
+    card.render(observed)
+  drawn = draw.call_args.args[1]
+  assert drawn.width == NAV_CARD_SIZE[0]
+  assert drawn.height == pytest.approx(placed['height'] / scale)

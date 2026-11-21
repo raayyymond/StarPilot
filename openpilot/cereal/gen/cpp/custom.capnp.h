@@ -259,6 +259,7 @@ enum class Status_f187d96cea4f09df: uint16_t {
 };
 CAPNP_DECLARE_ENUM(Status, f187d96cea4f09df);
 CAPNP_DECLARE_SCHEMA(c2243c65e0340384);
+CAPNP_DECLARE_SCHEMA(a92d1325b855c382);
 CAPNP_DECLARE_SCHEMA(88f71f4263677d19);
 CAPNP_DECLARE_SCHEMA(c5693d5da66b60b6);
 CAPNP_DECLARE_SCHEMA(bd443b539493bc68);
@@ -729,7 +730,7 @@ struct StarPilotLongitudinalPlan {
   class Pipeline;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 4, 0)
+    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 6, 0)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -749,7 +750,7 @@ struct SlcState {
   struct ConditionalModeState;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(a1680744031fdb2d, 18, 22)
+    CAPNP_DECLARE_STRUCT_HEADER(a1680744031fdb2d, 21, 22)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -845,7 +846,7 @@ struct SlcAction {
 
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(9ccdc8676701b412, 4, 4)
+    CAPNP_DECLARE_STRUCT_HEADER(9ccdc8676701b412, 5, 4)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -897,7 +898,7 @@ struct SlcCruiseEvent {
   struct ManualModeGesture;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(cd96dafb67a082d0, 7, 6)
+    CAPNP_DECLARE_STRUCT_HEADER(cd96dafb67a082d0, 8, 6)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -1246,11 +1247,27 @@ struct StarPilotLateralState {
   class Reader;
   class Builder;
   class Pipeline;
+  struct TorqueTuning;
   struct LaneCentering;
   struct FeedbackConsumption;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(c2243c65e0340384, 4, 5)
+    CAPNP_DECLARE_STRUCT_HEADER(c2243c65e0340384, 4, 6)
+    #if !CAPNP_LITE
+    static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
+    #endif  // !CAPNP_LITE
+  };
+};
+
+struct StarPilotLateralState::TorqueTuning {
+  TorqueTuning() = delete;
+
+  class Reader;
+  class Builder;
+  class Pipeline;
+
+  struct _capnpPrivate {
+    CAPNP_DECLARE_STRUCT_HEADER(a92d1325b855c382, 3, 0)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -4298,6 +4315,14 @@ public:
 
   inline bool getForceStopHolding() const;
 
+  inline bool getForceStopBraking() const;
+
+  inline  ::uint64_t getForceStopEpisodeMonoTime() const;
+
+  inline  ::uint8_t getDepartureAlertKind() const;
+
+  inline  ::uint64_t getDepartureAlertMonoTime() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -4340,6 +4365,18 @@ public:
 
   inline bool getForceStopHolding();
   inline void setForceStopHolding(bool value);
+
+  inline bool getForceStopBraking();
+  inline void setForceStopBraking(bool value);
+
+  inline  ::uint64_t getForceStopEpisodeMonoTime();
+  inline void setForceStopEpisodeMonoTime( ::uint64_t value);
+
+  inline  ::uint8_t getDepartureAlertKind();
+  inline void setDepartureAlertKind( ::uint8_t value);
+
+  inline  ::uint64_t getDepartureAlertMonoTime();
+  inline void setDepartureAlertMonoTime( ::uint64_t value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -4523,6 +4560,14 @@ public:
 
   inline bool hasUpcomingBoundaryId() const;
   inline  ::capnp::Text::Reader getUpcomingBoundaryId() const;
+
+  inline bool getAcceptedIsPreview() const;
+
+  inline  ::uint64_t getWheelOverrideSince() const;
+
+  inline  ::uint64_t getWheelAdoptMonoTime() const;
+
+  inline float getWheelAdoptTargetMps() const;
 
 private:
   ::capnp::_::StructReader _reader;
@@ -4816,6 +4861,18 @@ public:
   inline  ::capnp::Text::Builder initUpcomingBoundaryId(unsigned int size);
   inline void adoptUpcomingBoundaryId(::capnp::Orphan< ::capnp::Text>&& value);
   inline ::capnp::Orphan< ::capnp::Text> disownUpcomingBoundaryId();
+
+  inline bool getAcceptedIsPreview();
+  inline void setAcceptedIsPreview(bool value);
+
+  inline  ::uint64_t getWheelOverrideSince();
+  inline void setWheelOverrideSince( ::uint64_t value);
+
+  inline  ::uint64_t getWheelAdoptMonoTime();
+  inline void setWheelAdoptMonoTime( ::uint64_t value);
+
+  inline float getWheelAdoptTargetMps();
+  inline void setWheelAdoptTargetMps(float value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -5514,6 +5571,8 @@ public:
 
   inline  ::uint16_t getStatusCode() const;
 
+  inline bool getPerceivedStop() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -5606,6 +5665,9 @@ public:
   inline  ::uint16_t getStatusCode();
   inline void setStatusCode( ::uint16_t value);
 
+  inline bool getPerceivedStop();
+  inline void setPerceivedStop(bool value);
+
 private:
   ::capnp::_::StructBuilder _builder;
   template <typename, ::capnp::Kind>
@@ -5668,6 +5730,8 @@ public:
 
   inline bool hasControllerMode() const;
   inline  ::cereal::SlcAction::ControllerCruiseAction::Reader getControllerMode() const;
+
+  inline  ::uint64_t getWheelAdoptMonoTime() const;
 
 private:
   ::capnp::_::StructReader _reader;
@@ -5736,6 +5800,9 @@ public:
   inline  ::cereal::SlcAction::ControllerCruiseAction::Builder initControllerMode();
   inline void adoptControllerMode(::capnp::Orphan< ::cereal::SlcAction::ControllerCruiseAction>&& value);
   inline ::capnp::Orphan< ::cereal::SlcAction::ControllerCruiseAction> disownControllerMode();
+
+  inline  ::uint64_t getWheelAdoptMonoTime();
+  inline void setWheelAdoptMonoTime( ::uint64_t value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -6128,6 +6195,8 @@ public:
   inline bool hasTeslaStockCruise() const;
   inline  ::cereal::SlcCruiseEvent::TeslaStockCruise::Reader getTeslaStockCruise() const;
 
+  inline  ::uint64_t getWheelOverrideSince() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -6227,6 +6296,9 @@ public:
   inline  ::cereal::SlcCruiseEvent::TeslaStockCruise::Builder initTeslaStockCruise();
   inline void adoptTeslaStockCruise(::capnp::Orphan< ::cereal::SlcCruiseEvent::TeslaStockCruise>&& value);
   inline ::capnp::Orphan< ::cereal::SlcCruiseEvent::TeslaStockCruise> disownTeslaStockCruise();
+
+  inline  ::uint64_t getWheelOverrideSince();
+  inline void setWheelOverrideSince( ::uint64_t value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -8848,6 +8920,9 @@ public:
   inline bool hasTrackingApplication() const;
   inline  ::cereal::LiveTrackingApplication::Reader getTrackingApplication() const;
 
+  inline bool hasTorqueTuning() const;
+  inline  ::cereal::StarPilotLateralState::TorqueTuning::Reader getTorqueTuning() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -8935,6 +9010,13 @@ public:
   inline void adoptTrackingApplication(::capnp::Orphan< ::cereal::LiveTrackingApplication>&& value);
   inline ::capnp::Orphan< ::cereal::LiveTrackingApplication> disownTrackingApplication();
 
+  inline bool hasTorqueTuning();
+  inline  ::cereal::StarPilotLateralState::TorqueTuning::Builder getTorqueTuning();
+  inline void setTorqueTuning( ::cereal::StarPilotLateralState::TorqueTuning::Reader value);
+  inline  ::cereal::StarPilotLateralState::TorqueTuning::Builder initTorqueTuning();
+  inline void adoptTorqueTuning(::capnp::Orphan< ::cereal::StarPilotLateralState::TorqueTuning>&& value);
+  inline ::capnp::Orphan< ::cereal::StarPilotLateralState::TorqueTuning> disownTorqueTuning();
+
 private:
   ::capnp::_::StructBuilder _builder;
   template <typename, ::capnp::Kind>
@@ -8958,6 +9040,108 @@ public:
   inline  ::cereal::LearningApplication::Pipeline getLearningApplication();
   inline  ::cereal::StarPilotLateralState::FeedbackConsumption::Pipeline getFeedbackConsumption();
   inline  ::cereal::LiveTrackingApplication::Pipeline getTrackingApplication();
+  inline  ::cereal::StarPilotLateralState::TorqueTuning::Pipeline getTorqueTuning();
+private:
+  ::capnp::AnyPointer::Pipeline _typeless;
+  friend class ::capnp::PipelineHook;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+};
+#endif  // !CAPNP_LITE
+
+class StarPilotLateralState::TorqueTuning::Reader {
+public:
+  typedef TorqueTuning Reads;
+
+  Reader() = default;
+  inline explicit Reader(::capnp::_::StructReader base): _reader(base) {}
+
+  inline ::capnp::MessageSize totalSize() const {
+    return _reader.totalSize().asPublic();
+  }
+
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const {
+    return ::capnp::_::structString(_reader, *_capnpPrivate::brand());
+  }
+#endif  // !CAPNP_LITE
+
+  inline  ::uint16_t getVersion() const;
+
+  inline double getFactor() const;
+
+  inline double getFriction() const;
+
+  inline bool getManualFactor() const;
+
+  inline bool getManualFriction() const;
+
+  inline bool getLearned() const;
+
+private:
+  ::capnp::_::StructReader _reader;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::List;
+  friend class ::capnp::MessageBuilder;
+  friend class ::capnp::Orphanage;
+};
+
+class StarPilotLateralState::TorqueTuning::Builder {
+public:
+  typedef TorqueTuning Builds;
+
+  Builder() = delete;  // Deleted to discourage incorrect usage.
+                       // You can explicitly initialize to nullptr instead.
+  inline Builder(decltype(nullptr)) {}
+  inline explicit Builder(::capnp::_::StructBuilder base): _builder(base) {}
+  inline operator Reader() const { return Reader(_builder.asReader()); }
+  inline Reader asReader() const { return *this; }
+
+  inline ::capnp::MessageSize totalSize() const { return asReader().totalSize(); }
+#if !CAPNP_LITE
+  inline ::kj::StringTree toString() const { return asReader().toString(); }
+#endif  // !CAPNP_LITE
+
+  inline  ::uint16_t getVersion();
+  inline void setVersion( ::uint16_t value);
+
+  inline double getFactor();
+  inline void setFactor(double value);
+
+  inline double getFriction();
+  inline void setFriction(double value);
+
+  inline bool getManualFactor();
+  inline void setManualFactor(bool value);
+
+  inline bool getManualFriction();
+  inline void setManualFriction(bool value);
+
+  inline bool getLearned();
+  inline void setLearned(bool value);
+
+private:
+  ::capnp::_::StructBuilder _builder;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::ToDynamic_;
+  friend class ::capnp::Orphanage;
+  template <typename, ::capnp::Kind>
+  friend struct ::capnp::_::PointerHelpers;
+};
+
+#if !CAPNP_LITE
+class StarPilotLateralState::TorqueTuning::Pipeline {
+public:
+  typedef TorqueTuning Pipelines;
+
+  inline Pipeline(decltype(nullptr)): _typeless(nullptr) {}
+  inline explicit Pipeline(::capnp::AnyPointer::Pipeline&& typeless)
+      : _typeless(kj::mv(typeless)) {}
+
 private:
   ::capnp::AnyPointer::Pipeline _typeless;
   friend class ::capnp::PipelineHook;
@@ -18928,6 +19112,62 @@ inline void StarPilotLongitudinalPlan::Builder::setForceStopHolding(bool value) 
       ::capnp::bounded<16>() * ::capnp::ELEMENTS, value);
 }
 
+inline bool StarPilotLongitudinalPlan::Reader::getForceStopBraking() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<17>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getForceStopBraking() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<17>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setForceStopBraking(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<17>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t StarPilotLongitudinalPlan::Reader::getForceStopEpisodeMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t StarPilotLongitudinalPlan::Builder::getForceStopEpisodeMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setForceStopEpisodeMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t StarPilotLongitudinalPlan::Reader::getDepartureAlertKind() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t StarPilotLongitudinalPlan::Builder::getDepartureAlertKind() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setDepartureAlertKind( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t StarPilotLongitudinalPlan::Reader::getDepartureAlertMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t StarPilotLongitudinalPlan::Builder::getDepartureAlertMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setDepartureAlertMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
 inline bool SlcState::Reader::hasSlotId() const {
   return !_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
@@ -20212,6 +20452,62 @@ inline void SlcState::Builder::adoptUpcomingBoundaryId(
 inline ::capnp::Orphan< ::capnp::Text> SlcState::Builder::disownUpcomingBoundaryId() {
   return ::capnp::_::PointerHelpers< ::capnp::Text>::disown(_builder.getPointerField(
       ::capnp::bounded<21>() * ::capnp::POINTERS));
+}
+
+inline bool SlcState::Reader::getAcceptedIsPreview() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<141>() * ::capnp::ELEMENTS);
+}
+
+inline bool SlcState::Builder::getAcceptedIsPreview() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<141>() * ::capnp::ELEMENTS);
+}
+inline void SlcState::Builder::setAcceptedIsPreview(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<141>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t SlcState::Reader::getWheelOverrideSince() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t SlcState::Builder::getWheelOverrideSince() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS);
+}
+inline void SlcState::Builder::setWheelOverrideSince( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t SlcState::Reader::getWheelAdoptMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<19>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t SlcState::Builder::getWheelAdoptMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<19>() * ::capnp::ELEMENTS);
+}
+inline void SlcState::Builder::setWheelAdoptMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<19>() * ::capnp::ELEMENTS, value);
+}
+
+inline float SlcState::Reader::getWheelAdoptTargetMps() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<40>() * ::capnp::ELEMENTS);
+}
+
+inline float SlcState::Builder::getWheelAdoptTargetMps() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<40>() * ::capnp::ELEMENTS);
+}
+inline void SlcState::Builder::setWheelAdoptTargetMps(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<40>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool SlcState::SourceReading::Reader::hasSource() const {
@@ -21514,6 +21810,20 @@ inline void SlcState::ConditionalModeState::Builder::setStatusCode( ::uint16_t v
       ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
 }
 
+inline bool SlcState::ConditionalModeState::Reader::getPerceivedStop() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<34>() * ::capnp::ELEMENTS);
+}
+
+inline bool SlcState::ConditionalModeState::Builder::getPerceivedStop() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<34>() * ::capnp::ELEMENTS);
+}
+inline void SlcState::ConditionalModeState::Builder::setPerceivedStop(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<34>() * ::capnp::ELEMENTS, value);
+}
+
 inline bool SlcAction::Reader::hasSessionId() const {
   return !_reader.getPointerField(
       ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
@@ -21719,6 +22029,20 @@ inline void SlcAction::Builder::adoptControllerMode(
 inline ::capnp::Orphan< ::cereal::SlcAction::ControllerCruiseAction> SlcAction::Builder::disownControllerMode() {
   return ::capnp::_::PointerHelpers< ::cereal::SlcAction::ControllerCruiseAction>::disown(_builder.getPointerField(
       ::capnp::bounded<3>() * ::capnp::POINTERS));
+}
+
+inline  ::uint64_t SlcAction::Reader::getWheelAdoptMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t SlcAction::Builder::getWheelAdoptMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS);
+}
+inline void SlcAction::Builder::setWheelAdoptMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
 }
 
 inline  ::uint16_t SlcAction::ControllerCruiseAction::Reader::getVersion() const {
@@ -22587,6 +22911,20 @@ inline void SlcCruiseEvent::Builder::adoptTeslaStockCruise(
 inline ::capnp::Orphan< ::cereal::SlcCruiseEvent::TeslaStockCruise> SlcCruiseEvent::Builder::disownTeslaStockCruise() {
   return ::capnp::_::PointerHelpers< ::cereal::SlcCruiseEvent::TeslaStockCruise>::disown(_builder.getPointerField(
       ::capnp::bounded<5>() * ::capnp::POINTERS));
+}
+
+inline  ::uint64_t SlcCruiseEvent::Reader::getWheelOverrideSince() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t SlcCruiseEvent::Builder::getWheelOverrideSince() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS);
+}
+inline void SlcCruiseEvent::Builder::setWheelOverrideSince( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<7>() * ::capnp::ELEMENTS, value);
 }
 
 inline  ::uint16_t SlcCruiseEvent::TeslaStockCruise::Reader::getVersion() const {
@@ -26300,6 +26638,129 @@ inline void StarPilotLateralState::Builder::adoptTrackingApplication(
 inline ::capnp::Orphan< ::cereal::LiveTrackingApplication> StarPilotLateralState::Builder::disownTrackingApplication() {
   return ::capnp::_::PointerHelpers< ::cereal::LiveTrackingApplication>::disown(_builder.getPointerField(
       ::capnp::bounded<4>() * ::capnp::POINTERS));
+}
+
+inline bool StarPilotLateralState::Reader::hasTorqueTuning() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS).isNull();
+}
+inline bool StarPilotLateralState::Builder::hasTorqueTuning() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS).isNull();
+}
+inline  ::cereal::StarPilotLateralState::TorqueTuning::Reader StarPilotLateralState::Reader::getTorqueTuning() const {
+  return ::capnp::_::PointerHelpers< ::cereal::StarPilotLateralState::TorqueTuning>::get(_reader.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS));
+}
+inline  ::cereal::StarPilotLateralState::TorqueTuning::Builder StarPilotLateralState::Builder::getTorqueTuning() {
+  return ::capnp::_::PointerHelpers< ::cereal::StarPilotLateralState::TorqueTuning>::get(_builder.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS));
+}
+#if !CAPNP_LITE
+inline  ::cereal::StarPilotLateralState::TorqueTuning::Pipeline StarPilotLateralState::Pipeline::getTorqueTuning() {
+  return  ::cereal::StarPilotLateralState::TorqueTuning::Pipeline(_typeless.getPointerField(5));
+}
+#endif  // !CAPNP_LITE
+inline void StarPilotLateralState::Builder::setTorqueTuning( ::cereal::StarPilotLateralState::TorqueTuning::Reader value) {
+  ::capnp::_::PointerHelpers< ::cereal::StarPilotLateralState::TorqueTuning>::set(_builder.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS), value);
+}
+inline  ::cereal::StarPilotLateralState::TorqueTuning::Builder StarPilotLateralState::Builder::initTorqueTuning() {
+  return ::capnp::_::PointerHelpers< ::cereal::StarPilotLateralState::TorqueTuning>::init(_builder.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS));
+}
+inline void StarPilotLateralState::Builder::adoptTorqueTuning(
+    ::capnp::Orphan< ::cereal::StarPilotLateralState::TorqueTuning>&& value) {
+  ::capnp::_::PointerHelpers< ::cereal::StarPilotLateralState::TorqueTuning>::adopt(_builder.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::cereal::StarPilotLateralState::TorqueTuning> StarPilotLateralState::Builder::disownTorqueTuning() {
+  return ::capnp::_::PointerHelpers< ::cereal::StarPilotLateralState::TorqueTuning>::disown(_builder.getPointerField(
+      ::capnp::bounded<5>() * ::capnp::POINTERS));
+}
+
+inline  ::uint16_t StarPilotLateralState::TorqueTuning::Reader::getVersion() const {
+  return _reader.getDataField< ::uint16_t>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint16_t StarPilotLateralState::TorqueTuning::Builder::getVersion() {
+  return _builder.getDataField< ::uint16_t>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLateralState::TorqueTuning::Builder::setVersion( ::uint16_t value) {
+  _builder.setDataField< ::uint16_t>(
+      ::capnp::bounded<0>() * ::capnp::ELEMENTS, value);
+}
+
+inline double StarPilotLateralState::TorqueTuning::Reader::getFactor() const {
+  return _reader.getDataField<double>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+
+inline double StarPilotLateralState::TorqueTuning::Builder::getFactor() {
+  return _builder.getDataField<double>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLateralState::TorqueTuning::Builder::setFactor(double value) {
+  _builder.setDataField<double>(
+      ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline double StarPilotLateralState::TorqueTuning::Reader::getFriction() const {
+  return _reader.getDataField<double>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline double StarPilotLateralState::TorqueTuning::Builder::getFriction() {
+  return _builder.getDataField<double>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLateralState::TorqueTuning::Builder::setFriction(double value) {
+  _builder.setDataField<double>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLateralState::TorqueTuning::Reader::getManualFactor() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<16>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLateralState::TorqueTuning::Builder::getManualFactor() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<16>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLateralState::TorqueTuning::Builder::setManualFactor(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<16>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLateralState::TorqueTuning::Reader::getManualFriction() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<17>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLateralState::TorqueTuning::Builder::getManualFriction() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<17>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLateralState::TorqueTuning::Builder::setManualFriction(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<17>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLateralState::TorqueTuning::Reader::getLearned() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLateralState::TorqueTuning::Builder::getLearned() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLateralState::TorqueTuning::Builder::setLearned(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS, value);
 }
 
 inline  ::uint16_t StarPilotLateralState::LaneCentering::Reader::getVersion() const {

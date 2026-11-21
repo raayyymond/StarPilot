@@ -1,9 +1,10 @@
+import { APP_DOWNLOADS, AppStoreLinks } from '../web/js/app-downloads.js'
 import assert from 'node:assert/strict'
-import { ANDROID_BETA_URL, installHelp, InstallApp, rememberInstallPrompt, isIosDevice, isAndroidDevice } from '../web/js/install-app.js'
+import { readFileSync } from 'node:fs'
+import { installHelp, InstallApp, rememberInstallPrompt, isIosDevice, isAndroidDevice } from '../web/js/install-app.js'
 assert.match(installHelp({ secure: true, agent: 'iPhone' }), /Share.*Add to Home Screen/)
 assert.match(installHelp({ secure: false, agent: 'Android' }), /web app.*https:\/\/galaxy\.firestar\.link/)
 assert.match(installHelp({ secure: true, agent: 'Android' }), /Install app/)
-assert.equal(ANDROID_BETA_URL, 'https://groups.google.com/g/galaxy-starpilot-android-beta')
 assert.match(installHelp({ secure: true, agent: 'Chrome' }), /Install app/)
 const events = new Map()
 let modeListener
@@ -44,26 +45,14 @@ await InstallApp.methods.installWeb.call(late)
 assert.equal(prompted, 2)
 InstallApp.beforeUnmount.call(late)
 
-// Android sends users to the Google Groups beta instead of a direct APK download.
-navigator.userAgent = 'Android'
-let apk
-globalThis.location = { protocol: 'http:', assign: value => { apk = value } }
-let nativeUpdates = 0
-window.StarPilotApp = { installUpdate: () => nativeUpdates++ }
-const nativeUpdate = { ...InstallApp.data(), updateAvailable: true }
-InstallApp.methods.installAndroid.call(nativeUpdate)
-assert.equal(nativeUpdates, 1)
-assert.equal(apk, undefined, 'Native updates never hand the APK to a browser')
-delete window.StarPilotApp
+// Store metadata lives outside the web installer.
+const readme = readFileSync(new URL('../../../../README.md', import.meta.url), 'utf8')
+for (const app of Object.values(APP_DOWNLOADS)) {
+  assert.ok(readme.includes(`](${app.href})`), `${app.label} download must match the README`)
+}
+assert.match(AppStoreLinks.template, /app.href/)
+assert.doesNotMatch(InstallApp.template, /Google Play|App Store|offline app|app\.apk/)
 const android = { ...InstallApp.data() }
-InstallApp.methods.installAndroid.call(android)
-assert.equal(apk, ANDROID_BETA_URL)
-assert.match(InstallApp.template, /Install web app/)
-assert.match(InstallApp.template, /Join the Android beta/)
-assert.doesNotMatch(InstallApp.template, /app\.apk|Download Android APK/)
-assert.match(InstallApp.template, /Update offline app \(Android\)/)
-assert.match(InstallApp.template, /android && !ios/)
-
 // Choosing the web app on Android always keeps web-install guidance.
 const webHelp = InstallApp.methods.installHelp.call(android)
 assert.match(webHelp, /Install app/)
@@ -77,8 +66,4 @@ assert.equal(isAndroidDevice('Android'), true)
 assert.equal(isAndroidDevice('iPhone'), false)
 navigator.userAgent = 'iPhone'
 const ios = { ...InstallApp.data() }
-assert.equal(ios.android, false)
-assert.equal(ios.ios, true)
-assert.match(InstallApp.template, /<a v-if="ios"[^>]+href="https:\/\/apps\.apple\.com\/ca\/app\/starpilot-bt\/id6821039119"/)
 assert.match(InstallApp.methods.installHelp.call(ios), /Share.*Add to Home Screen/)
-assert.match(InstallApp.template, /v-if="android && !ios/)

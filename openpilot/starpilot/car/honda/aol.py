@@ -134,23 +134,8 @@ def held_brake_renews_lateral(CP) -> bool:
   return bool(qualified_stock(CP, marked_only=True) and classic_bosch_long_cancel_owner(CP))
 
 
-def cancel_press_ends_cruise_only(CP, CS) -> bool:
-  """A fresh CANCEL press on a classic-Bosch alpha-long owner: the panda drops longitudinal on the same CAN frame.
-
-  2026-11-09 route 0000002f t=790.87: the panda status sampled 5 ms after the press still carried the host's
-  longitudinal request, card read that as a transport fault and cleared the lateral latch. Presses whose panda
-  sample landed after the host withdrew (t=296.48, t=738.43) kept lateral. The brake pedal has the same race and
-  already holds lateral intent through it; CANCEL now uses that hold.
-  """
-  try:
-    return bool(classic_bosch_long_cancel_owner(CP) and
-                any(event.type == car.CarState.ButtonEvent.Type.cancel and event.pressed for event in CS.buttonEvents))
-  except (AttributeError, IndexError, TypeError, ValueError):
-    return False
-
-
-def physical_cancel_lateral_allowed(CP, CS, intent, native, *, settings, previous,
-                                    source_ns, now_ns, axis_session_id) -> bool:
+def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previous,
+                                    source_ns, now_ns, axis_session_id, cancel_samples=()) -> bool:
   """CANCEL withdraws longitudinal only while a granted classic-Bosch alpha-long LAT axis remains.
 
   Covers the classic Bosch alpha-long owners (Accord and kin), where CANCEL has no other job than
@@ -158,26 +143,30 @@ def physical_cancel_lateral_allowed(CP, CS, intent, native, *, settings, previou
   2083, HondaStockCardIntent) and the older host-latch owner. A CANCEL the driver has mapped to an
   action keeps that action. 2026-11-09 route 0000002d: the first version excluded the stock owner,
   so the buttonCancel NO_ENTRY dropped the axis and card cleared the latch 15 ms after the press.
+  A press carried by an earlier carState within one axis age (cancel_samples) counts as this press.
   """
   from openpilot.starpilot.aol.intent import ButtonType
   from openpilot.starpilot.aol.runtime import (AXIS_MAX_AGE_NS, INTENT_MAX_AGE_NS, SAFETY_MAX_AGE_NS,
                                                native_inventory_matches_cp)
   try:
-    return bool(classic_bosch_long_cancel_owner(CP) and settings is not None and settings.enabled and
-      not any(settings.cancel_actions) and
+    return bool((qualified_stock(cp, marked_only=True) or classic_bosch_long_cancel_owner(cp)) and
+      settings is not None and settings.enabled and not any(settings.cancel_actions) and
       previous is not None and previous.lateral_active and previous.native_acknowledged and
       intent is not None and intent.settingsQualified and intent.allowedLatch and intent.lateralArmed and
       not intent.pauseLateral and intent.producerSessionId and intent.carStateLogMonoTime == source_ns and
       0 < source_ns <= intent.observedMonoTime <= now_ns <= intent.validUntilMonoTime and
       now_ns - source_ns <= AXIS_MAX_AGE_NS and now_ns - intent.observedMonoTime <= INTENT_MAX_AGE_NS and
       intent.validUntilMonoTime - intent.observedMonoTime <= SAFETY_MAX_AGE_NS and
-      CS.canValid and not CS.canTimeout and CS.cruiseState.available and not CS.steerFaultTemporary and
-      not CS.steerFaultPermanent and not CS.accFaulted and not CS.doorOpen and
-      any(event.type == ButtonType.cancel for event in CS.buttonEvents) and
+      cs.canValid and not cs.canTimeout and cs.cruiseState.available and not cs.steerFaultTemporary and
+      not cs.steerFaultPermanent and not cs.accFaulted and not cs.doorOpen and
+      (any(event.type == ButtonType.cancel for event in cs.buttonEvents) or
+       any(sample.valid and 0 < sample.logMonoTime <= source_ns and now_ns - sample.logMonoTime <= AXIS_MAX_AGE_NS and
+           sample.carState.canValid and not sample.carState.canTimeout and
+           any(event.type == ButtonType.cancel for event in sample.carState.buttonEvents) for sample in cancel_samples)) and
       native is not None and native.compatible and int(native.protocolVersion) == 1 and
       axis_session_id and native.axisSessionId == axis_session_id and native.requestedLateral and native.lateralAllowed and
-      native_accepts_cp(CP, native.safetyModel, native.safetyParam) and native.pandaInventory and
-      native_inventory_matches_cp(native, CP) and
+      native_accepts_cp(cp, native.safetyModel, native.safetyParam) and native.pandaInventory and
+      native_inventory_matches_cp(native, cp) and
       0 < native.observedMonoTime <= now_ns <= native.validUntilMonoTime and
       now_ns - native.observedMonoTime <= SAFETY_MAX_AGE_NS and
       native.validUntilMonoTime - native.observedMonoTime <= SAFETY_MAX_AGE_NS)

@@ -23479,3 +23479,37 @@ msgstr "Cảnh báo điểm mù khi tắt hỗ trợ lái ngang"
 #: openpilot/starpilot/ui/sounds_owner.py
 msgid "Warns when signaling toward a detected blind-spot vehicle with steering assistance off or paused. Independent of Loud Blindspot Alert. Hazards do not trigger it."
 msgstr "Cảnh báo khi bật xi nhan về phía xe được phát hiện trong điểm mù lúc hỗ trợ đánh lái đang tắt hoặc tạm dừng. Độc lập với Cảnh báo điểm mù âm lượng lớn. Đèn cảnh báo nguy hiểm không kích hoạt tính năng này."
+
+msgid "Improves stopping behavior at traffic lights and enables automatic stopping at detected stop signs. Press the accelerator to continue."
+msgstr "Cải thiện cách dừng xe tại đèn giao thông và cho phép tự động dừng tại biển dừng được phát hiện. Nhấn bàn đạp ga để tiếp tục."
+
+msgid "Enhanced Stops"
+msgstr "Dừng xe nâng cao"
+
+msgid "Blind Spot Camera & Preview"
+msgstr "Camera điểm mù và xem trước"
+
+msgid "Blind Spot Camera & Preview saved settings"
+msgstr "Cài đặt đã lưu của camera điểm mù và xem trước"
+
+msgid "Setup & Settings"
+msgstr "Thiết lập và cài đặt"
+
+msgid "Show onroad · Big & Small UI"
+msgstr "Hiển thị khi lái xe · Giao diện lớn và nhỏ"
+
+msgid "Speed & longitudinal"
+msgstr "Tốc độ và điều khiển dọc"
+
+msgid "Spotify & Phone Audio"
+msgstr "Spotify và âm thanh điện thoại"
+
+msgid "Steering & Torque"
+msgstr "Đánh lái và mô-men xoắn"
+
+msgid "Steering & buttons"
+msgstr "Đánh lái và nút bấm"
+
+msgid "Storage & Account"
+msgstr "Bộ nhớ và tài khoản"
+

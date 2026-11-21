@@ -5,10 +5,10 @@ from opendbc.safety.tests.common import CANPackerSafety
 from opendbc.safety.tests.libsafety import libsafety_py
 
 
-def check_physical_pcm_camera_override_cancel_and_validated_arrival_expiry(word):
+def check_physical_pcm_camera_override_cancel_and_validated_arrival_expiry(word, experience=0):
   safety = libsafety_py.libsafety
   safety.init_tests()
-  safety.set_alternative_experience(0)
+  safety.set_alternative_experience(experience)
   assert safety.set_safety_hooks(structs.CarParams.SafetyModel.hondaBosch, word) == 0
   packer = CANPackerSafety("honda_common_canfd_generated")
 
@@ -37,8 +37,9 @@ def check_physical_pcm_camera_override_cancel_and_validated_arrival_expiry(word)
   for _ in range(10):
     safety.safety_rx_hook(packet("SCM_BUTTONS", {"CRUISE_BUTTONS": 0}, 1))
   assert safety.safety_fwd_hook(0, 0x296) == -1
-  for _ in range(10):
+  for remaining in range(9, -1, -1):
     assert safety.safety_rx_hook(packet("SCM_BUTTONS", {"CRUISE_BUTTONS": 0}))
+    assert safety.safety_fwd_hook(0, 0x296) == (-1 if remaining else 2)
   assert safety.safety_fwd_hook(0, 0x296) == 2
   assert safety.safety_tx_hook(packet("SCM_BUTTONS", {"CRUISE_BUTTONS": 0}, 2))
   assert safety.set_safety_hooks(structs.CarParams.SafetyModel.hondaBosch, 16) == 0
@@ -70,11 +71,12 @@ class TestHondaMvlStock(unittest.TestCase):
 
   def test_physical_pcm_camera_override_cancel_and_validated_arrival_expiry(self):
     for word in (80, 81):
-      with self.subTest(word=word):
-        check_physical_pcm_camera_override_cancel_and_validated_arrival_expiry(word)
+      for experience in (0, 32):
+        with self.subTest(word=word, experience=experience):
+          check_physical_pcm_camera_override_cancel_and_validated_arrival_expiry(word, experience)
 
   def test_unqualified_mvl_words_and_independent_axis_have_no_transmit_table(self):
-    for word, experience in ((64, 0), (82, 0), (83, 0)):
+    for word, experience in ((64, 0), (82, 0), (83, 0), (80, 1), (80, 33), (81, 1), (81, 33)):
       with self.subTest(word=word, experience=experience):
         check_unqualified_mvl_words_and_independent_axis_have_no_transmit_table(word, experience)
 

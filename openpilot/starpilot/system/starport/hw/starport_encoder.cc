@@ -172,7 +172,7 @@ struct Encoder {
     control(V4L2_CID_MPEG_VIDC_VIDEO_IDR_PERIOD, 1);
     if (hevc) {
       control(V4L2_CID_MPEG_VIDC_VIDEO_HEVC_PROFILE, V4L2_MPEG_VIDC_VIDEO_HEVC_PROFILE_MAIN);
-      control(V4L2_CID_MPEG_VIDC_VIDEO_HEVC_TIER_LEVEL, V4L2_MPEG_VIDC_VIDEO_HEVC_LEVEL_HIGH_TIER_LEVEL_5);
+      control(V4L2_CID_MPEG_VIDC_VIDEO_HEVC_TIER_LEVEL, V4L2_MPEG_VIDC_VIDEO_HEVC_LEVEL_MAIN_TIER_LEVEL_4_1);
     } else {
       control(V4L2_CID_MPEG_VIDEO_H264_PROFILE, V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE);
       // 3.1 covers 1280x720@30 (unchanged); 1080p30 needs level 4.0.
@@ -296,10 +296,11 @@ void starport_encoder_timing(void *ptr, double *output) {
 }
 void *starport_encoder_create(int width, int height, int fps, int bitrate, int margin_height, int options, char *error, size_t size) {
   try {
-    // H.264 baseline level 3.1 is a 720p30 session; HEVC Main at high-tier level 5 carries 1080p30 for a head unit
+    // H.264 baseline level 3.1 is a 720p30 session; HEVC Main at main-tier level 4.1 carries 1080p30 for a head unit
     // that offers nothing else. H.264 above 720p (level 4.0) only when hw_encoder_max_height opts in (Python checks
     // it). UNVERIFIED on the comma 4 above 720p.
-    if (width < 2 || width > 1920 || height < 2 || height > 1080 || width % 2 || height % 2 ||
+    const int short_side = std::min(width, height), long_side = std::max(width, height);
+    if (short_side < 2 || short_side > 1080 || long_side > 1920 || width % 2 || height % 2 ||
         fps != 30 || bitrate < 1000000 || bitrate > 20000000 || margin_height < 0 ||
         margin_height >= height || margin_height % 4 || (options & ~(AA_ENCODER_CBR | AA_ENCODER_HEVC)))
       throw std::runtime_error("Unsupported encoder configuration");

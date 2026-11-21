@@ -81,7 +81,7 @@ def forget_car(address: str, client: StarPortClient | None = None) -> bool:
   client = client or StarPortClient()
   if client.available:
     return bool(client.call("forget_receiver", address=address).get("cleared"))
-  from openpilot.starpilot.system.starport import identity, setup_ladder
+  from openpilot.starpilot.system.starport import identity, quirk_state, setup_ladder
   address = address.strip().upper()
   config = identity.load_config()
   chosen = config["receiver_address"].upper() == address
@@ -91,11 +91,13 @@ def forget_car(address: str, client: StarPortClient | None = None) -> bool:
   cached = cache.pop(address, None) is not None
   cached = replies.pop(address, None) is not None or cached
   learned = setup_ladder.SetupLadder(identity.CONFIG_PATH.with_name("setup_state.json")).forget(address)
+  learned = quirk_state.forget_offline(address, identity.CONFIG_PATH.with_name("quirk_state.json")) or learned
   if not (chosen or companion or cached or learned):
     return False
   config.update(rfcomm_cache=cache, modern_reply_cache=replies)
   if chosen:
-    config.update(receiver_address="", receiver_name="", companion_address="", companion_name="", car_fingerprint={})
+    config.update(receiver_address="", receiver_name="", companion_address="", companion_name="", car_fingerprint={},
+                  touch_units_cache={})
   elif companion:
     config.update(companion_address="", companion_name="")
   identity.save_config(config)

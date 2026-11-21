@@ -12,15 +12,17 @@ from openpilot.starpilot.lateral.auto_lane_change import steering_capable
 from openpilot.starpilot.lateral.lane_change_preferences import (
   KEY, MAX_BYTES, MAX_SPEED_MPS, MINIMUM_SPEED_MPS, effective, LaneChangePolicy, SavedLaneChange, read_saved, to_value,
 )
+from openpilot.starpilot.lateral.turn_initiation_preferences import KEY as TURN_INITIATION_KEY, saved as turn_initiation_saved
 from openpilot.starpilot.saved_document import commit_exact
 from openpilot.starpilot.ui.feature_settings_state import FeatureRow, FeatureSettingsRequest
 
 
-GUIDANCE = "lane_change:turn_signal_guidance"
+GUIDANCE = "lane_change:automatic_turn_initiation"
 ENABLED = "lane_change:enabled"
 SPEED = "lane_change:speed"
 ONE = "lane_change:one"
 AUTO = "lane_change:auto"
+REQUIRE_CRUISE = "lane_change:require_cruise"
 DELAY = "lane_change:delay"
 WIDTH = "lane_change:width"
 CLOSE = "lane_change:close_gap"
@@ -36,7 +38,8 @@ def confirm_question(request: FeatureSettingsRequest) -> str:
     return "Turn off lane-change assistance? The current assistance cancels after the preference refresh."
   if request.key == AUTO and request.value == "Off":
     return "Turn off automatic lane changes? New automatic triggers stop after the preference refresh."
-  label = {GUIDANCE: "turn signal guidance", ENABLED: "lane-change assistance", AUTO: "automatic lane changes", SPEED: "minimum lane-change speed",
+  label = {GUIDANCE: "automatic turn initiation", ENABLED: "lane-change assistance", AUTO: "automatic lane changes",
+           REQUIRE_CRUISE: "cruise requirement for automatic lane changes", SPEED: "minimum lane-change speed",
            ONE: "one lane change per signal", PACE: "steering pace", DELAY: "signal delay",
            WIDTH: "minimum adjacent lane width", CLOSE: "Close lane-change gap", GAP: "lane-change following time"}[request.key]
   unit = request.display_unit
@@ -47,7 +50,7 @@ def confirm_question(request: FeatureSettingsRequest) -> str:
             "Changes apply after the current signal and maneuver end.")
   checks = ' Lane and blindspot checks remain required.' if request.key == AUTO and request.value == 'On' else ''
   return f"Set {label} to {value}? {timing}{checks}"
-KEYS = frozenset((GUIDANCE, ENABLED, SPEED, ONE, AUTO, DELAY, WIDTH, CLOSE, GAP, PACE, RESET))
+KEYS = frozenset((GUIDANCE, ENABLED, SPEED, ONE, AUTO, REQUIRE_CRUISE, DELAY, WIDTH, CLOSE, GAP, PACE, RESET))
 
 
 def _unit_source(params) -> tuple[bytes | None, bool]:
@@ -128,6 +131,10 @@ class LaneChangeFeature:
                     choices=("Off", "On"), available=allowed,
                     reason="Starts an assisted lane change after the turn signal delay without a steering nudge, " +
                            "when the adjacent lane and blind spot are clear."),
+            replace(common, key=REQUIRE_CRUISE, label="Require Cruise for Automatic Lane Changes",
+                    value="On" if policy.auto_requires_cruise else "Off", choices=("Off", "On"), available=allowed,
+                    reason="Requires factory cruise or openpilot speed control to be engaged for a nudgeless start. " +
+                           "With cruise off, a wheel nudge still works. Engage cruise before signaling."),
             replace(common, key=DELAY, label="Automatic lane-change delay", value=str(round(policy.auto_delay_s, 1)),
                     step=0.1, minimum=0.0, maximum=5.0, unit="s", available=allowed,
                     reason="Time to wait after signaling before an automatic lane change; lane and blindspot checks still apply"),
@@ -143,19 +150,20 @@ class LaneChangeFeature:
 
     defaults = LaneChangePolicy()
     targets = {ENABLED: "On" if defaults.enabled else "Off", ONE: "On" if defaults.one_per_signal else "Off",
-               AUTO: "On" if defaults.auto_lane_change else "Off", CLOSE: "On" if defaults.close_gap else "Off",
+               AUTO: "On" if defaults.auto_lane_change else "Off", REQUIRE_CRUISE: "On" if defaults.auto_requires_cruise else "Off",
+               CLOSE: "On" if defaults.close_gap else "Off",
                SPEED: str(round(defaults.minimum_speed_mps * multiplier, 3)), DELAY: str(defaults.auto_delay_s),
                WIDTH: str(defaults.minimum_lane_width_m), GAP: str(defaults.close_gap_seconds),
                PACE: str(round(1.0 + (8.0 - defaults.duration_s) * 9.0 / 5.0, 2))}
     return [replace(row, default_value=targets.get(row.key)) for row in rows]
 
   def guidance_row(self, parked):
-    saved = read_saved(self.params)
-    return FeatureRow(GUIDANCE, "Turn Signal Guidance", "On" if saved.policy.turn_signal_guidance else "Off",
-                      source=saved.raw, choices=("Off", "On"),
-                      available=saved.valid and saved.readable and self.capability() is not None and self.authority("lane_change"),
-                      reason="Use your turn signal to help the model choose a turning path at intersections.",
-                      vehicle_fingerprint=self.fingerprint(), capability=self.capability(), default_value="On")
+    raw, valid = turn_initiation_saved(self.params)
+    return FeatureRow(GUIDANCE, "Automatic Turn Initiation", ("On" if raw == b"1" else "Off") if valid else "Invalid saved value",
+                      source=raw, choices=("Off", "On") if valid else (),
+                      available=valid and self.capability() is not None and self.authority("lane_change"),
+                      reason="Allows the model to anticipate a signaled intersection turn. Off waits for driver initiation for Turn Assist.",
+                      vehicle_fingerprint=self.fingerprint(), capability=self.capability(), default_value="Off")
 
   def _fresh(self, request: FeatureSettingsRequest) -> SavedLaneChange | None:
     if (not request.vehicle_fingerprint or self.fingerprint() != request.vehicle_fingerprint or
@@ -178,8 +186,9 @@ class LaneChangeFeature:
       return LaneChangePolicy() if not saved.valid and request.value == "confirm" else None
     if not saved.valid:
       return None
-    if request.key in (GUIDANCE, ENABLED, ONE, AUTO, CLOSE) and request.value in ("On", "Off"):
-      field = {GUIDANCE: "turn_signal_guidance", ENABLED: "enabled", ONE: "one_per_signal", AUTO: "auto_lane_change", CLOSE: "close_gap"}[request.key]
+    if request.key in (ENABLED, ONE, AUTO, REQUIRE_CRUISE, CLOSE) and request.value in ("On", "Off"):
+      field = {ENABLED: "enabled", ONE: "one_per_signal", AUTO: "auto_lane_change",
+               REQUIRE_CRUISE: "auto_requires_cruise", CLOSE: "close_gap"}[request.key]
       return replace(saved.policy, **{field: request.value == "On"})
     if request.key == PACE:
       try:
@@ -214,6 +223,18 @@ class LaneChangeFeature:
   def apply(self, request: FeatureSettingsRequest) -> bool:
     if request.key not in KEYS or not request.confirmation:
       return False
+    if request.key == GUIDANCE:
+      def turn_authorized():
+        row = self.guidance_row(False)
+        return (row.available and row.source == request.expected and
+                row.vehicle_fingerprint == request.vehicle_fingerprint and row.capability == request.capability)
+
+      if (request.value not in ("Off", "On") or request.dependencies or request.related_source is not None or
+          request.display_unit or request.direction or not turn_authorized()):
+        return False
+      return commit_exact(self.params, key=TURN_INITIATION_KEY, max_bytes=8,
+                          raw=b"1" if request.value == "On" else b"0", expected=request.expected,
+                          authorized=turn_authorized, temp_prefix=".turn-initiation-").verified
     if request.key == RESET and not self.authority("parked_preferences"):
       return False
     def authorized() -> bool:

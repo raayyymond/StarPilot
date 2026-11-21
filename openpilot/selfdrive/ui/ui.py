@@ -5,19 +5,22 @@ import time
 
 from openpilot.cereal import messaging
 from openpilot.common.hardware import COMMA_HARDWARE, HARDWARE
+from openpilot.common.time_helpers import refresh_local_timezone
 from openpilot.common.realtime import Priority, config_realtime_process, drop_realtime, set_core_affinity
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.main import MainLayout
 from openpilot.selfdrive.ui.mici.layouts.main import MiciMainLayout
-from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.ui_state import device, ui_state
 from openpilot.starpilot.ui.presentation import Profile
 from openpilot.starpilot.ui.startup import select_ui
+from openpilot.starpilot.ui.wheel_input import poll_screen_off_wheel
 
 BIG_UI = gui_app.big_ui()
 
 
 def update_frame(preview=None, controllers=None, star=None, game_mode=None, arabesque=None):
   gui_app.measure_frame_phase("ui_state", ui_state.update)
+  refresh_local_timezone()
   if arabesque is not None:
     arabesque()
   if star is not None:
@@ -25,6 +28,7 @@ def update_frame(preview=None, controllers=None, star=None, game_mode=None, arab
     # or another widget covers the StarPilot page.
     star._poll_projection_bookmark(time.monotonic_ns())
     star._poll_projection_slc(time.monotonic_ns())
+    poll_screen_off_wheel(star, device.awake, time.monotonic_ns())
   if game_mode is not None:
     game_mode()
   if controllers is not None:
@@ -36,8 +40,8 @@ def update_frame(preview=None, controllers=None, star=None, game_mode=None, arab
 def main():
   device_type = HARDWARE.get_device_type() if COMMA_HARDWARE else ""
   camera_core_ui = device_type in ("mici", "tici", "tizi")
-  background_ui = device_type == "mici"
-  cores = {0, 1, 2, 7} if background_ui else {6} if camera_core_ui else {5}
+  background_ui = camera_core_ui
+  cores = {0, 1, 2, 7} if background_ui else {5}
   display_nice = 5 if background_ui else 0
   main_thread_configured = False
   if background_ui:

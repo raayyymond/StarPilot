@@ -8,6 +8,7 @@ from opendbc.car import structs
 from openpilot.cereal import log
 from openpilot.common.params import Params
 from openpilot.starpilot.lateral.lane_change_preferences import KEY, LaneChangePolicy, decode, to_value
+from openpilot.starpilot.lateral.turn_initiation_preferences import KEY as TURN_KEY
 from openpilot.starpilot.navigation.intent import TurnIntent
 from openpilot.starpilot.ui.feature_settings_owner import FeatureSettingsOwner
 from openpilot.starpilot.ui.feature_settings_state import FeaturePage, row_change
@@ -21,7 +22,7 @@ def case(tmp_path):
   params = Params(str(tmp_path))
   cp = structs.CarParams.new_message(carFingerprint='real', brand='toyota', steerControlType='torque')
   cp.safetyConfigs = [structs.CarParams.SafetyConfig.new_message(safetyModel='toyota')]
-  params.put(KEY, to_value(replace(LaneChangePolicy(), turn_signal_guidance=True)), block=True)
+  params.put_bool(TURN_KEY, True, block=True)
   class SM(dict):
     valid = dict.fromkeys(('carState', 'carControl', 'deviceState', 'longitudinalPlan'), True)
     alive = dict(valid)
@@ -34,6 +35,8 @@ def case(tmp_path):
 
 
 def select(owner, sm, desire=log.Desire.none, **kwargs):
+  if owner.guidance.last_read_ns is None:
+    owner.guidance.sample(NOW - 1)  # Observe a neutral sample before the test maneuver.
   return owner.select(sm, NOW, desire, supported=kwargs.get('supported', True), model_stop=kwargs.get('model_stop', False))
 
 
@@ -84,21 +87,21 @@ def test_stops_disabled_and_incompatible_model(case):
   assert select(owner, sm, supported=False) == log.Desire.none
   sm['longitudinalPlan'].shouldStop = True
   assert select(owner, sm) == log.Desire.none
-  params.remove(KEY)
+  params.remove(TURN_KEY)
   assert select(TurnIntent(params, cp), sm) == log.Desire.none
 
 
 def test_galaxy_canonical_toggle_and_save(case):
   params, cp, _ = case
-  params.remove(KEY)
+  params.remove(TURN_KEY)
   owner = FeatureSettingsOwner(params, lambda group: True, vehicle_fingerprint=lambda: cp.carFingerprint, vehicle_params=lambda: cp)
   row = next(row for row in owner.snapshot(FeaturePage.TORQUE, parked=True, system_long=False, lateral_context=True, metric=False).rows if row.key == GUIDANCE)
-  assert row.label == 'Turn Signal Guidance' and row.value == 'On' and row.available
+  assert row.label == 'Automatic Turn Initiation' and row.value == 'Off' and row.available
   request = row_change(row, 1)
   assert request is not None
   request = replace(request, confirmation=True)
   assert owner.apply(request)
-  assert not params.get(KEY)['turnSignalGuidance']
+  assert params.get_bool(TURN_KEY)
   assert not owner.apply(request)
 
 
@@ -106,12 +109,13 @@ def test_old_preferences_remain_default_on():
   old = to_value(LaneChangePolicy())
   old['version'] = 4
   del old['turnSignalGuidance']
+  del old['autoRequiresCruise']
   assert decode(json.dumps(old).encode()) == LaneChangePolicy()
 
 
 def test_independent_of_lane_change_master(case):
   params, cp, sm = case
-  params.put(KEY, to_value(replace(LaneChangePolicy(), enabled=False, turn_signal_guidance=True)), block=True)
+  params.put(KEY, to_value(replace(LaneChangePolicy(), enabled=False)), block=True)
   assert select(TurnIntent(params, cp), sm) == log.Desire.turnLeft
 
 
@@ -122,12 +126,12 @@ def test_passive_vehicle_never_guided(case, field):
   assert select(TurnIntent(params, cp), sm) == log.Desire.none
 
 
-@pytest.mark.parametrize('modifier', ['straight', 'right'])
-def test_guiding_route_does_not_hide_user_signal(case, modifier):
+@pytest.mark.parametrize('kind,modifier', [('turn', 'straight'), ('turn', 'right'), ('arrive', 'straight')])
+def test_guiding_route_does_not_hide_user_signal(case, kind, modifier):
   params, cp, sm = case
   sm.valid['starpilotNavigation'] = sm.alive['starpilotNavigation'] = True
   sm.logMonoTime['starpilotNavigation'] = NOW
-  instruction = NS(maneuverType='turn', maneuverModifier=modifier, distanceMeters=30.)
+  instruction = NS(maneuverType=kind, maneuverModifier=modifier, distanceMeters=30.)
   nav = NS(version=2, enabled=True, controlValid=True, status='guiding', sessionId='producer', revision='one',
            frameMonoTime=NOW, startedMonoTime=1, locationMonoTime=NOW, instruction=instruction, nextManeuver=instruction)
   sm['starpilotNavigation'] = NS(navigation=nav)
@@ -156,11 +160,12 @@ def test_explicit_off_preserves_existing_low_speed_lane_change(case):
 
 
 @pytest.mark.parametrize('version', [1, 2, 3, 4])
-def test_legacy_preferences_enable_guidance_without_writes(case, version):
+def test_legacy_preferences_do_not_opt_in_without_writes(case, version):
   params, cp, sm = case
   value = to_value(LaneChangePolicy())
   value['version'] = version
   del value['turnSignalGuidance']
+  del value['autoRequiresCruise']
   if version < 4:
     del value['durationS']
   if version < 3:
@@ -169,16 +174,18 @@ def test_legacy_preferences_enable_guidance_without_writes(case, version):
   if version < 2:
     for key in ('autoLaneChange', 'autoDelayS', 'minimumLaneWidthM'):
       del value[key]
+  params.remove(TURN_KEY)
   params.put(KEY, value, block=True)
   before = params.get(KEY)
-  assert select(TurnIntent(params, cp), sm) == log.Desire.turnLeft
+  assert select(TurnIntent(params, cp), sm) == log.Desire.none
   assert params.get(KEY) == before
 
 
-def test_missing_preferences_default_on_but_explicit_off_retained(case):
+def test_missing_defaults_off_and_old_guidance_is_independent(case):
   params, cp, sm = case
-  params.remove(KEY)
-  assert select(TurnIntent(params, cp), sm) == log.Desire.turnLeft
-  params.put(KEY, to_value(replace(LaneChangePolicy(), turn_signal_guidance=False)), block=True)
+  params.remove(TURN_KEY)
   assert select(TurnIntent(params, cp), sm) == log.Desire.none
+  params.put(KEY, to_value(replace(LaneChangePolicy(), turn_signal_guidance=False)), block=True)
+  params.put_bool(TURN_KEY, True, block=True)
+  assert select(TurnIntent(params, cp), sm) == log.Desire.turnLeft
   assert not params.get(KEY)['turnSignalGuidance']

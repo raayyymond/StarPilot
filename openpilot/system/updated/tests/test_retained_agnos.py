@@ -24,6 +24,53 @@ def shell_function(path, name):
   return source[start:source.index('\n}\n', start) + 3]
 
 
+class TestAgnosUiLaunch(unittest.TestCase):
+  def launch(self, import_status, ui_status=0, legacy_status=0):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      log = root / 'calls'
+      legacy = root / 'openpilot/common/hardware/comma/updater'
+      legacy.parent.mkdir(parents=True)
+      legacy.write_text('#!/bin/bash\nprintf "legacy\\0" >> "$CALL_LOG"\n' +
+                        'printf "%s\\0" "$@" >> "$CALL_LOG"\nexit "$LEGACY_STATUS"\n')
+      legacy.chmod(0o700)
+      function = shell_function(ROOT / 'launch_chffrplus.sh', 'run_agnos_updater')
+      script = function + r'''
+python3() {
+  printf 'python\0' >> "$CALL_LOG"
+  printf '%s\0' "$@" >> "$CALL_LOG"
+  if [ "$1" = '-c' ]; then return "$IMPORT_STATUS"; fi
+  return "$UI_STATUS"
+}
+run_agnos_updater '/flasher with spaces.py' '/manifest with spaces.json'
+'''
+      environment = dict(os.environ, DIR=str(root), CALL_LOG=str(log), IMPORT_STATUS=str(import_status),
+                         UI_STATUS=str(ui_status), LEGACY_STATUS=str(legacy_status))
+      result = subprocess.run(['bash', '-c', script], env=environment, check=False)
+      return result.returncode, log.read_bytes().split(b'\0')[:-1]
+
+  def test_current_source_ui_uses_the_same_flasher_and_manifest(self):
+    status, calls = self.launch(0)
+    self.assertEqual(status, 0)
+    self.assertEqual(calls, [b'python', b'-c', b'import openpilot.system.ui.updater', b'python', b'-m',
+                             b'openpilot.system.ui.updater', b'/flasher with spaces.py', b'/manifest with spaces.json'])
+
+  def test_older_runtime_uses_portable_updater(self):
+    status, calls = self.launch(1)
+    self.assertEqual(status, 0)
+    self.assertEqual(calls, [b'python', b'-c', b'import openpilot.system.ui.updater', b'legacy',
+                             b'/flasher with spaces.py', b'/manifest with spaces.json'])
+
+  def test_source_ui_failure_does_not_start_another_installation(self):
+    status, calls = self.launch(0, ui_status=7)
+    self.assertEqual(status, 7)
+    self.assertNotIn(b'legacy', calls)
+
+  def test_portable_ui_failure_propagates(self):
+    status, _ = self.launch(1, legacy_status=9)
+    self.assertEqual(status, 9)
+
+
 class TestRetainedAgnos(unittest.TestCase):
   def setUp(self):
     self.directory = tempfile.TemporaryDirectory()
@@ -96,8 +143,10 @@ class TestRetainedAgnos(unittest.TestCase):
     marker = repo / '.git/starpilot-retain-agnos'
     launcher = ROOT / 'launch_chffrplus.sh'
     text = launcher.read_text()
-    audited = next(iter(load_updater().TRUSTED_LEGACY_RELEASES['StarPilot']))
-    self.assertIn(f'TRUSTED_LEGACY_STARPILOT_COMMIT="{audited}"', text)
+    audited = load_updater().TRUSTED_LEGACY_RELEASES
+    declared = set(re.findall(r'TRUSTED_LEGACY_(?:STARPILOT_COMMIT|STABLE_MIGRATION)="([0-9a-f]{40})"', text))
+    self.assertEqual(declared, set().union(*audited.values()))
+    trusted = shell_function(launcher, 'trusted_legacy_commit')
     check = shell_function(launcher, 'staged_os_is_compatible').replace('/VERSION', str(version))
     activate = shell_function(launcher, 'maybe_activate_legacy_agnos')
     verifier = self.root / 'verifier'
@@ -106,7 +155,7 @@ class TestRetainedAgnos(unittest.TestCase):
     verifier.chmod(0o755)
     manifest = self.root / 'agnos.json'
     manifest.write_text('[]')
-    common = f'TRUSTED_LEGACY_STARPILOT_COMMIT={commit}\n{check}\n{activate}\n'
+    common = f'TRUSTED_LEGACY_STARPILOT_COMMIT={commit}\nTRUSTED_LEGACY_STABLE_MIGRATION=other-migration\n{trusted}\n{check}\n{activate}\n'
     def admission():
       return subprocess.run(['bash', '-c', common + f'staged_os_is_compatible {shlex.quote(str(repo))}'], check=False).returncode
     self.assertNotEqual(admission(), 0)  # Missing marker is not a modern update.
@@ -118,6 +167,12 @@ class TestRetainedAgnos(unittest.TestCase):
     marker.unlink()
     marker.write_text('20.2.1\n')
     self.assertEqual(admission(), 0)
+    migration_common = common.replace(f'TRUSTED_LEGACY_STARPILOT_COMMIT={commit}', 'TRUSTED_LEGACY_STARPILOT_COMMIT=other')
+    migration_common = migration_common.replace('TRUSTED_LEGACY_STABLE_MIGRATION=other-migration', f'TRUSTED_LEGACY_STABLE_MIGRATION={commit}')
+    self.assertEqual(subprocess.run(['bash', '-c', migration_common + f'staged_os_is_compatible {shlex.quote(str(repo))}']).returncode, 0)
+    marker.write_text('wrong\n')
+    self.assertNotEqual(subprocess.run(['bash', '-c', migration_common + f'staged_os_is_compatible {shlex.quote(str(repo))}']).returncode, 0)
+    marker.write_text('20.2.1\n')
     version.write_text('changed\n')
     self.assertNotEqual(admission(), 0)  # Manual reboot must recheck the OS.
     shell = common + f'sudo() {{ echo reboot >> {shlex.quote(str(log))}; }}\n' + \
@@ -138,6 +193,35 @@ class TestRetainedAgnos(unittest.TestCase):
     self.slot.assert_not_called()
     self.updater.set_consistent_flag.assert_not_called()
 
+  def test_legacy_staging_defers_to_the_new_hardware_aware_launcher(self):
+    source = (ROOT / 'launch_env.sh').read_text()
+    for version in ('19.8.1', '19.8.2', '20.2.1', '20.5.2', '20.5.3'):
+      with self.subTest(version=version):
+        installed = self.root / 'VERSION'
+        installed.write_text(version + '\n')
+        environment = self.root / 'staged_launch_env.sh'
+        environment.write_text(source.replace('/VERSION', str(installed)))
+        script = 'unset AGNOS_VERSION AGNOS_ACCEPTED_VERSIONS\n' + \
+          f'source {shlex.quote(str(environment))}\n' + \
+          'printf "%s\\n%s\\n%s\\n" "$AGNOS_VERSION" "$AGNOS_ACCEPTED_VERSIONS" "$AGNOS_UPDATE_POLICY"'
+        required, accepted, policy = subprocess.check_output(['bash', '-c', script], text=True).splitlines()
+        self.assertIn(version, accepted.split())
+        self.assertEqual(required, '20.5.3')
+        self.assertEqual(policy, 'auto')
+
+  def test_runtime_still_requires_upgrade_when_legacy_staging_accepts_old_os(self):
+    self.environment.write_text('export AGNOS_VERSION="20.5.2"\nexport AGNOS_UPDATE_POLICY="auto"\n' +
+                                'export AGNOS_ACCEPTED_VERSIONS="20.2.1 20.5.2"\n')
+    verifier = self.root / 'openpilot/common/hardware/comma/agnos.py'
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text('#!/bin/sh\nexit 1\n')
+    verifier.chmod(0o700)
+    function = 'function run_agnos_updater { echo upgrade-required; exit 37; }\n' + \
+      shell_function(ROOT / 'launch_chffrplus.sh', 'agnos_init')
+    result = self.run_shell(function, 'agnos_init', '20.2.1')
+    self.assertEqual(result.returncode, 37, result.stderr)
+    self.assertIn('upgrade-required', result.stdout)
+
   def test_retained_mismatch_blocks_finalization_without_flash(self):
     for current in ('19.6.20', '19.8', '', '19.8.2 '):
       with self.subTest(current=current):
@@ -154,7 +238,7 @@ class TestRetainedAgnos(unittest.TestCase):
     manifest.parent.mkdir(parents=True)
     manifest.write_text("[]")
     self.updater.handle_agnos_update()
-    self.flash.assert_called_once_with(str(self.root / 'openpilot/common/hardware/comma/agnos.json'), 1, self.updater.cloudlog)
+    self.flash.assert_called_once_with(str(self.root / 'openpilot/common/hardware/comma/agnos.json'), 1, self.updater.cloudlog, progress=None)
     self.assertTrue((ROOT / 'openpilot/common/hardware/comma/agnos.json').is_file())
     self.updater.set_consistent_flag.assert_called_once_with(False)
 
@@ -164,7 +248,7 @@ class TestRetainedAgnos(unittest.TestCase):
     manifest.parent.mkdir(parents=True)
     manifest.write_text("[]")
     self.updater.handle_agnos_update()
-    self.flash.assert_called_once_with(str(manifest), 1, self.updater.cloudlog)
+    self.flash.assert_called_once_with(str(manifest), 1, self.updater.cloudlog, progress=None)
     self.updater.set_consistent_flag.assert_called_once_with(False)
 
   def test_invalid_policy_cannot_finalize_or_flash(self):

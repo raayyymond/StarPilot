@@ -5,12 +5,8 @@ it (t=790.87). In the lost one the panda status was sampled 5 ms after the press
 the panda, the host's longitudinal request not yet withdrawn. Card read that as a transport fault and cleared the
 latch 9 ms after the press. This file rebuilds that sample.
 """
-from typing import Any
-
 from opendbc.car import structs
 from openpilot.cereal import messaging
-from openpilot.selfdrive.car.card import Car
-from openpilot.starpilot.aol.intent import AolSettings
 from openpilot.starpilot.aol.transport_pause import TransportPauseFeedback
 from openpilot.starpilot.aol.wire import PandaSlot, SafetyState, encode_safety
 from openpilot.starpilot.car.honda.tests.test_honda_cancel_lateral import STOCK_CLASSIC_LONG, stock_proof
@@ -67,14 +63,6 @@ def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False, hea
   return cp, cs, sm, feedback
 
 
-def card_for(cp, cs, *, cancel_actions=(0, 0, 0), enabled=True, received_ns=PRESS):
-  card: Any = Car.__new__(Car)
-  card.CP = cp
-  card.aol_settings = AolSettings(enabled, 0., 0, 0, (0, 0, 0), cancel_actions)
-  card._aol_can_observation = (cs, received_ns, NOW + 9_000_000_000, NOW + 9_000_001_000)
-  return card
-
-
 def test_without_the_hold_the_route_sample_clears_lateral():
   cp, cs, sm, feedback = sample()
   assert feedback.observe(sm, cp, cs, NOW, latched=True), 'what the car did at t=790.877: a transport fault'
@@ -82,40 +70,33 @@ def test_without_the_hold_the_route_sample_clears_lateral():
 
 def test_a_cancel_press_holds_lateral_intent_through_the_route_sample():
   cp, cs, sm, feedback = sample()
-  source = card_for(cp, cs).aol_honda_brake_source(cs, NOW)
-  assert source == PRESS
-  assert not feedback.observe(sm, cp, cs, NOW, latched=True, brake_source_ns=source), 'the latch stays'
+  assert not feedback.observe(sm, cp, cs, NOW, latched=True, cancel_source_ns=PRESS), 'the latch stays'
   cs.buttonEvents = []
   assert not feedback.observe(sm, cp, cs, NOW + 10_000_000 - 9_000_000, latched=True), 'and through the next frames'
-  assert feedback.honda_brake_ns == PRESS, 'on the one original deadline'
+  assert feedback.honda_cancel_ns == PRESS and not feedback.honda_brake_ns, 'on the one original deadline'
 
 
 def test_the_hold_ends_200_ms_after_the_press():
   cp, cs, sm, feedback = sample()
-  assert not feedback.observe(sm, cp, cs, NOW, latched=True, brake_source_ns=PRESS)
+  assert not feedback.observe(sm, cp, cs, NOW, latched=True, cancel_source_ns=PRESS)
   cs.buttonEvents = []
   axis = sm['aolAxisState']
-  assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, PRESS + 200_000_001, latched=True, brake_source_ns=0) is None
+  assert feedback._honda_cancel_lateral_current(sm, cp, cs, axis, PRESS + 200_000_001, latched=True, cancel_source_ns=0) is None
 
 
-def test_only_a_fresh_unmapped_cancel_press_on_this_frame_counts():
-  cp, cs, sm, feedback = sample()
-  assert card_for(cp, cs, cancel_actions=(9, 0, 0)).aol_honda_brake_source(cs, NOW) == 0, 'a mapped CANCEL keeps its action'
-  assert card_for(cp, cs, enabled=False).aol_honda_brake_source(cs, NOW) == 0, 'always-on lateral off'
-  assert card_for(cp, cs, received_ns=NOW - 30_000_001).aol_honda_brake_source(cs, NOW) == 0, 'a stale CAN batch'
-  assert card_for(cp, structs.CarState(**cs.to_dict())).aol_honda_brake_source(cs, NOW) == 0, 'another frame'
+def test_only_a_cancel_press_on_this_frame_counts():
   cp, cs, sm, feedback = sample(pressed=False)
-  assert card_for(cp, cs).aol_honda_brake_source(cs, NOW) == 0, 'a release'
-  assert feedback.observe(sm, cp, cs, NOW, latched=True, brake_source_ns=PRESS), 'a release with a borrowed source'
+  assert feedback.observe(sm, cp, cs, NOW, latched=True, cancel_source_ns=PRESS), 'a release with a borrowed source'
   cp, cs, sm, feedback = sample(button=structs.CarState.ButtonEvent.Type.decelCruise)
-  assert card_for(cp, cs).aol_honda_brake_source(cs, NOW) == 0, 'another button'
-  assert feedback.observe(sm, cp, cs, NOW, latched=True, brake_source_ns=PRESS)
+  assert feedback.observe(sm, cp, cs, NOW, latched=True, cancel_source_ns=PRESS), 'another button'
+  cp, cs, sm, feedback = sample()
+  assert feedback.observe(sm, cp, cs, NOW, latched=True, brake_source_ns=PRESS), 'a CANCEL is not a brake'
 
 
 def test_an_unlatched_driver_gets_nothing_from_cancel():
   cp, cs, sm, feedback = sample()
   axis = sm['aolAxisState']
-  assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW, latched=False, brake_source_ns=PRESS) is None
+  assert feedback._honda_cancel_lateral_current(sm, cp, cs, axis, NOW, latched=False, cancel_source_ns=PRESS) is None
 
 
 def status_first():
@@ -127,25 +108,22 @@ def status_first():
 
 def test_a_panda_status_ahead_of_the_press_waits_for_it_and_keeps_the_first_deadline():
   cp, cs, sm, feedback = status_first()
-  assert card_for(cp, cs).aol_honda_brake_source(cs, NOW) == 0
   assert not feedback.observe(sm, cp, cs, NOW, latched=True), 'the latch waits one axis age for a cause'
-  assert feedback.honda_cause_wait_ns == NOW and not feedback.honda_brake_ns
+  assert feedback.honda_cause_wait_ns == NOW and not feedback.honda_brake_ns and not feedback.honda_cancel_ns
   cs.buttonEvents = [structs.CarState.ButtonEvent(type=Cancel, pressed=True)]
   later = NOW + 1_000_000
-  source = card_for(cp, cs, received_ns=later - 100_000).aol_honda_brake_source(cs, later)
-  assert source == later - 100_000
-  assert not feedback.observe(sm, cp, cs, later, latched=True, brake_source_ns=source), 'the press explains it'
-  assert feedback.honda_brake_ns == NOW and not feedback.honda_cause_wait_ns, 'the hold runs from the first sample'
+  assert not feedback.observe(sm, cp, cs, later, latched=True, cancel_source_ns=later - 100_000), 'the press explains it'
+  assert feedback.honda_cancel_ns == NOW and not feedback.honda_cause_wait_ns, 'the hold runs from the first sample'
 
 
 def test_a_longitudinal_drop_with_no_cause_still_clears_lateral_one_axis_age_later():
   cp, cs, sm, feedback = status_first()
   axis = sm['aolAxisState']
   assert not feedback.observe(sm, cp, cs, NOW, latched=True)
-  held = feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW + 20_000_000, latched=True, brake_source_ns=0)
+  held = feedback._honda_cause_wait_lateral_current(sm, cp, cs, axis, NOW + 20_000_000, latched=True)
   assert held is not None and feedback.honda_cause_wait_ns == NOW, 'held samples never renew the wait'
   for late in (NOW + 30_000_001, NOW + 40_000_000, NOW + 90_000_000):
-    assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, late, latched=True, brake_source_ns=0) is None
+    assert feedback._honda_cause_wait_lateral_current(sm, cp, cs, axis, late, latched=True) is None
     assert feedback.honda_cause_wait_ns == NOW, 'and an expired wait never starts again'
   assert feedback.observe(sm, cp, cs, NOW + 30_000_001, latched=True), 'the fault stands'
 
@@ -154,16 +132,16 @@ def test_the_wait_needs_the_panda_to_have_dropped_longitudinal_while_the_host_st
   cp, cs, sm, feedback = sample(combined=True, panda_long=True)
   cs.buttonEvents = []
   axis = sm['aolAxisState']
-  assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW, latched=True, brake_source_ns=0) is None
+  assert feedback._honda_cause_wait_lateral_current(sm, cp, cs, axis, NOW, latched=True) is None
   assert not feedback.honda_cause_wait_ns, 'longitudinal still granted: nothing to explain'
   cp, cs, sm, feedback = sample(combined=False)
   cs.buttonEvents = []
   axis = sm['aolAxisState']
-  assert feedback._honda_brake_lateral_current(sm, cp, cs, axis, NOW, latched=True, brake_source_ns=0) is None
+  assert feedback._honda_cause_wait_lateral_current(sm, cp, cs, axis, NOW, latched=True) is None
   assert not feedback.honda_cause_wait_ns, 'the host is not asking for longitudinal'
   cp, cs, sm, feedback = status_first()
   feedback.failed = True
-  assert feedback._honda_brake_lateral_current(sm, cp, cs, sm['aolAxisState'], NOW, latched=True, brake_source_ns=0) is None
+  assert feedback._honda_cause_wait_lateral_current(sm, cp, cs, sm['aolAxisState'], NOW, latched=True) is None
 
 
 def test_the_wait_does_not_need_the_10_hz_panda_health_to_have_caught_up():

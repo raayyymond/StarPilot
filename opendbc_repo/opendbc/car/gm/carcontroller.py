@@ -31,6 +31,7 @@ from opendbc.car.gm.values import (DBC, CanBus, CarControllerParams, CruiseButto
                                    NO_ACC_BOLT_CAR, is_bolt_pedal_profile, is_bolt_pedal_removed_profile,
                                    is_bolt_present_no_acc_pedal_profile, is_bolt_euv_longitudinal,
                                    is_volt_cc_longitudinal, is_volt_cc_profile, is_silverado_cc_stock_profile, is_ordinary_cc_profile,
+                                   is_ordinary_cc_stock_profile,
                                    CC_GATEWAY_STOCK_CAR, uses_camera_stock_controls, CAR, BOLT_CC_WORDS, is_bolt_cc_profile)
 from opendbc.car.interfaces import CarControllerBase
 
@@ -254,8 +255,12 @@ def bolt_acc_pedal_dashboard_sensor_ready(CS, now_nanos):
           0 <= now_nanos - CS.stock_acc_status_ts_nanos <= STOCK_ACC_STATUS_TIMEOUT_NS)
 
 
-def bolt_acc_pedal_dashboard_drive_ready(CS, now_nanos):
-  return (CS.out.gearShifter in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.low) and
+def bolt_acc_pedal_dashboard_drive_ready(CS, now_nanos, *, allow_paddle=False):
+  paddle_ns, paddle_gear = getattr(CS, "bolt_acc_dashboard_paddle", (0, False))
+  paddle_display = (allow_paddle and paddle_gear and CS.out.regenBraking and
+                    CS.out.gearShifter == structs.CarState.GearShifter.manumatic and
+                    0 < paddle_ns <= now_nanos <= paddle_ns + PEDAL_SENSOR_TIMEOUT_NS)
+  return ((CS.out.gearShifter in (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.low) or paddle_display) and
           CS.bolt_pedal_gear_ts_nanos > 0 and 0 <= now_nanos - CS.bolt_pedal_gear_ts_nanos <= 100_000_000 and
           CS.bolt_pedal_main_ts_nanos > 0 and 0 <= now_nanos - CS.bolt_pedal_main_ts_nanos <= 300_000_000)
 
@@ -308,6 +313,9 @@ class CarController(CarControllerBase):
 
     self.lka_steering_cmd_counter = 0
     self.bolt_steering_pending: tuple[int, int] | None = None
+    self.bolt_pedal_recovery = is_bolt_pedal_profile(CP)
+    self.bolt_pedal_last_command = None
+    self.bolt_pedal_rejection_ns = None
     self.bolt_steering_receipt_seeded = False
     self.lka_icon_status_last = (False, False)
 
@@ -360,6 +368,7 @@ class CarController(CarControllerBase):
     self.volt_cc_cancel_pending = False
     self.volt_cc_last_cancel_frame = 0
     self.volt_cc_metric = False
+    self.volt_cc_speed_ceiling_mps = None
     self.volt_cc_last_button_frame = 0
     self.volt_cc_last_direction_frame = None
     self.volt_cc_consumed_source_ns = 0
@@ -457,6 +466,17 @@ class CarController(CarControllerBase):
       self.regen_paddle_pressed = commanded_accel < -.02
     return self.regen_paddle_pressed
 
+  def observe_pedal_rejections(self, can_packets):
+    pending = self.bolt_pedal_last_command
+    if pending is None:
+      return
+    raw, sent_ns = pending
+    for stamp, packets in can_packets:
+      for address, data, bus in packets:
+        if (address == 0x200 and bus == 192 and bytes(data) == raw and
+            sent_ns <= stamp <= sent_ns + 40_000_000):
+          self.bolt_pedal_rejection_ns = stamp
+
   def observe_steering_receipts(self, can_packets):
     for stamp, packets in can_packets:
       for address, raw, bus in packets:
@@ -539,6 +559,15 @@ class CarController(CarControllerBase):
 
     # Send CAN commands.
     can_sends = []
+    if self.bolt_pedal_rejection_ns is not None:
+      pending = self.bolt_pedal_last_command
+      rejected_ns = self.bolt_pedal_rejection_ns
+      self.bolt_pedal_rejection_ns = None
+      if pending is not None and pending[1] <= rejected_ns <= now_nanos <= pending[1] + 40_000_000:
+        # A rejected active counter never reached the interceptor; fill it with zero output.
+        can_sends.append(gmcan.create_pedal_command(self.packer_pt, 0., pending[0][4] & 0xF))
+        self.bolt_pedal_last_command = None
+
     cc_gateway = self.CP.carFingerprint in CC_GATEWAY_STOCK_CAR or self.volt_cc_profile
     stock_cruise_fresh = (not cc_gateway or
                           (CS.cc_gateway_cruise_ts_nanos > 0 and
@@ -550,7 +579,7 @@ class CarController(CarControllerBase):
     if self.hybrid_profile is not None:
       stock_steer_ready = hybrid_lateral_ready(CS, now_nanos) and (aol_lateral or
                            CS.out.cruiseState.enabled and not CS.out.brakePressed and not CS.out.gasPressed)
-    if is_silverado_cc_stock_profile(self.CP):
+    if (is_silverado_cc_stock_profile(self.CP) or is_ordinary_cc_stock_profile(self.CP)):
       sources = CS.silverado_stock_sources
       stock_steer_ready = (CS.out.canValid and not CS.out.canTimeout and len(sources) == 8 and
                           all(0 < stamp <= now_nanos <= stamp + limit for stamp, limit in sources) and
@@ -892,7 +921,10 @@ class CarController(CarControllerBase):
         if self.bolt_acc_pedal_stop_hold:
           pedal = 0.0
           self.pedal_steady = 0.0
-        can_sends.append(gmcan.create_pedal_command(self.packer_pt, pedal, (self.frame // 4) % 16))
+        pedal_command = gmcan.create_pedal_command(self.packer_pt, pedal, (self.frame // 4) % 16)
+        can_sends.append(pedal_command)
+        if self.bolt_pedal_recovery:
+          self.bolt_pedal_last_command = (bytes(pedal_command.dat), now_nanos) if pedal_command.dat[4] & 0x80 else None
         if CC.enabled:
           self.paddle_handoff_frames = 2
         feed_release = bool(self.paddle_handoff_frames)
@@ -929,7 +961,8 @@ class CarController(CarControllerBase):
           self.CP.carFingerprint == CAR.CHEVROLET_BOLT_ACC_2022_2023_PEDAL and
           is_bolt_pedal_profile(self.CP) and len(self.CP.safetyConfigs) == 1 and
           self.CP.safetyConfigs[0].safetyParam == 0x1CD and CS.out.canValid and not CS.out.canTimeout and
-          bolt_acc_pedal_dashboard_sensor_ready(CS, now_nanos) and CS.out.cruiseState.available and bolt_acc_pedal_dashboard_drive_ready(CS, now_nanos)
+          bolt_acc_pedal_dashboard_sensor_ready(CS, now_nanos) and CS.out.cruiseState.available and
+          bolt_acc_pedal_dashboard_drive_ready(CS, now_nanos, allow_paddle=True)
         )
         if dashboard_ready:
           fcw = 3 if hud_alert == VisualAlert.fcw else int(getattr(CS, "stock_fcw_alert", 0)) & 3
@@ -1193,7 +1226,7 @@ class CarController(CarControllerBase):
       # While car is braking, cancel button causes ECM to enter a soft disable state with a fault status.
       # A delayed cancellation allows camera to cancel and avoids a fault when user depresses brake quickly
       cancel_requested = CC.cruiseControl.cancel
-      if is_silverado_cc_stock_profile(self.CP):
+      if (is_silverado_cc_stock_profile(self.CP) or is_ordinary_cc_stock_profile(self.CP)):
         cancel_requested = cancel_requested and stock_cruise_fresh and CS.out.cruiseState.available and CS.out.cruiseState.enabled
       self.cancel_counter = self.cancel_counter + 1 if cancel_requested else 0
 
@@ -1396,7 +1429,10 @@ class CarController(CarControllerBase):
           self.volt_cc_consumed_source_ns = source_ns
           can_sends.append(gmcan.create_buttons(self.packer_pt, CanBus.POWERTRAIN, (CS.buttons_counter + 1) % 4, button))
       elif self.frame % 4 == 0:
-        button, rate = button_request(CS.out.vEgo, CS.out.cruiseState.speed, actuators.accel, CS.out.vCruise,
+        cruise_kph = CS.out.vCruise
+        if self.volt_cc_speed_ceiling_mps is not None:
+          cruise_kph = min(cruise_kph, self.volt_cc_speed_ceiling_mps * CV.MS_TO_KPH)
+        button, rate = button_request(CS.out.vEgo, CS.out.cruiseState.speed, actuators.accel, cruise_kph,
                                       bool(CC.hudControl.leadVisible), self.volt_cc_metric)
         source_ns = physical.button_credit_ns
         if ((self.frame - self.volt_cc_last_button_frame) * DT_CTRL > rate and

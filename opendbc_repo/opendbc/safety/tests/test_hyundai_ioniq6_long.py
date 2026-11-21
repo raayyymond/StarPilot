@@ -351,11 +351,11 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
       ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), raw_speeds, strict=True)}
     return packer.make_can_msg("WHEEL_SPEEDS", 1, {**values, "COUNTER": counter})
 
-  def test_bsm_neutral_only_below_physical_speed_boundary(self):
+  def test_bsm_neutral_advisory_requires_fresh_wheels_at_all_speeds(self):
     if self.release:
       self.skipTest("RELEASE denies the Ioniq 6 LONG profiles")
-    # 5 mph is between representable sums 1029 and 1030; test unequal wheels too.
-    samples = ((0, 0, 0, 0), (257, 257, 257, 258), (257, 257, 258, 258), (258, 258, 258, 258))
+    # Keep the old speed boundary and highway speeds in the advisory matrix.
+    samples = ((0, 0, 0, 0), (257, 257, 257, 258), (257, 257, 258, 258), (258, 258, 258, 258), (4000, 4000, 4000, 4000))
     for raw in (*RAW_LONG.values(), *RAW_AOL.values()):
       _, cp = params("lkas_alt" if raw & 0x80 else "lkas")
       packer = CANPacker(DBC[cp.carFingerprint][Bus.pt])
@@ -365,9 +365,8 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
         with self.subTest(profile=hex(raw), speeds=speeds):
           self.assertTrue(self.safety.safety_rx_hook(self.packet(self.bsm_wheel_frame(packer, speeds, counter))))
           rear, front = create_ioniq6_blindspot_status(counter, BlindspotStatus(0, 0))
-          permitted = sum(speeds) < 1030
-          self.assertEqual(self.safety.safety_tx_hook(self.packet(rear)), permitted)
-          self.assertEqual(self.safety.safety_tx_hook(self.packet(front)), permitted)
+          self.assertTrue(self.safety.safety_tx_hook(self.packet(rear)))
+          self.assertTrue(self.safety.safety_tx_hook(self.packet(front)))
           # Original physical indications remain valid, independently of speed.
           for frame in create_ioniq6_blindspot_status(counter + 30, BlindspotStatus(2, 2)):
             self.assertTrue(self.safety.safety_tx_hook(self.packet(frame)))
@@ -429,10 +428,10 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
         self.assertTrue(self.safety.safety_tx_hook(self.packet(rear)))
         self.safety.set_timer(1_200_002)
         self.assertFalse(self.safety.safety_tx_hook(self.packet(front)))
-        # A low-speed packet on the wrong route or with the wrong length cannot
-        # replace a valid above-threshold physical wheel observation.
+        # Wrong-route and short packets cannot refresh expired wheel evidence.
         other_sources(5, 1_210_000)
         self.assertTrue(self.safety.safety_rx_hook(self.packet(self.bsm_wheel_frame(packer, (300, 300, 300, 300), 5))))
+        other_sources(6, 1_310_001)
         low = self.bsm_wheel_frame(packer, (0, 0, 0, 0), 6)
         for invalid in ((low[0], low[1], 0), (low[0], low[1][:8], 1)):
           self.safety.safety_rx_hook(self.packet(invalid))
@@ -478,36 +477,38 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
     for topology in ("lkas", "lkas_alt"):
       for aol in (False, True):
         for raw_speeds in ((0, 0, 0, 0), (257, 257, 257, 258), (257, 257, 258, 258), (300, 300, 300, 300)):
-          with self.subTest(topology=topology, aol=aol, speeds=raw_speeds):
-            _, cp = params(topology)
-            raw = (RAW_AOL if aol else RAW_LONG)[topology]
-            cp.safetyConfigs[-1].safetyParam = raw
-            ci = CarInterface(cp)
-            controller = CarController(DBC[cp.carFingerprint], cp)
-            packer = CANPacker(DBC[cp.carFingerprint][Bus.pt])
-            bus = CanBus(cp)
-            inputs = [packer.make_can_msg(name, bus.ECAN, values) for name, values in (
-              ("ACCELERATOR", {"GEAR": 5, "COUNTER": 1}), ("TCS", {"COUNTER": 1}),
-              ("WHEEL_SPEEDS", {"COUNTER": 1}), ("MDPS", {"COUNTER": 1}),
-              ("CRUISE_BUTTONS", {"COUNTER": 1}),
-              ("BLINDSPOTS_FRONT_CORNER_2", {"COUNTER": 1, "SIDE_DETECT_STATE": 0x18}),
-              ("BLINKERS", {"LEFT_LAMP": 1}),
-            )]
-            inputs = [frame for frame in inputs if frame[0] != 0xA0]
-            inputs.append(self.bsm_wheel_frame(packer, raw_speeds, 1))
-            inputs.append(packer.make_can_msg("CAM_0x362" if topology == "lkas_alt" else "CAM_0x2a4", bus.CAM, {}))
-            ci.update([(1_000_000_000, inputs)])
-            self.mode(raw)
-            for frame in inputs:
-              if frame[2] == bus.ECAN:
-                self.assertTrue(self.safety.safety_rx_hook(self.packet(frame)), hex(frame[0]))
-            control = structs.CarControl()
-            _, sent = controller.update(control.as_reader(), ci.CS, 1_000_000_000)
-            pair = [frame for frame in sent if frame[0] in (0x1BA, 0x1E5)]
-            expected = BlindspotStatus(0, 0) if sum(raw_speeds) < 1030 else BlindspotStatus(2, 1)
-            self.assertEqual(pair, create_ioniq6_blindspot_status(0, expected))
-            for frame in pair:
-              self.assertTrue(self.safety.safety_tx_hook(self.packet(frame)), (topology, aol, hex(frame[0])))
+          for queued in (False, True):
+            with self.subTest(topology=topology, aol=aol, speeds=raw_speeds, queued=queued):
+              _, cp = params(topology)
+              raw = (RAW_AOL if aol else RAW_LONG)[topology]
+              cp.safetyConfigs[-1].safetyParam = raw
+              ci = CarInterface(cp)
+              controller = CarController(DBC[cp.carFingerprint], cp)
+              packer = CANPacker(DBC[cp.carFingerprint][Bus.pt])
+              bus = CanBus(cp)
+              inputs = [packer.make_can_msg(name, bus.ECAN, values) for name, values in (
+                ("ACCELERATOR", {"GEAR": 5, "COUNTER": 1}), ("TCS", {"COUNTER": 1}),
+                ("WHEEL_SPEEDS", {"COUNTER": 1}), ("MDPS", {"COUNTER": 1}),
+                ("CRUISE_BUTTONS", {"COUNTER": 1}),
+                ("BLINDSPOTS_FRONT_CORNER_2", {"COUNTER": 1, "SIDE_DETECT_STATE": 0x18}),
+                ("BLINKERS", {"LEFT_LAMP": 1}),
+              )]
+              inputs = [frame for frame in inputs if frame[0] != 0xA0]
+              inputs.append(self.bsm_wheel_frame(packer, raw_speeds, 1))
+              inputs.append(packer.make_can_msg("CAM_0x362" if topology == "lkas_alt" else "CAM_0x2a4", bus.CAM, {}))
+              ci.update([(1_000_000_000, inputs)])
+              self.mode(raw)
+              for frame in inputs:
+                if frame[2] == bus.ECAN:
+                  self.assertTrue(self.safety.safety_rx_hook(self.packet(frame)), hex(frame[0]))
+              control = structs.CarControl()
+              control.leftBlinker = queued
+              _, sent = controller.update(control.as_reader(), ci.CS, 1_000_000_000)
+              pair = [frame for frame in sent if frame[0] in (0x1BA, 0x1E5)]
+              expected = BlindspotStatus(0, 0) if not queued or sum(raw_speeds) < 1030 else BlindspotStatus(2, 1)
+              self.assertEqual(pair, create_ioniq6_blindspot_status(0, expected))
+              for frame in pair:
+                self.assertTrue(self.safety.safety_tx_hook(self.packet(frame)), (topology, aol, hex(frame[0])))
 
   def test_exhaustive_angle_bit_namespace_and_release_denial(self):
     for low in range(0x8000):
@@ -560,8 +561,7 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
         inputs = [
           packer.make_can_msg("ACCELERATOR", can_bus.ECAN, {"GEAR": 5}),
           packer.make_can_msg("TCS", can_bus.ECAN, {"ACCEnable": 0, "ACC_REQ": 1}),
-          packer.make_can_msg("WHEEL_SPEEDS", can_bus.ECAN, {key: 45 for key in
-                                                             ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal")}),
+          packer.make_can_msg("WHEEL_SPEEDS", can_bus.ECAN, dict.fromkeys(("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), 45)),
           packer.make_can_msg("MDPS", can_bus.ECAN, {}),
           packer.make_can_msg("STEERING_SENSORS", can_bus.ECAN, {}),
           packer.make_can_msg("DOORS_SEATBELTS", can_bus.ECAN, {"DRIVER_SEATBELT": 1}),
@@ -748,7 +748,13 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
             "aReqRaw": raw_value, "aReqValue": selected_value, "ACCMode": 1,
           }))
         self.assertTrue(self.safety.safety_tx_hook(accel(0, 0)))
-        for raw_value, selected_value in ((2.5, 0), (0, 2.5), (-4.0, 0), (0, -4.0)):
+        for raw_value, selected_value in ((3.5, 0), (0, 3.5), (3.5, 3.5),
+                                           (-3.5, 0), (0, -3.5), (-3.5, -3.5)):
+          self.assertTrue(self.safety.safety_tx_hook(accel(raw_value, selected_value)),
+                          (raw_value, selected_value))
+        for raw_value, selected_value in ((3.51, 0), (0, 3.51), (3.51, 3.51),
+                                           (-3.51, 0), (0, -3.51), (-3.51, -3.51),
+                                           (-4.0, 0), (0, -4.0)):
           self.assertFalse(self.safety.safety_tx_hook(accel(raw_value, selected_value)),
                            (raw_value, selected_value))
 
@@ -878,8 +884,7 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
           inputs = [
             packer.make_can_msg("ACCELERATOR", bus.ECAN, {"GEAR": 5}),
             packer.make_can_msg("TCS", bus.ECAN, {"ACCEnable": 0, "ACC_REQ": 1}),
-            packer.make_can_msg("WHEEL_SPEEDS", bus.ECAN, {key: 45 for key in
-                                                             ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal")}),
+            packer.make_can_msg("WHEEL_SPEEDS", bus.ECAN, dict.fromkeys(("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), 45)),
             packer.make_can_msg("MDPS", bus.ECAN, {}),
             packer.make_can_msg("STEERING_SENSORS", bus.ECAN, {}),
             packer.make_can_msg("DOORS_SEATBELTS", bus.ECAN, {"DRIVER_SEATBELT": 1}),
@@ -909,8 +914,7 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
         with self.subTest(topology=topology, event=event):
           self.mode(raw)
           for name, values in (("ACCELERATOR", {"GEAR": 5}), ("TCS", {"DriverBraking": 0}),
-                               ("WHEEL_SPEEDS", {key: 45 for key in
-                                                 ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal")}),
+                               ("WHEEL_SPEEDS", dict.fromkeys(("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), 45)),
                                ("MDPS", {}), ("CRUISE_BUTTONS", {"COUNTER": 1})):
             self.assertTrue(self.safety.safety_rx_hook(self.packet(packer.make_can_msg(name, bus.ECAN, values))))
           self.safety.set_controls_allowed(True)
@@ -948,8 +952,7 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
           self.mode(raw)
           self.safety.set_aol_test_heartbeat(True)
           for name, values in (("ACCELERATOR", {"GEAR": 5}), ("TCS", {"ACCEnable": 0}),
-                               ("WHEEL_SPEEDS", {key: 45 for key in
-                                                 ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal")}),
+                               ("WHEEL_SPEEDS", dict.fromkeys(("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), 45)),
                                ("MDPS", {}), ("CRUISE_BUTTONS", {"COUNTER": 1})):
             self.assertTrue(self.safety.safety_rx_hook(self.packet(packer.make_can_msg(name, bus.ECAN, values))))
           self.safety.aol_set_host_request(3)
@@ -1089,8 +1092,7 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
         self.mode(raw)
         self.safety.set_aol_test_heartbeat(True)
         for name, values in (("ACCELERATOR", {"GEAR": 5}), ("TCS", {"ACCEnable": 0}),
-                             ("WHEEL_SPEEDS", {key: 45 for key in
-                                               ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal")}),
+                             ("WHEEL_SPEEDS", dict.fromkeys(("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), 45)),
                              ("MDPS", {}), ("CRUISE_BUTTONS", {"COUNTER": 1})):
           self.assertTrue(self.safety.safety_rx_hook(self.packet(packer.make_can_msg(name, 1, values))))
         self.assertTrue(self.safety.safety_rx_hook(self.packet(packer.make_can_msg(
@@ -1277,8 +1279,7 @@ class TestHyundaiIoniq6Long(unittest.TestCase):
           self.mode(raw)
           self.safety.set_aol_test_heartbeat(True)
           for name, values in (("ACCELERATOR", {"GEAR": 5}), ("TCS", {"ACCEnable": 0}),
-                               ("WHEEL_SPEEDS", {key: 45 for key in
-                                                 ("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal")}),
+                               ("WHEEL_SPEEDS", dict.fromkeys(("WHL_SpdFLVal", "WHL_SpdFRVal", "WHL_SpdRLVal", "WHL_SpdRRVal"), 45)),
                                ("MDPS", {}), ("CRUISE_BUTTONS", {"COUNTER": 1})):
             self.assertTrue(self.safety.safety_rx_hook(self.packet(packer.make_can_msg(name, 1, values))))
           if lateral:

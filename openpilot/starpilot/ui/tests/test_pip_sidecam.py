@@ -148,7 +148,7 @@ def test_native_pip_passes_only_qualified_visual_sides_without_replacing_oem_bsm
                          fingerprint="b" * 64)
   car = SimpleNamespace(leftBlinker=False, rightBlinker=False, leftBlindspot=False, rightBlindspot=True,
                         canValid=True, gearShifter=runtime_app.car_schema.CarState.GearShifter.drive)
-  state = SimpleNamespace(customization=default_document(), alert=SimpleNamespace(size=None))
+  state = SimpleNamespace(customization=default_document(), alert=SimpleNamespace(size=None), viewport_width=2160)
   with patch.object(runtime_app, "ui_state", SimpleNamespace(params=object(), sm=object(), started_frame=0)), \
        patch.object(runtime_app, "read_pip", return_value=saved), \
        patch.object(runtime_app, "read_vasm_preferences", return_value=vasm), \
@@ -157,6 +157,9 @@ def test_native_pip_passes_only_qualified_visual_sides_without_replacing_oem_bsm
        patch.object(runtime_app.time, "monotonic_ns", return_value=100), \
        patch.dict("os.environ", {"STARPILOT_PIP_DEV": "1", "STARPILOT_VASM_DEVELOPMENT": "1"}):
     shell._render_pip(SimpleNamespace(x=0), state)
+    placements = shell.pip_renderer.render.call_args.kwargs["placements"]
+    assert placements["right"].x == state.customization["layouts"]["large"]["pip_right"]["x"] + 300
+    assert placements["left"].x == state.customization["layouts"]["large"]["pip_left"]["x"]
     signals = shell.pip_renderer.render.call_args.args[2]
     assert signals.vasm_left and not signals.vasm_right
     assert signals.right_blindspot and not signals.left_blindspot
@@ -252,6 +255,58 @@ def test_frozen_shape_shaders_crop_and_mask_before_camera_reads():
     external = _external_shader(shader)
     assert "samplerExternalOES texture0" in external
     assert "texture(texture1" not in external
+
+
+def test_shaders_apply_white_balance_gain_on_both_sampling_paths():
+  for shader in (PIP_FRAGMENT_SHADER, PIP_CURVED_FRAGMENT_SHADER):
+    for source in (shader, _external_shader(shader)):
+      assert "uniform vec3 uGain;" in source
+      assert source.index("vec3 rgb =") < source.index("rgb * uGain")
+
+
+def _nv12(width, height, y_value, u_value, v_value):
+  y = bytes([y_value]) * (width * height)
+  uv = bytes([u_value, v_value]) * (width * height // 4)
+  return SimpleNamespace(width=width, height=height, stride=width, uv_offset=width * height, data=memoryview(y + uv))
+
+
+def test_white_balance_neutralizes_magenta_cast_and_fails_soft():
+  # IR-lit cabin camera: red and blue high, green low (U and V above neutral).
+  frame = _nv12(64, 64, 100, 150, 160)
+  gains = pip_render.crop_white_balance(frame, Crop(0, 0, 64))
+  assert gains is not None
+  red, green, blue = gains
+  assert red < 1.0 and blue < 1.0 and green > 1.0
+  assert all(pip_render.WB_GAIN_MIN <= gain <= pip_render.WB_GAIN_MAX for gain in gains)
+
+  neutral = pip_render.crop_white_balance(_nv12(64, 64, 100, 128, 128), Crop(0, 0, 64))
+  assert neutral is not None and all(abs(gain - 1.0) < 0.02 for gain in neutral)
+
+  assert pip_render.crop_white_balance(SimpleNamespace(width=64, height=64, stride=64), Crop(0, 0, 64)) is None
+  assert pip_render.crop_white_balance(_nv12(64, 64, 2, 150, 160), Crop(0, 0, 64)) is None  # too dark to judge
+  short = _nv12(64, 64, 100, 150, 160)
+  short.data = short.data[:64 * 64]
+  assert pip_render.crop_white_balance(short, Crop(0, 0, 64)) is None
+
+
+def test_white_balance_is_throttled_smoothed_and_reset():
+  balance = pip_render._WhiteBalance()
+  missing = SimpleNamespace(width=64, height=64, stride=64)
+  assert balance.update("left", missing, Crop(0, 0, 64), 0.0) == pip_render.NEUTRAL_GAIN
+  magenta = _nv12(64, 64, 100, 150, 160)
+  first = balance.update("left", magenta, Crop(0, 0, 64), 1.0)
+  assert first[1] > 1.0
+  neutral = _nv12(64, 64, 100, 128, 128)
+  assert balance.update("left", neutral, Crop(0, 0, 64), 1.1) == first  # inside the sample interval
+  eased = balance.update("left", neutral, Crop(0, 0, 64), 1.0 + pip_render.WB_INTERVAL)
+  assert 1.0 < eased[1] < first[1]
+  assert balance.update("right", missing, Crop(0, 0, 64), 2.0) == pip_render.NEUTRAL_GAIN
+  balance.update("right", magenta, Crop(0, 0, 64), 2.5)
+  balance.reset("left")
+  assert balance.update("left", missing, Crop(0, 0, 64), 2.6) == pip_render.NEUTRAL_GAIN
+  assert balance.update("right", missing, Crop(0, 0, 64), 2.6) != pip_render.NEUTRAL_GAIN
+  balance.reset()
+  assert balance.update("right", missing, Crop(0, 0, 64), 3.0) == pip_render.NEUTRAL_GAIN
 
 
 def test_renderer_uses_saved_widget_position_and_removal_deactivates_camera():
@@ -737,3 +792,25 @@ def test_camera_resolution_adaptation_preserves_saved_crop_and_side_identity():
   assert mask.width == 1928 and mask.center_left == (315, 548)
   assert mask.for_frame(1928, 1208) is mask
   assert mask.for_frame(640, 480) is None
+
+
+def test_white_balance_switch_follows_saved_choice(monkeypatch):
+  import sys
+  import types
+  from openpilot.starpilot.ui.pip_render import _WhiteBalanceSwitch
+
+  class FakeParams:
+    value = True
+
+    def get_bool(self, key):
+      assert key == "CabinWhiteBalance"
+      return self.value
+
+  module = types.ModuleType("openpilot.common.params")
+  module.Params = FakeParams
+  monkeypatch.setitem(sys.modules, "openpilot.common.params", module)
+  switch = _WhiteBalanceSwitch()
+  assert switch.enabled(0.0)
+  FakeParams.value = False
+  assert switch.enabled(0.5)
+  assert not switch.enabled(1.5)

@@ -1,4 +1,5 @@
 import numpy as np
+from opendbc.car import ACCEL_MAX_TAKEOFF
 from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.lateral import apply_steer_angle_limits_vm
@@ -29,7 +30,8 @@ class CarController(CarControllerBase):
       return
     self.apply_angle_last = 0
     self.coop_steer = CooperativeSteeringController()
-    self.coop_enabled = CP.carFingerprint == CAR.TESLA_MODEL_3 and bool(CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.COOP_STEERING)
+    self.coop_enabled = (CP.carFingerprint in (CAR.TESLA_MODEL_3, CAR.TESLA_MODEL_Y) and
+                                bool(CP.safetyConfigs[0].safetyParam & TeslaSafetyFlags.COOP_STEERING))
     self.steering_limit_info = {}
     self.packer = CANPacker(dbc_names[Bus.party])
     self.tesla_can = TeslaCAN(CP, self.packer)
@@ -79,7 +81,7 @@ class CarController(CarControllerBase):
     if self.CP.openpilotLongitudinalControl:
       if self.frame % 4 == 0:
         state = 13 if CC.cruiseControl.cancel else 4  # 4=ACC_ON, 13=ACC_CANCEL_GENERIC_SILENT
-        accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+        accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, ACCEL_MAX_TAKEOFF))
         cntr = (self.frame // 4) % 8
         can_sends.append(self.tesla_can.create_longitudinal_command(state, accel, cntr, CS.out.vEgo, CC.longActive))
 

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sys
 import tempfile
 import time
 import traceback
@@ -11,8 +12,12 @@ from typing import Any
 
 from openpilot.cereal import messaging
 from openpilot.common.params import Params
-from openpilot.starpilot.flm.offroad_worker import OffroadWorker
+from openpilot.common.swaglog import cloudlog
 from openpilot.starpilot.flm.training_report import report_path, READ_MAX_BYTES, _report_bounded
+
+REVIEW_FIELDS = ('completed_route', 'vehicle', 'analysis_counts', 'recorded_tracking', 'source_sha256', 'assessment_sha256',
+                'recommendations', 'suggestions', 'suggestion_count', 'source_is_latest', 'latest_recording', 'skipped_routes',
+                'partial_drive', 'partial_segments', 'omitted_segments', 'recommendation_sources', 'recommendation_assessments')
 
 
 class StatusReport:
@@ -21,13 +26,92 @@ class StatusReport:
     self.clock_ns = clock_ns
     self.started = self.clock_ns()
     self.current: dict[str, Any] = {'status': 'collecting', 'reason': 'waiting_for_completed_drive', 'vehicle': ''}
+    self.previous: dict[str, Any] = {}
     self.next_ns = 0
+    self.diagnostics = None
 
-  def set(self, value):
+  def set(self, value, *, diagnostic_value=None):
+    review = value.get('pending_review', self.previous)
+    if value.get('status') == 'unavailable' and not value.get('completed_route') and type(review) is dict and review:
+      diagnostic_value = value if diagnostic_value is None else diagnostic_value
+      value = {**{key: review[key] for key in REVIEW_FIELDS if key in review}, **value,
+               'retained_analysis': False, 'retained_decision': review.get('reason', 'waiting_for_completed_drive')}
     changed = (self.current.get('status'), self.current.get('reason')) != (value.get('status'), value.get('reason'))
     self.current = dict(value)
+    if self.diagnostics is not None:
+      try:
+        self.diagnostics.observe(value if diagnostic_value is None else diagnostic_value)
+      except (OSError, ValueError, TypeError, AttributeError) as error:
+        self.diagnostics.error = f'Diagnostic state could not be recorded: {type(error).__name__}'
+    if value.get('completed_route') and value.get('status') not in ('fitting', 'unavailable'):
+      self.previous = dict(value)
     if changed:
       self.next_ns = 0
+
+  def analyzing(self, value):
+    # Keep the last completed findings and saved values readable during a fit.
+    # They are historical display data, never current application or permission.
+    previous = {key: self.previous[key] for key in REVIEW_FIELDS if key in self.previous}
+    if previous:
+      previous['retained_decision'] = self.previous.get('retained_decision', self.previous.get('reason', 'waiting_for_completed_drive'))
+      if self.previous.get('configuration_state') in ('ready_for_next_drive', 'accepted', 'accepted_after_drive', 'retained_after_drive', 'rolled_back'):
+        for key in ('configuration_state', 'configured_values', 'saved_adjustments', 'qualification_summary'):
+          if key in self.previous:
+            previous[key] = self.previous[key]
+    counts = value.get('analysis_counts', {})
+    if type(counts) is not dict:
+      counts = {}
+    phase = ('preparing' if value['reason'] == 'loading_parked_analysis' else
+             'reading' if value['reason'] == 'analyzing_last_completed_drive' else 'checking')
+    progress = value.get('analysis_progress', {'phase': phase,
+      'completed': counts.get('original_segments_reviewed'), 'total': counts.get('original_segments_available')})
+    self.set({**(previous or value), 'status': 'fitting', 'reason': value['reason'], 'retained_analysis': bool(previous),
+              'analysis_progress': progress}, diagnostic_value=value)
+
+  def restore(self, cache):
+    """Recover historical display data, never a current tune or permission."""
+    from types import SimpleNamespace
+    from openpilot.starpilot.flm.offroad_worker import _recorded_values, recorded_recommendations, reported_checkpoint
+    from openpilot.starpilot.flm.offroad_surface import route_values
+
+    try:
+      latest = cache.latest()
+      if latest is None or type(latest.get('result')) is not dict:
+        return
+      result = dict(latest['result'])
+      ordered = []
+      for index, row in enumerate(cache.checkpoints()):
+        value = row['result'].get('pending_review', row['result'])
+        if 'assessment_sha256' not in value:
+          continue
+        document = cache.get(value['assessment_sha256'])
+        source = document['assessment']['route']
+        partial = document['kind'] == 'partial_assessment' and value.get('partial_drive') is True
+        if (document['kind'] != 'completed_assessment' and not partial or source['route_id'] != value.get('completed_route')
+            or source['source_sha256'] != value.get('source_sha256')):
+          raise ValueError('Historical report source changed')
+        stamp = source.get('last_intact_wall_ns') if partial else source.get('completed_wall_ns')
+        if type(stamp) is int and stamp > 0:
+          ordered.append((stamp, index, value))
+      if ordered:
+        result = dict(reported_checkpoint(cache, [value for _, _, value in sorted(ordered, key=lambda row: row[:2], reverse=True)]))
+      if result.get('completed_route') and 'recommendations' not in result:
+        saved = cache.get(result['assessment_sha256'])
+        assessment = saved['assessment']
+        route = assessment['route']
+        if (saved['kind'] != 'completed_assessment' or route['route_id'] != result['completed_route']
+            or route['source_sha256'] != result['source_sha256']):
+          return
+        groups = assessment.get('groups', ())
+        if not groups or any(g['original_metadata']['cp_sha256'] != route['cp_sha256'] for g in groups):
+          return
+        baselines = [route_values(_recorded_values(g['original_metadata'])) for g in groups]
+        if baselines and all(values == baselines[0] for values in baselines):
+          inputs = SimpleNamespace(groups=groups, diagnostic_groups=assessment.get('diagnostic_groups', ()))
+          result['recommendations'] = recorded_recommendations(inputs, baselines[0], assessment)
+      self.previous = result
+    except (OSError, KeyError, ValueError, TypeError, AttributeError):
+      pass  # The normal worker reports unreadable inputs; historical display is optional.
 
   def publish(self):
     now = self.clock_ns()
@@ -44,6 +128,22 @@ class StatusReport:
       return value if type(value) is int and 0 <= value < 2**63 else 0
 
     details: dict[str, Any] = {'Analysis runs while parked': True, 'Next-drive trial is reversible': True, 'Physical road improvement proven': False}
+    progress = value.get('analysis_progress')
+    if value.get('status') == 'fitting' and type(progress) is dict and progress.get('phase') in ('preparing', 'reading', 'verifying', 'checking'):
+      completed, total = progress.get('completed'), progress.get('total')
+      if not (type(completed) is int and type(total) is int and 0 <= completed <= total <= 180 and total > 0):
+        completed = total = None
+      details['Parked analysis progress'] = [progress['phase'], completed, total]
+    if value.get('vehicle_identity') == 'unavailable':
+      details['Recorded vehicle identity'] = 'unavailable'
+    if self.diagnostics is not None and self.diagnostics.error:
+      details['Diagnostic persistence error'] = self.diagnostics.error
+    if value.get('skipped_routes'):
+      details['Skipped recorded drives'] = [list(row) for row in value['skipped_routes'][:16]]
+    if value.get('partial_drive') is True:
+      details['Drive analysis is partial'] = True
+      details['Partial drive segments'] = value['partial_segments']
+      details['Omitted recorded segments'] = value['omitted_segments'][:16]
     for key, title in (('source_sha256', 'Original completed route hash'), ('assessment_sha256', 'Offroad assessment hash')):
       if key in value:
         details[title] = value[key]
@@ -51,15 +151,27 @@ class StatusReport:
     from openpilot.starpilot.flm.offroad_surface import CURVE_NAMES, route_values
 
     if 'completed_route' in value:
+      details['Earlier analysis shown while updating'] = value.get('retained_analysis') is True
       details['Completed drive analyzed'] = value['completed_route']
+      details['Earlier completed drive reviewed'] = value.get('source_is_latest') is False
+      latest_recording = value.get('latest_recording')
+      if type(latest_recording) is dict:
+        details['Latest completed recording reviewed'] = latest_recording['completed_route']
+        details['Latest recording analysis decision'] = latest_recording['reason']
+        details['Findings retained from earlier drive'] = value['completed_route']
       details['Recorded steering observations'] = count('recorded_tracking')
+      reviewed, available = count('original_segments_reviewed'), count('original_segments_available')
+      if reviewed and available:
+        details['Recorded drive coverage'] = f'{reviewed} of {available} original recorded segments reviewed'
       details['Joined steering observations'] = count('joined_tracking')
       details['Retained control windows'] = count('qualified_whole_windows')
       details['Retained tracking windows'] = count('stable_qualified_whole_windows')
+      details['Drives in steering evidence history'] = count('evidence_drives')
+      details['Control windows in steering evidence history'] = count('evidence_windows')
       details['Original controller observations'] = count('original_control_metadata_rows')
       details['Controller eligibility refusals'] = count('controller_fit_refusals')
       details['Automatic configuration changed'] = bool(value.get('configuration_changed', False))
-      details['Analysis decision'] = value['reason']
+      details['Analysis decision'] = value.get('retained_decision', value['reason'])
       details['Saved route adjustment count'] = value.get('saved_adjustments')
       details['Recorded steering response'] = value.get('recorded_tracking')
       checks = value.get('qualification_summary')
@@ -70,6 +182,22 @@ class StatusReport:
       details['Recorded route suggestions'] = [[s['parameter'], s['delta'], s['whole_windows'], s['qualification']] for s in suggestions[:16]]
       details['Recorded suggestion count'] = value.get('suggestion_count', len(suggestions))
       details['More recorded suggestions omitted'] = value.get('suggestion_count', len(suggestions)) > len(suggestions)
+      if 'recommendations' in value:
+        recommendations = value['recommendations'][:35]
+        details['Recorded coordinate recommendations'] = [
+          [s['parameter'], s['baseline'], s['target'], s['whole_windows'], s['reason']]
+          for s in recommendations
+        ]
+        details['Recorded route suggestions'] = [
+          [s['parameter'], s['target'] - s['baseline'], s['whole_windows'], 'controller_native_checks_not_passed']
+          for s in recommendations if s['target'] is not None
+        ][:16]
+        details['Recorded suggestion count'] = len(recommendations)
+        details['More recorded suggestions omitted'] = False
+        if 'recommendation_sources' in value:
+          details['Recorded suggestion sources'] = value['recommendation_sources']
+        if 'recommendation_assessments' in value:
+          details['Recorded suggestion assessments'] = value['recommendation_assessments']
     proposal = value.get('suggestion')
     if proposal is not None:
       details['Full surface coordinates'] = [[n, proposal['values'][n]] for n in NAMES]
@@ -98,7 +226,7 @@ class StatusReport:
       details['Actual route control timestamp'] = value['actual_control_ns']
       details['Native delivery is not asserted by this status'] = True
     from openpilot.starpilot.flm.fullrate_collector import ControlEvidence
-    from openpilot.starpilot.flm.offroad_surface import REVISION
+    from openpilot.starpilot.flm.offroad_surface import current_revision
 
     control = value.get('actual_control')
     applied = False
@@ -110,7 +238,7 @@ class StatusReport:
       and control.active
       and not (control.manual or control.override or control.fault or control.limited or control.saturated)
       and 0 < control.control_ns <= now <= control.control_ns + 100_000_000
-      and control.route_effect_revision == REVISION
+      and current_revision(control.route_effect_revision)
       and len(control.route_configuration_scope) == 64
       and not control.route_configuration_scope.strip('0123456789abcdef')
     ):
@@ -149,29 +277,95 @@ class StatusReport:
         Path(temporary).unlink(missing_ok=True)
 
 
-def parked_status(sm, params, *, stopped=False, now=None):
+def parked_blocker(sm, params, *, stopped=False, now=None):
   """Same fresh parked physical-state checks as the existing bench supervisor.
 
   Offroad analysis needs current status, not the nominal publication cadence.
   Do not rewrite freq_ok or use this predicate for current Controls authority.
   """
   services = ('deviceState', 'pandaStates', 'peripheralState')
-  if stopped or not params.get_bool('IsOffroad') or params.get_bool('IsEngaged'):
-    return False
-  if not all(sm.seen[k] and sm.alive[k] and sm.valid[k] for k in services):
-    return False
+  if stopped:
+    return 'waiting_for_shutdown_to_finish'
+  if not params.get_bool('IsOffroad'):
+    return 'waiting_for_vehicle_offroad'
+  if params.get_bool('IsEngaged'):
+    return 'waiting_for_controls_to_disengage'
+  for service in services:
+    if not (sm.seen[service] and sm.alive[service] and sm.valid[service]):
+      return 'waiting_for_valid_' + service
   if now is None:
     now = time.monotonic()
-  if any(not 0 <= now - sm.recv_time[k] <= 2.0 for k in services):
-    return False
+  for service in services:
+    if not 0 <= now - sm.recv_time[service] <= 2.0:
+      return 'waiting_for_fresh_' + service
   pandas = sm['pandaStates']
-  return bool(not sm['deviceState'].started and pandas and all(not (p.ignitionLine or p.ignitionCan or p.controlsAllowed or p.faults) for p in pandas))
+  if sm['deviceState'].started:
+    return 'waiting_for_vehicle_to_switch_off'
+  if not pandas:
+    return 'waiting_for_connected_panda_status'
+  if any(p.ignitionLine or p.ignitionCan for p in pandas):
+    return 'waiting_for_ignition_off'
+  if any(p.controlsAllowed for p in pandas):
+    return 'waiting_for_panda_controls_to_disarm'
+  if any(p.faults for p in pandas):
+    return 'waiting_for_panda_fault_to_clear'
+  return None
 
 
-def main():
+def parked_status(sm, params, *, stopped=False, now=None):
+  return parked_blocker(sm, params, stopped=stopped, now=now) is None
+
+
+def wait_for_parked(sm, params, *, stopped=lambda: False, clock=time.monotonic):
+  """Refresh a lapped subscriber before resuming analysis; never use stale permission."""
+  deadline = clock() + 0.75
+  timeout = 0
+  while True:
+    sm.update(timeout)
+    if parked_status(sm, params, stopped=stopped(), now=clock()):
+      return True
+    if (
+      stopped()
+      or not params.get_bool('IsOffroad')
+      or params.get_bool('IsEngaged')
+      or sm['deviceState'].started
+      or any(p.ignitionLine or p.ignitionCan or p.controlsAllowed or p.faults for p in sm['pandaStates'])
+      or clock() >= deadline
+    ):
+      return False
+    # A lost/invalid/freshness check grants nothing. Wait for an actual new
+    # message and re-run the identical predicate before any analysis continues.
+    timeout = 20
+
+
+def run_parked_analysis(worker, report):
+  """Advance promptly only after an unreadable input was durably skipped."""
+  from openpilot.starpilot.flm.offroad_route import RouteInputError
+
+  try:
+    report.set(worker.run_once())
+  except (ValueError, OSError, RuntimeError) as error:
+    if isinstance(error, RouteInputError):
+      cloudlog.warning(
+        'FLM skipped unreadable drive %s: %s; continuing with other drives',
+        error.route_id or 'last local recording', str(error)[:300],
+      )
+    else:
+      traceback.print_exc()
+    try:
+      failure = worker.record_failure(error)
+    except (ValueError, OSError, RuntimeError) as checkpoint_error:
+      traceback.print_exc()
+      failure = {'status': 'unavailable', 'reason': f'Could not record route failure: {checkpoint_error}'[:300]}
+    report.set(failure if failure is not None else {'status': 'unavailable', 'reason': str(error)[:300]})
+    return isinstance(error, RouteInputError) and type(failure) is dict and failure.get('route_skipped') is True
+  return False
+
+
+def _run():
   from openpilot.common.hardware.hw import Paths
   from openpilot.starpilot.flm.offroad_cache import directory_for_params
-  from openpilot.starpilot.flm.offroad_source import record_drive
+  from openpilot.starpilot.flm.diagnostic_state import DiagnosticState
 
   params = Params()
   stopped = False
@@ -180,15 +374,21 @@ def main():
     nonlocal stopped
     stopped = True
 
-  previous = signal.signal(signal.SIGTERM, stop)
+  previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
   sm = None
+  restart = False
   report = StatusReport()
   try:
+    report.diagnostics = DiagnosticState(params)
+    from openpilot.starpilot.flm.offroad_source import record_drive
+
     sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState'])
 
     def parked():
-      sm.update(0)
-      return parked_status(sm, params, stopped=stopped)
+      allowed = wait_for_parked(sm, params, stopped=lambda: stopped)
+      if not allowed and not stopped and params.get_bool('IsOffroad'):
+        report.set({'status': 'collecting', 'reason': parked_blocker(sm, params) or 'waiting_for_parked_permission'})
+      return allowed
 
     def permitted():
       okay = parked()
@@ -196,19 +396,13 @@ def main():
       return okay
 
     cache = directory_for_params(params)
-    worker = OffroadWorker(
-      params,
-      Paths.log_root(),
-      cache,
-      permitted=permitted,
-      on_analysis=lambda: report.set({'status': 'fitting', 'reason': 'analyzing_last_completed_drive'}),
-      on_assessment=lambda a: report.set(
-        {'status': 'fitting', 'reason': 'checking_recorded_steering_recommendations', 'completed_route': a.receipt.route_id, 'analysis_counts': dict(a.counts)}
-      ),
-    )
+    worker = None
     next_analysis = 0.0
     while not stopped:
       if not params.get_bool('IsOffroad'):
+        if worker is not None:
+          restart = True
+          break
         report.set({'enabled': True, 'status': 'collecting', 'reason': 'recording_for_offroad_analysis'})
         record_drive(
           params,
@@ -228,23 +422,77 @@ def main():
           ),
         )
       elif parked() and time.monotonic() >= next_analysis:
+        if worker is None:
+          report.analyzing({'status': 'fitting', 'reason': 'loading_parked_analysis'})
+          report.publish()
+          from openpilot.starpilot.flm.offroad_worker import OffroadWorker
+
+          worker = OffroadWorker(
+            params,
+            Paths.log_root(),
+            cache,
+            permitted=permitted,
+            on_analysis=lambda: report.analyzing({'status': 'fitting', 'reason': 'analyzing_last_completed_drive'}),
+            on_progress=lambda progress: report.analyzing({'status': 'fitting', 'reason':
+              'checking_recorded_steering_recommendations' if progress['phase'] == 'checking' else 'analyzing_last_completed_drive',
+              'analysis_progress': progress}),
+            on_assessment=lambda a: report.analyzing(
+              {
+                'status': 'fitting',
+                'reason': 'checking_recorded_steering_recommendations',
+                'completed_route': a.receipt.route_id,
+                'vehicle': str(a.cp.carFingerprint),
+                'analysis_counts': dict(a.counts),
+                'recorded_tracking': a.recorded_tracking,
+              }
+            ),
+            on_recommendations=lambda value: report.analyzing({**value, 'reason': 'checking_recorded_steering_recommendations'}),
+          )
+          report.restore(worker.cache)
         next_analysis = time.monotonic() + 10.0
-        try:
-          report.set(worker.run_once())
-        except (ValueError, OSError, RuntimeError) as error:
-          traceback.print_exc()
-          worker.record_failure(error)
-          report.set({'status': 'unavailable', 'reason': str(error)[:300]})
+        if run_parked_analysis(worker, report):
+          next_analysis = time.monotonic()
       report.publish()
       if not stopped:
         time.sleep(0.05)
+  except Exception as error:
+    report.set({'status': 'unavailable', 'reason': f'{type(error).__name__}: {error}'[:300]})
+    report.publish()
+    raise
   finally:
-    signal.signal(signal.SIGTERM, previous)
-    if sm is not None:
-      for sock in sm.sock.values():
-        close = getattr(sock, 'close', None)
-        if close is not None:
-          close()
+    diagnostics = getattr(report, 'diagnostics', None)
+    if diagnostics is not None and diagnostics.state['current'] is not None and diagnostics.state['current']['stage'] in (
+      'starting_analysis', 'reading_recording', 'checking_recommendations'
+    ):
+      diagnostics.observe({'status': 'unavailable', 'reason': 'analysis_interrupted_by_shutdown'})
+    try:
+      if sm is not None:
+        for sock in sm.sock.values():
+          close = getattr(sock, 'close', None)
+          if close is not None:
+            close()
+    finally:
+      for sig, handler in previous.items():
+        signal.signal(sig, handler)
+  return restart and not stopped
+
+
+_CLEAN_IMAGE = '--flm-clean-image'
+
+
+def _clean_image():
+  # Release both the manager's inherited heap and every parked allocation.
+  # Reuse its launcher to retain crash/logging setup and the tracked PID.
+  code = "from openpilot.system.manager.process import launcher; launcher('openpilot.starpilot.flm.offroad_daemon', 'steerlearnerd')"
+  os.execv(sys.executable, [sys.executable, '-c', code, _CLEAN_IMAGE])
+
+
+def main():
+  if sys.argv[-1:] != [_CLEAN_IMAGE]:
+    _clean_image()
+    return
+  if _run():
+    _clean_image()
 
 
 if __name__ == '__main__':

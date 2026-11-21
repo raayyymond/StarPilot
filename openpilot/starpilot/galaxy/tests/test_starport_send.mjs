@@ -43,6 +43,9 @@ await limited.reply(0, { state: "idle" })
 assert.equal(await limited.client.send("x".repeat(61)), false)
 assert.equal(limited.requests.length, 1)
 assert.match(limited.states.at(-1).error, /60 characters/)
+assert.equal(await limited.client.send("   "), false)
+assert.equal(limited.requests.length, 1)
+assert.match(limited.states.at(-1).error, /short note/)
 const busy = limited.client.send("hi")
 await limited.reply(1, { error: "StarPort logs are already being sent." }, 409)
 assert.equal(await busy, false)
@@ -60,6 +63,14 @@ const unset = fixture()
 unset.client.start()
 await unset.reply(0, { state: "idle", available: false })
 assert.equal(unset.states.at(-1).available, false)
+assert.equal(unset.states.at(-1).fork, false)
+
+// A custom fork can still send, with a warning.
+const fork = fixture()
+fork.client.start()
+await fork.reply(0, { state: "idle", available: true, fork: true })
+assert.equal(fork.states.at(-1).available, true)
+assert.equal(fork.states.at(-1).fork, true)
 
 // A lost Bluetooth response retries the status read without repeating the upload.
 const interrupted = fixture()
@@ -88,3 +99,13 @@ await stale.reply(2, {}, 401)
 assert.equal(stale.unauthorized, 0)
 await stale.reply(3, { state: "sent" })
 assert.equal(stale.states.at(-1).state, "sent")
+
+// A Discord username for a follow-up rides along only when given.
+{
+  const followUp = fixture()
+  followUp.client.start()
+  await followUp.reply(0, { state: "idle", message: "", available: true })
+  followUp.client.send("No video", "  @star.fan_42 ")
+  assert.deepEqual(JSON.parse(followUp.requests[1].options.body), { message: "No video", discord: "@star.fan_42" })
+}
+console.log("StarPort log send: Discord follow-up passed")

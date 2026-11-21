@@ -235,10 +235,47 @@ class TestMapSnapshotOperationOwner(unittest.TestCase):
 
   def test_catalog_accepts_bundled_oversize_unavailable_regions(self):
     rows = [{**REGION, 'token': f'nation.region{i}'} for i in range(229)]
-    rows[0] = {**rows[0], 'groups': 120, 'available': False, 'unavailable': 'too_large'}
+    rows[0] = {**rows[0], 'groups': 1200, 'available': False, 'unavailable': 'too_large'}
     completed = subprocess.CompletedProcess([], 0, json.dumps(rows).encode(), b'')
     with patch.object(ops.subprocess, 'run', return_value=completed):
       self.assertEqual(ops._catalog()[0]['unavailable'], 'too_large')
+
+  def test_catalog_accepts_canada_and_japan_within_snapshot_budget(self):
+    rows = [{**REGION, 'token': f'nation.region{i}'} for i in range(229)]
+    for i, (token, groups) in enumerate((('nation.CA', 765), ('nation.JP', 72))):
+      rows[i] = {**rows[i], 'token': token, 'groups': groups}
+    completed = subprocess.CompletedProcess([], 0, json.dumps(rows).encode(), b'')
+    with patch.object(ops.subprocess, 'run', return_value=completed):
+      self.assertEqual([row['groups'] for row in ops._catalog()[:2]], [765, 72])
+    rows[0]['groups'] = ops.MAX_REGION_GROUPS + 1
+    completed = subprocess.CompletedProcess([], 0, json.dumps(rows).encode(), b'')
+    with patch.object(ops.subprocess, 'run', return_value=completed):
+      with self.assertRaises(ops.OperationError):
+        ops._catalog()
+
+  def test_canadian_province_tokens(self):
+    codes = ('AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'NT', 'NU', 'ON', 'PE', 'QC', 'SK', 'YT')
+    for code in codes:
+      self.assertIsNotNone(ops.TOKEN.fullmatch(f'ca_province.{code}'))
+    self.assertIsNone(ops.TOKEN.fullmatch('ca_province.ON.extra'))
+    rows = [{**REGION, 'token': f'nation.region{i}'} for i in range(229)]
+    rows.extend({**REGION, 'token': f'ca_province.{code}'} for code in codes)
+    completed = subprocess.CompletedProcess([], 0, json.dumps(rows).encode(), b'')
+    with patch.object(ops.subprocess, 'run', return_value=completed):
+      self.assertEqual([row['token'] for row in ops._catalog()[229:]], [f'ca_province.{code}' for code in codes])
+
+  def test_catalog_rejects_incomplete_and_duplicate_regions(self):
+    for count in (0, 1, 228, 230, 241, 243):
+      with self.subTest(count=count):
+        rows = [{**REGION, 'token': f'nation.region{i}'} for i in range(count)]
+        completed = subprocess.CompletedProcess([], 0, json.dumps(rows).encode(), b'')
+        with patch.object(ops.subprocess, 'run', return_value=completed), self.assertRaises(ops.OperationError):
+          ops._catalog()
+    rows = [{**REGION, 'token': f'nation.region{i}'} for i in range(242)]
+    rows[-1] = rows[0]
+    completed = subprocess.CompletedProcess([], 0, json.dumps(rows).encode(), b'')
+    with patch.object(ops.subprocess, 'run', return_value=completed), self.assertRaises(ops.OperationError):
+      ops._catalog()
 
   def test_boolean_version_is_not_v1(self):
     owner = self.owner(lambda *args: GEN_A)

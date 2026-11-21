@@ -215,7 +215,7 @@ def write_control(parent, evidence):
     'policy': _string(evidence.policy),
     'baselineRevision': evidence.baseline_revision,
     'baselineValues': evidence.baseline_values,
-    'controllerRevision': _string(evidence.controller_revision),
+    'controllerRevision': _string(evidence.controller_revision, 192),
     'replaySnapshot': _named_pairs(evidence.replay_snapshot),
     'replayInputs': _named_pairs(evidence.replay_inputs),
     'snapshotSequence': evidence.snapshot_sequence,
@@ -278,7 +278,7 @@ def _read_fields(row, schema):
 
 
 def read_control(event):
-  from openpilot.starpilot.flm.route_recording import decode, SCHEMAS, MAX_ROUTE_STAGE_VALUES
+  from openpilot.starpilot.flm.route_recording import decode_configuration, configuration_values, schema_base, MAX_ROUTE_STAGE_VALUES
 
   if not event.valid:
     raise ValueError('invalid envelope')
@@ -287,7 +287,7 @@ def read_control(event):
     row.version != VERSION
     or len(row.features) > MAX_FIELDS
     or len(row.appliedCoordinates) > MAX_FIELDS
-    or len(row.stageValues) > (MAX_ROUTE_STAGE_VALUES if str(row.stageSchemaRevision) in SCHEMAS else 40)
+    or len(row.stageValues) > (MAX_ROUTE_STAGE_VALUES if schema_base(str(row.stageSchemaRevision)) is not None else 40)
     or len(row.baselineValues) > 32
     or len(row.appliedParameterNames) > 8
     or len(row.liveAppliedCoordinates) not in (0, 30)
@@ -297,12 +297,12 @@ def read_control(event):
   ):
     raise ValueError('control version or bound')
   row = _read_fields(row, custom.LearningControlEvidence.schema)
-  stages, route_values, route_revision, route_scope = decode(
+  stages, route_values, route_revision, route_scope, configured = decode_configuration(
     str(row.stageSchemaRevision), tuple(_shared_scalar_pair(str(v.name), float(v.value)) for v in row.stageValues)
   )
   if route_revision and (len(row.liveAppliedCoordinates) or row.effectTrace.version):
     raise ValueError('Distinct route and live-trial metadata required')
-  return ControlEvidence(
+  evidence = ControlEvidence(
     str(row.identity),
     int(row.generation),
     int(row.controlMonoTime),
@@ -353,7 +353,10 @@ def read_control(event):
     route_values,
     route_revision,
     route_scope,
+    configured,
   )
+  configuration_values(route_values, configured, evidence.replay_inputs)
+  return evidence
 
 
 def write_applied(parent, evidence):

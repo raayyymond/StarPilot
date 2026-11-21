@@ -207,7 +207,14 @@ def test_the_join_is_told_where_the_car_is_only_for_a_profile_that_remembers_add
   assert lease.peer == "192.168.1.101" and lease.joined == ("credentials", boot.join_is_cancelled, {})
   lease = Lease()
   join(lease, boot, "credentials", {**car_profiles.DEFAULTS, "dhcp_patience_s": 6.0})
-  assert lease.peer == "unset" and lease.joined[2] == {"dhcp_patience": 6.0}
+  # A profile with DHCP patience also hands over where the adapter is, for the made-up address the join falls back to.
+  options = lease.joined[2]
+  assert lease.peer == "unset" and (options["dhcp_patience"], options["static_first"]) == (6.0, False)
+  boot.endpoint_ip = "192.168.1.101"
+  assert options["endpoint_ip"]() == "192.168.1.101"
+  lease = Lease()
+  join(lease, boot, "credentials", {**car_profiles.DEFAULTS, "static_ip": True})
+  assert lease.joined[2]["static_first"] is True and lease.joined[2]["dhcp_patience"] == 0.0
   lease = Lease()
   join(lease, SimpleNamespace(endpoint=None, join_is_cancelled=lambda: False), "credentials",
        {**car_profiles.DEFAULTS, "remember_wifi_address": True})

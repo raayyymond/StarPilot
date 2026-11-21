@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { SettingsFeed, SettingsPage, SETTINGS_SECTIONS } from "../web/js/settings.js"
+import { SettingsFeed, SettingsPage, SETTINGS_SECTIONS, sentryMonitorStatus } from "../web/js/settings.js"
 
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
 const response = (body, status = 200) => ({ ok: status === 200, status, json: async () => body,
@@ -146,7 +146,7 @@ assert.equal(expired.states.at(-1).status, "idle")
 assert.match(SettingsPage.template, /v-if="state.pending"/)
 assert.match(SettingsPage.template, /:disabled="!!state\.error \|\| !row\.available"/)
 assert.match(SettingsPage.template, /Local settings are unavailable in preview/)
-assert.match(SettingsPage.template, /state.data\?\.subtitle/)
+assert.match(SettingsPage.template, /sentryStatus.detail/)
 // Driving Screen Widgets opens the layout editor on its Display tab; target switches go through the router.
 assert.match(SettingsPage.template, /:initial-panel="state\.layoutPanel" @target="openLayoutTarget"/)
 assert.doesNotMatch(SettingsPage.template, /Use Colors &amp; Layout to arrange widgets and change colors/)
@@ -171,13 +171,29 @@ assert.deepEqual(cardsFor(""), [["", [0]], ["StarPort", [2, 3]]], "a heading row
 assert.deepEqual(cardsFor("h.265"), [["", []], ["StarPort", [3]]], "search keeps a row in its card when the heading is filtered out")
 assert.deepEqual(cardsFor("voacc"), [["", [0]]], "an emptied card is not shown")
 
+const experimentRows = [{ label: "Stay on Wi-Fi", value: "On", reason: "" }, { key: "heading:experiments", label: "Specific car experiments", value: "", reason: "", heading: true, collapsed: true },
+  { label: "Try experimental fixes", value: "Off", reason: "" }]
+const experimentCards = (state) => {
+  const view = { state: { query: "", data: { rows: experimentRows }, ...state }, initialPage: "developer", activeSection: {} }
+  view.visibleRows = SettingsPage.computed.visibleRows.call(view)
+  return SettingsPage.computed.rowCards.call(view).map(({ title, open }) => [title, open])
+}
+assert.deepEqual(experimentCards({ openCards: [] }), [["", true], ["Specific car experiments", false]], "a collapsible group starts closed")
+assert.deepEqual(experimentCards({ openCards: ["heading:experiments"] }), [["", true], ["Specific car experiments", true]])
+assert.deepEqual(experimentCards({ openCards: [], query: "experimental" }).at(-1), ["Specific car experiments", true], "searching opens a matching group")
+const toggled = { state: { openCards: [] } }
+SettingsPage.methods.toggleCard.call(toggled, "heading:experiments")
+assert.deepEqual(toggled.state.openCards, ["heading:experiments"])
+SettingsPage.methods.toggleCard.call(toggled, "heading:experiments")
+assert.deepEqual(toggled.state.openCards, [])
+
 const conditional = fixture()
 conditional.feed.start()
 await conditional.reply(0, { ...lane, page: "hub", rows: [{ label: "Conditional driving modes", page: "conditional",
   value: "Development saved settings", available: true, action: false }] })
 conditional.feed.load("conditional")
 assert.equal(conditional.requests[1].url, "./api/settings/pages/conditional")
-await conditional.reply(1, { ...lane, page: "conditional", rows: [{ ...lane.rows[0], label: "Saved driving mode",
+await conditional.reply(1, { ...lane, page: "conditional", rows: [{ ...lane.rows[0], label: "Driving Mode",
   value: "Stock", choices: ["Stock", "Conditional Experimental", "Conditional Chill"] }] })
 conditional.feed.preview(0, 1)
 await conditional.reply(2, { intent: "mode-once", question: "Save for a later drive?", proposed: "Conditional Experimental" })
@@ -405,17 +421,65 @@ htmlFeed.stop()
 
 const sections = (await import('../web/js/settings.js')).SETTINGS_SECTIONS
 assert.equal(sections.at(-1).id, 'developer')
-const catalog = JSON.parse((await import('node:fs')).readFileSync(new URL('../web/data/catalog.json', import.meta.url), 'utf8'))
-assert(!catalog.tools.some(tool => tool.path.startsWith('/developer')))
-const category = {state:{section:'lateral',developerOpen:false,cloudOpen:false,data:{page:'hub'}},busy:false,
-  feed:{active:true,stop(){this.active=false},start(page){this.active=true;category.started=page},
-    load(page, options){category.loaded={page,options};category.state.data={page}}}}
-SettingsPage.methods.selectSection.call(category, sections.at(-1))
-assert.equal(category.state.developerOpen, true)
-assert.equal(category.feed.active, true)
-assert.deepEqual(category.loaded, {page: 'developer', options: {keepData: false, quiet: false}})
-SettingsPage.methods.back.call(category)
-assert.equal(category.state.developerOpen, true) // Developer is a direct section, with no cloud submenu.
-SettingsPage.methods.selectSection.call(category, sections[0])
-assert.equal(category.state.developerOpen, false)
-assert.deepEqual(category.loaded, {page: 'hub', options: {keepData: false, quiet: false}})
+assert.deepEqual(sections.at(-1).pages, ['developer'])
+assert.equal(sections.at(-2).id, 'device')
+assert.equal(sections.at(-2).label, 'Device & System')
+assert(!sections.some(section => section.id === 'localization'))
+assert(sections.find(section => section.id === 'device').pages.includes('localization'))
+assert(sections.find(section => section.id === 'device').pages.includes('starport_options'))
+assert(!sections.find(section => section.id === 'longitudinal').pages.includes('driving_options'))
+assert.match(SettingsPage.template, /state.data\?\.page === 'data'/)
+
+for (const subtitle of ["Off: Motion monitoring is disabled.", "Not armed: Battery is low or its charge cannot be checked.", "Not armed: The car is on or the device is shutting down."]) {
+  assert.equal(sentryMonitorStatus({ subtitle }).label, "Disarmed")
+  assert.equal(sentryMonitorStatus({ subtitle }).detail, subtitle)
+}
+const armingStatus = sentryMonitorStatus({ subtitle: "Arming · 82s: Monitoring begins after 90 seconds parked." })
+assert.equal(armingStatus.tone, "warning")
+assert.equal(armingStatus.label, "Arming")
+const armedStatus = { subtitle: "Monitoring motion: Watching for movement while parked." }
+assert.equal(sentryMonitorStatus(armedStatus).label, "Armed")
+assert.equal(sentryMonitorStatus(armedStatus, "Connection lost").label, "Status unavailable")
+assert.equal(sentryMonitorStatus({ subtitle: "Waiting for monitor: The monitor has not responded recently." }).label, "Status unavailable")
+assert.equal(sentryMonitorStatus({ subtitle: "Motion monitor status is unavailable. Reconnecting automatically…" }).label, "Status unavailable")
+assert.equal(sentryMonitorStatus(null).label, "Status unavailable")
+assert.equal(sentryMonitorStatus({ subtitle: 42 }).label, "Status unavailable")
+
+// Vehicle-specific controls must remain reachable from the actual section filter.
+const vehicleHub = {
+  initialPage: "hub",
+  activeSection: SETTINGS_SECTIONS.find(section => section.id === "lateral"),
+  state: { query: "", data: { page: "hub", rows: [
+    { label: "Always On Lateral", page: "aol", available: true },
+    { label: "Vehicle Settings", page: "vehicle", available: true },
+  ] } },
+}
+const vehicleLinks = SettingsPage.computed.visibleRows.call(vehicleHub)
+assert.deepEqual(vehicleLinks.map(entry => entry.row.page), ["aol"])
+assert.equal(vehicleLinks[0].index, 0, "navigation must retain the server row index")
+const vehicleSection = SettingsPage.computed.activeSection.call({
+  sections: SETTINGS_SECTIONS, state: { developerOpen: false, data: { page: "vehicle" } },
+})
+assert.equal(vehicleSection.id, "vehicle", "Vehicle Settings belongs to the dedicated Toggles tab")
+const brakeRows = SettingsPage.computed.visibleRows.call({
+  initialPage: "hub", activeSection: vehicleSection,
+  state: { query: "", data: { page: "vehicle", rows: [
+    { label: "Disengage AOL on Brake", choices: ["Off", "On"], value: "Off", available: true },
+  ] } },
+})
+assert.equal(brakeRows[0].row.label, "Disengage AOL on Brake")
+
+// Browser settings cancel device polling and never require a device request.
+{
+  const { feed, requests, timers } = fixture()
+  feed.active = true
+  await feed.load('browser_preferences')
+  assert.equal(feed.data.page, 'browser_preferences')
+  assert.equal(requests.length, 0)
+  feed.scheduleParkedRefresh()
+  assert.equal(timers.size, 0)
+  const device = SETTINGS_SECTIONS.find(section => section.id === "device")
+  const rows = SettingsPage.computed.visibleRows.call({initialPage:'hub', activeSection:device, state:{query:'', data:{page:'hub',rows:[]}}})
+  assert.deepEqual(rows.map(({row})=>row.page), ['power','data','starport_options','browser_preferences','localization'])
+  feed.stop()
+}

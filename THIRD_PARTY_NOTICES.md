@@ -15,6 +15,10 @@ provides source packages alongside the binaries.
 
 Jetlink's comma client is copyright (c) 2026 Zeph Leggett and distributed under the MIT License. Its complete license and permission notice are retained in [jetlink_repo/LICENSE](jetlink_repo/LICENSE); source and revision are recorded in [CREDITS.md](CREDITS.md#jetlink-external-inference) and `upstream-sync.json`.
 
+## Timezone boundaries
+
+[`openpilot/common/timezone_grid.bin`](openpilot/common/timezone_grid.bin) is a grid derived from [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder) release 2026f (`timezones.geojson`), which is made available under the [Open Database License](https://opendatacommons.org/licenses/odbl/1-0/) and contains data from © OpenStreetMap contributors. [`openpilot/tools/timezone_grid.py`](openpilot/tools/timezone_grid.py) rebuilds it from that release.
+
 ## MRR35 Hyundai angle and radar
 
 The MRR35 radar generator and related Hyundai angle integration derive from the frozen StarPilot snapshot `678af783`, with relevant sunnypilot/opendbc angle-branch ancestry at `cc4b08625a98e94b318cab15e45e05dad58042bd`. Both upstream `LICENSE` and `LICENSE.md` were published for that source. Their scope is not unambiguous, so both applicable notices and the extension-file attribution are retained here without choosing between them. See [CREDITS.md](CREDITS.md) for the narrow source map.
@@ -118,21 +122,20 @@ SOFTWARE.
 
 `openpilot/starpilot/soloist/pulseaudio/` contains unmodified AArch64 binaries from Ubuntu 24.04 packages: PulseAudio 16.1 (LGPL-2.1-or-later), libltdl (LGPL-2.1-or-later), libtdb (LGPL-3.0-or-later), libsoxr (LGPL-2.1-or-later), liborc and speexdsp (BSD-style). The complete copyright and license notices are in that directory's `licenses/`, package hashes in `PACKAGES.sha512`, and the corresponding source is available from Ubuntu's archive for the exact versions listed in its README. The libraries are dynamically linked and may be replaced with `update.sh`.
 
-## Galaxy Android companion tunnel
+## Comma-side phone internet tunnel
 
 `openpilot/starpilot/galaxy/bin/hev-socks5-tunnel_linux_arm64` is the upstream
 [hev-socks5-tunnel 2.18.0](https://github.com/heiher/hev-socks5-tunnel/releases/tag/2.18.0)
 static Linux ARM64 release, under the MIT license. Its notice is retained in
-`openpilot/starpilot/galaxy/bin/LICENSE.hev-socks5-tunnel`; the adjacent SHA-256
-file pins the downloaded artifact. The Android companion uses the Kotlin
-standard library (Apache-2.0) and the Gradle wrapper (Apache-2.0); no third-party
-UI framework is bundled.
+[LICENSE.hev-socks5-tunnel](openpilot/starpilot/galaxy/bin/LICENSE.hev-socks5-tunnel);
+the adjacent SHA-256 file pins the downloaded artifact.
 
-## Galaxy Bluetooth companion source snapshot
+## Comma-side Galaxy Bluetooth bridge
 
-The Galaxy Bluetooth phone bridge and iOS app from https://github.com/StarPilotHQ/StarPilot
-(natehuby76, PRs #224/#225) are included under `openpilot/starpilot/galaxy_bluetooth/`
-and `openpilot/starpilot/companion/ios/`, with their license files (`UPSTREAM-LICENSE`, `openpilot/starpilot/companion/ios/UPSTREAM-GALAXY-LICENSE`).
+The Galaxy Bluetooth phone bridge from [StarPilotHQ/StarPilot](https://github.com/StarPilotHQ/StarPilot)
+(natehuby76, PRs #224/#225) is included under `openpilot/starpilot/galaxy_bluetooth/`,
+with its license in [UPSTREAM-LICENSE](openpilot/starpilot/galaxy_bluetooth/UPSTREAM-LICENSE).
+
 The bridge runs on openpilot's Python with PyCryptodome 3.23.0 (BSD/public-domain
 components, from opendbc). Its other dependencies are vendored unmodified, as
 pure-Python sources, in `openpilot/starpilot/galaxy_bluetooth/vendor/`:

@@ -7,11 +7,12 @@ from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
-from openpilot.selfdrive.controls.plannerd import update_curve_frame
+from openpilot.selfdrive.controls.plannerd import update_curve_frame, wheel_override_blocked
 from openpilot.starpilot.curve_speed.host import CurveHost
-from openpilot.starpilot.longitudinal.force_stop import StopPlan
+from openpilot.starpilot.longitudinal.force_stop import StopPlan, vehicle_tune
 from openpilot.starpilot.longitudinal.force_stop_runtime import ForceStopRuntime, dashboard_stop_sign
 from openpilot.starpilot.longitudinal.tests.test_cruise_ceiling import messages, snapshot
+from openpilot.starpilot.longitudinal.tests.test_force_stop import frame as stop_frame
 from openpilot.starpilot.longitudinal.tests.test_stop_resume import event as button_event
 
 BASE = 100_000_000_000
@@ -60,6 +61,166 @@ class ForceStopRuntimeTests(unittest.TestCase):
       output = self.sample(Frame(tick))
     self.assertTrue(output.forcing)
     return output
+
+  def test_always_hold_selection_is_next_drive_and_preserves_hold(self):
+    from openpilot.starpilot.longitudinal.enhanced_stop_hold import KEY
+    self.params.put_bool(KEY, True, block=True)
+    self.prime()
+    self.params.put_bool(KEY, False, block=True)
+    for tick in range(40, 120):
+      plan = self.sample(Frame(tick, horizon=190., stopped=True))
+      self.assertTrue(plan.manual_hold)
+      self.assertTrue(plan.should_stop)
+    self.assertTrue(self.owner.always_hold)
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    planner = LongitudinalPlanner(self.cp)
+    sm = Frame(120, horizon=190., stopped=True)
+    sm.all_checks = lambda _: True
+    planner.update(sm, now_ns=sm.stamp + 1_000_000, drive_id=DRIVE,
+                   force_stop_provider=lambda follow: self.sample(sm, follow_seconds=follow))
+    published = {}
+    with patch('openpilot.cereal.messaging.time.monotonic', return_value=(sm.stamp + 1_000_000) / 1e9):
+      planner.publish(sm, SimpleNamespace(send=lambda name, event: published.__setitem__(name, event)))
+    self.assertTrue(published['starpilotLongitudinalPlan'].valid)
+    self.assertTrue(published['starpilotLongitudinalPlan'].starpilotLongitudinalPlan.forceStopHolding)
+    self.assertTrue(published['longitudinalPlan'].longitudinalPlan.shouldStop)
+    self.sample(Frame(121), drive_id=DRIVE + 1)
+    self.assertFalse(self.owner.always_hold)
+    self.assertFalse(self.owner.plan.manual_hold)
+
+  def test_always_hold_cannot_bypass_control_brake_or_stale_guards(self):
+    from openpilot.starpilot.longitudinal.enhanced_stop_hold import KEY
+    for guard in ('brake', 'authority', 'stale'):
+      with self.subTest(guard=guard):
+        self.owner = ForceStopRuntime(self.params)
+        self.params.put_bool(KEY, True, block=True)
+        self.prime()
+        self.assertTrue(self.sample(Frame(40, stopped=True)).manual_hold)
+        sm = Frame(41, stopped=True)
+        if guard == 'brake':
+          sm['carState'].brakePressed = True
+        elif guard == 'authority':
+          sm['carControl'].longActive = False
+        else:
+          sm.valid['modelV2'] = False
+        self.assertFalse(self.sample(sm).manual_hold)
+
+  def test_unconfirmed_stationary_forecast_tail_keeps_preview_tracking(self):
+    from unittest.mock import patch
+    from openpilot.starpilot.longitudinal.tests.test_ioniq6_start import candidate
+    _, self.cp = candidate()
+    for tail in (0., .1, .3):
+      with self.subTest(tail=tail):
+        self.owner = ForceStopRuntime(self.params)
+        self.sample(Frame(0))
+        sm = Frame(1)
+        sm['modelV2'].velocity.x = [10.] * 32 + [tail]
+        sm['modelV2'].action.shouldStop = False
+        with patch.object(self.owner.policy, 'step', wraps=self.owner.policy.step) as step:
+          self.sample(sm)
+        self.assertTrue(step.called)
+        self.assertTrue(step.call_args.args[0].moving_preview)
+
+  def test_explicit_model_stop_still_freezes_the_target(self):
+    from openpilot.starpilot.longitudinal.tests.test_ioniq6_start import candidate
+    _, self.cp = candidate()
+    for tick in range(40):
+      self.sample(Frame(tick))
+    sm = Frame(40, horizon=30.)
+    sm['modelV2'].velocity.x = [10.] * 32 + [0.]
+    sm['modelV2'].action.shouldStop = True
+    before = self.sample(sm)
+    self.assertFalse(self.owner.policy.preview_tracking)
+    after = self.sample(Frame(41, horizon=70.))
+    self.assertLess(after.tracked_distance_m, before.tracked_distance_m)
+
+  def test_invalid_forecast_still_uses_odometry_without_extending(self):
+    from openpilot.starpilot.longitudinal.tests.test_ioniq6_start import candidate
+    _, self.cp = candidate()
+    for tick in range(40):
+      before = self.sample(Frame(tick))
+    sm = Frame(40, horizon=70.)
+    sm['modelV2'].velocity.x = [10.] * 32 + [-.1]
+    after = self.sample(sm)
+    self.assertAlmostEqual(after.tracked_distance_m, before.tracked_distance_m - .5)
+
+  def test_vision_expiry_gap_preserves_confirmation_but_not_control_authority(self):
+    from unittest.mock import patch
+    from openpilot.starpilot.speed_limits.vision.tests.test_stop_observation import evidence, message
+
+    def vision_frame(tick, sample, *, published=None):
+      sm = Frame(tick)
+      event = message(sample, now=sm.stamp if published is None else published)
+      service = 'slcVisionObservation'
+      sm[service] = event.slcVisionObservation
+      sm.seen = {service: True}
+      sm.recv_frame = {service: tick}
+      sm.valid[service] = sm.alive[service] = True
+      sm.logMonoTime[service] = int(event.logMonoTime)
+      sm.recv_time[service] = sm.stamp / 1e9
+      return sm
+
+    self.sample(Frame(0))
+    first = evidence(BASE + 100_000_000, frame=3)
+    second = evidence(BASE + 1_200_000_000, frame=25)
+    with patch.object(self.owner.policy, 'step', wraps=self.owner.policy.step) as step:
+      self.sample(vision_frame(10, first))
+      self.assertFalse(step.call_args.args[0].sign)
+      self.sample(vision_frame(33, first, published=BASE + 1_200_000_000))
+      self.assertFalse(step.call_args.args[0].sign)
+      self.assertEqual(self.owner.vision_stop.previous.observed_ns, first.observed_ns)
+      self.assertIsNone(self.owner.vision_stop.distance_m)
+      self.sample(vision_frame(34, second))
+      self.assertTrue(step.call_args.args[0].sign)
+      self.assertEqual(self.owner.vision_stop.confirmed_ns, second.observed_ns)
+      self.sample(vision_frame(41, second))
+      self.assertEqual(self.owner.vision_stop.confirmed_ns, second.observed_ns)
+      self.assertFalse(step.call_args.args[0].sign)  # The unchanged 750 ms control age is stricter.
+
+  def test_wheel_priority_requires_a_stop_cap_or_possible_commit_next_frame(self):
+    tune = vehicle_tune(str(self.cp.carFingerprint))
+    sign = {'light': False, 'sign': True, 'horizon_m': 40.}
+    self.owner.plan = self.owner.policy.step(stop_frame(0, **sign), tune)
+    self.assertIsNone(self.owner.plan.speed_ceiling_mps)
+    self.assertFalse(wheel_override_blocked(self.owner, None))
+    self.owner.plan = self.owner.policy.step(stop_frame(1, light=False, resume_requested=True), tune)
+    self.assertGreater(self.owner.policy.timer, 0.)
+    self.assertEqual(self.owner.policy.override_until_ns, 0)
+    self.assertFalse(wheel_override_blocked(self.owner, None))
+
+    self.owner.reset()
+    for tick in range(4):
+      self.owner.plan = self.owner.policy.step(stop_frame(tick, **sign), tune)
+    self.assertIsNone(self.owner.plan.speed_ceiling_mps)
+    self.assertTrue(wheel_override_blocked(self.owner, None))
+    self.owner.policy.step(stop_frame(4, resume_requested=True, **sign), tune)
+    self.assertGreater(self.owner.policy.override_until_ns, 0)
+
+    self.owner.reset()
+    self.owner.plan = self.owner.policy.step(stop_frame(0), tune)
+    self.assertFalse(self.owner.policy.can_commit_next_frame)
+    self.assertIsNotNone(self.owner.plan.speed_ceiling_mps)
+    self.assertTrue(wheel_override_blocked(self.owner, None))
+  def test_distance_braking_requires_exact_ioniq_control_profile(self):
+    from unittest.mock import patch
+    from openpilot.starpilot.longitudinal.tests.test_ioniq6_start import candidate
+
+    stock, admitted = candidate()
+    from opendbc.car.hyundai.tests.test_ioniq5pe_stock import params as pe_params
+    from opendbc.car.hyundai.ioniq5pe_long_profile import candidate as pe_candidate
+    pe_stock = pe_params()
+    pe_admitted = pe_candidate(pe_stock, enabled=True, is_release=False)
+    pe_stock.openpilotLongitudinalControl = True
+    stock.openpilotLongitudinalControl = True  # An incomplete profile must still refuse the new tune.
+    for cp, expected in [(self.cp, False), (stock, False), (admitted, True), (pe_stock, False), (pe_admitted, True)]:
+      self.cp = cp
+      self.owner = ForceStopRuntime(self.params)
+      with patch.object(self.owner.policy, 'step', wraps=self.owner.policy.step) as step:
+        for tick in range(12):
+          self.sample(Frame(tick))
+        self.assertTrue(step.called)
+        self.assertEqual(step.call_args.args[1].distance_control, expected)
 
   def test_committed_stop_survives_valid_mode_settings_and_traffic_changes(self):
     import json

@@ -162,10 +162,12 @@ static void honda_rx_hook(const CANPacket_t *msg) {
     // exit controls once main or cancel are pressed
     if ((button == HONDA_BTN_MAIN) || (button == HONDA_BTN_CANCEL)) {
       controls_allowed = false;
-      // On a stock-AOL Bosch alpha-long car CANCEL ends cruise only, as controls_allowed alone does in stock
-      // openpilot. Clearing the host request here also dropped lateral on every held CANCEL frame until pandad's
-      // next 10 Hz write (2026-11-10 route 00000033 t=513.72: a status read in that gap raised controlsMismatch).
-      if ((button != HONDA_BTN_CANCEL) || !honda_bosch_long || !honda_stock_aol_flag(HONDA_STOCK_ENABLED)) {
+      if ((button == HONDA_BTN_CANCEL) && honda_stock_aol_flag(HONDA_STOCK_ENABLED)) {
+        // Retain only the existing lateral request without renewing its deadline. Clearing the whole host
+        // request here dropped lateral on every held CANCEL frame until pandad's next 10 Hz write
+        // (2026-11-10 Accord route 00000033 t=513.72: a status read in that gap raised controlsMismatch).
+        aol_host_axis_mask &= 1U;
+      } else {
         aol_set_host_request(0U);
       }
     }
@@ -218,7 +220,7 @@ static void honda_rx_hook(const CANPacket_t *msg) {
 
 static bool honda_tx_hook(const CANPacket_t *msg) {
   const LongitudinalLimits HONDA_BOSCH_LONG_LIMITS = {
-    .max_accel = 200,   // accel is used for brakes
+    .max_accel = 350,   // accel is used for brakes
     .min_accel = -350,
 
     .max_gas = honda_rdx_high_gas ? 2200 : 2000,

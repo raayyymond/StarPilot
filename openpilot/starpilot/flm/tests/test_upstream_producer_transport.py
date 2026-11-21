@@ -9,7 +9,9 @@ from openpilot.starpilot.flm import producer_clock_equivalence as clock
 
 
 APPROVED = {
-  'selfdrive/modeld/modeld.py': '8aa09862919bd3900489b2444f03179661b62e45f683270abf8c50d1ae3173fa',
+  'starpilot/car/volkswagen/model_smoothing.py': 'f26a0db1992a99d41b2b63626bc24ed6538cc89d9cfd4e96008e8c86126d7540',
+  'selfdrive/modeld/modeld.py': '4036ac98e5ea9735addb7924ec870e8cdb0efbb160051092c74eaaf6590b98b9',
+  'starpilot/car/hyundai/model_smoothing.py': '28b1b8c64dd2d8e83f1bc71d39de7f797741d0911b39b7184a6e2d7d34d75243',
   'visionipc/visionipc_py.cc': '6c131c4f5eccb9f822f1aaae63733f26b1427c52340b61c9cdaf6cd4aee2f89d',
   'visionipc/visionipc_server.cc': 'a4325a5171eacb931eb271d06a992d2f27216040df113d92099f62cdfa67d81a',
   'visionipc/visionipc_client.cc': 'd142cd60eedabfc581e9770fcd6f0ca81b762ba9dbc608b54dd20a27a317a52d',
@@ -18,21 +20,21 @@ APPROVED = {
 
 def test_exact_installed_upstream_closure_is_checked_before_contract():
   contract = clock.pinned_default_contract()
-  assert len(clock.PRODUCER_SOURCE_HASHES) == 19
+  assert len(clock.PRODUCER_SOURCE_HASHES) == 21
   assert {relative: expected for _, relative, expected in clock.PRODUCER_SOURCE_HASHES if relative in APPROVED} == APPROVED
   assert contract.producer_revision == clock.CLOSURE_SHA256
   assert contract.proof_sha256 == clock.CLOSURE_SHA256
 
 
-@pytest.mark.parametrize('relative', tuple(APPROVED))
-def test_unapproved_change_to_each_new_producer_fails_closed(monkeypatch, relative):
+@pytest.mark.parametrize('package,relative,expected', clock.PRODUCER_SOURCE_HASHES)
+def test_unapproved_change_to_each_producer_fails_closed(monkeypatch, package, relative, expected):
   original = Path.read_bytes
   reached = []
   def changed(path):
     body = original(path)
-    if path.as_posix().endswith(relative):
+    if path.as_posix().endswith('/' + package + '/' + relative):
       reached.append(path)
-      assert hashlib.sha256(body).hexdigest() == APPROVED[relative]
+      assert hashlib.sha256(body).hexdigest() == expected
       return body + b'\n'
     return body
   monkeypatch.setattr(Path, 'read_bytes', changed)
@@ -69,7 +71,8 @@ def test_actual_live_collector_startup_uses_installed_producer_contract():
   assert not collector.ready and collector.live_tracking is None
 
 
-def test_changed_model_producer_still_blocks_actual_live_collector(monkeypatch):
+@pytest.mark.parametrize('package,relative,expected', clock.PRODUCER_SOURCE_HASHES)
+def test_changed_producer_still_blocks_actual_live_collector(monkeypatch, package, relative, expected):
   from types import SimpleNamespace
   from openpilot.starpilot.flm.fullrate_collector import FullrateCollector
   from openpilot.starpilot.flm.source_plant_runtime import start_original_capture
@@ -77,12 +80,16 @@ def test_changed_model_producer_still_blocks_actual_live_collector(monkeypatch):
   original = Path.read_bytes
   def changed(path):
     body = original(path)
-    return body + b'\n' if path.as_posix().endswith('selfdrive/modeld/modeld.py') else body
+    if path.as_posix().endswith('/' + package + '/' + relative):
+      assert hashlib.sha256(body).hexdigest() == expected
+      return body + b'\n'
+    return body
   monkeypatch.setattr(Path, 'read_bytes', changed)
   enabled = []
   adapter = SimpleNamespace(enable_original_context_capture=lambda: enabled.append(True),
-                            current_physical_valid=False, last_physical_ns=0, source_plant_clock=None)
+                            current_physical_valid=True, last_physical_ns=100, source_plant_clock=None)
   collector = FullrateCollector(adapter)
+  collector.last_qualified_response = 100
   assert not start_original_capture(collector)
   assert enabled == []
   assert adapter.source_plant_capture_error == 'original_source_clock_contract_unavailable'
@@ -91,7 +98,7 @@ def test_changed_model_producer_still_blocks_actual_live_collector(monkeypatch):
   from openpilot.starpilot.flm.source_observation_report import refusal_report
   error = refusal_report(collector)['lastException']
   assert error['type'] == 'ValueError'
-  assert 'openpilot/selfdrive/modeld/modeld.py' in error['message']
+  assert package + '/' + relative in error['message']
 
 
 def test_actual_daemon_reports_startup_source_refusal_without_issuing_a_trial(monkeypatch):

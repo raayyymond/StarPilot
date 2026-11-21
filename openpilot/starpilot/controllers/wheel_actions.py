@@ -56,8 +56,9 @@ def button_reported(cp, key):
     if key in KEYS[2:5] and bool(cp.flags & ToyotaFlags.RADAR_CAN_FILTER) and camera_2aa_filter.configured(cp):
       return False  # No verified FD_BUTTON receiver is implied by a 2AA discriminator.
     if key == 'LKASButtonControl':
-      return bool(cp.flags & (ToyotaFlags.TSS2 | ToyotaFlags.LONG_FILTER | ToyotaFlags.FILTER_BUTTONS) or
-                  cp.carFingerprint == CAR.TOYOTA_PRIUS_RETROFIT or legacy_advert)
+      return bool(cp.carFingerprint != CAR.TOYOTA_CAMRY and
+                  (cp.flags & (ToyotaFlags.TSS2 | ToyotaFlags.LONG_FILTER | ToyotaFlags.FILTER_BUTTONS) or
+                   cp.carFingerprint == CAR.TOYOTA_PRIUS_RETROFIT or legacy_advert))
     return bool(cp.flags & ToyotaFlags.TSS2 and not cp.flags & (ToyotaFlags.RADAR_ACC | ToyotaFlags.SECOC) or
                 cp.flags & (ToyotaFlags.LONG_FILTER | ToyotaFlags.FILTER_BUTTONS) or legacy_advert or cp.carFingerprint in
                 (CAR.TOYOTA_PRIUS, CAR.TOYOTA_PRIUS_RETROFIT, CAR.TOYOTA_SIENNA_4TH_GEN))
@@ -185,10 +186,12 @@ class WheelPublisher:
     self.suppress_distance_release = any(event.type == structs.CarState.ButtonEvent.Type.gapAdjustCruise and not event.pressed
                                          for event in state.buttonEvents)
     # Repeated neutral packets are not button edges. Keep held-input audits,
-    # the periodic audit, and the final read before emitted commands below.
+    # periodic held-input audits, and the final read before emitted commands below.
     media_edge = self.media_audit_needed(media)
     edge = bool(state.buttonEvents) or media_edge
-    audit = self.mapping is None or drive_id != self.drive or edge or now_ns - self.checked_ns >= 1_000_000_000
+    held = self.paddle_held or any(tracker.distance_held or tracker.media_held is not None
+                                    for tracker in (self.tracker, self.cancel_tracker, self.main_tracker))
+    audit = self.mapping is None or drive_id != self.drive or edge or held and now_ns - self.checked_ns >= 1_000_000_000
     source_eligible = bool(eligible(cp) and state.canValid and not state.canTimeout and type(now_ns) is int and
                            type(drive_id) is int and 0 < drive_id < now_ns)
     mapping = capture(params) if audit and source_eligible else self.mapping
@@ -294,7 +297,7 @@ class WheelConsumer:
     self.sequence = 0
     self.last_heartbeat = 0
 
-  def accept(self, event, params, cp, sm, *, now_ns):
+  def accept(self, event, params, cp, sm, *, now_ns, consume=True):
     try:
       if not event.valid or str(event.slcCruiseEvent.kind) != "wheelAction" or not eligible(cp):
         return None
@@ -333,16 +336,17 @@ class WheelConsumer:
         mapping = capture(params)
         if mapping is None or mapping[key] != action:
           return None
-      if session != self.session:
-        if self.session is not None:
-          if len(self.retired) >= 8:
-            return None
-          self.retired.add(self.session)
-        self.session, self.sequence = session, 0
-      if wire.sequence <= self.sequence:
+      if session != self.session and self.session is not None and len(self.retired) >= 8:
         return None
-      self.sequence = int(wire.sequence)
-      self.last_heartbeat = observed
-      return WheelCommand(session, self.sequence, observed, drive, source, key, action)
+      if wire.sequence <= (self.sequence if session == self.session else 0):
+        return None
+      if consume:
+        if session != self.session:
+          if self.session is not None:
+            self.retired.add(self.session)
+          self.session = session
+        self.sequence = int(wire.sequence)
+        self.last_heartbeat = observed
+      return WheelCommand(session, int(wire.sequence), observed, drive, source, key, action)
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
       return None

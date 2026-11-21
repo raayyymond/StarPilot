@@ -126,6 +126,12 @@ def track_matches_vision(
   return dist_sane and vel_sane and lat_sane
 
 
+def vision_braking_priority(track: Track, lead: capnp._DynamicStructReader) -> bool:
+  if not lead.a or not all(math.isfinite(value) for value in (lead.a[0], lead.v[0])):
+    return True
+  return lead.a[0] < min(track.aLeadK, 0.0) or track.vLead - lead.v[0] > 10.0
+
+
 def match_vision_to_track(
   v_ego: float,
   lead: capnp._DynamicStructReader,
@@ -140,6 +146,11 @@ def match_vision_to_track(
   preferred_track = tracks.get(preferred_track_id)
   if preferred_track is not None and preferred_track.cnt >= 3:
     if track_matches_vision(preferred_track, lead, v_ego, dist_scale=0.4, dist_floor=8.0, vel_limit=13.0, y_std_scale=2.0, y_floor=1.5):
+      return preferred_track
+    # Keep a moving radar lead through a brief farther vision outlier; the policy bounds this grace.
+    if (preferred_track.vLead > 3.0 and not vision_braking_priority(preferred_track, lead) and
+        lead.x[0] - RADAR_TO_CAMERA > preferred_track.dRel and track_matches_vision(
+                preferred_track, lead, v_ego, dist_scale=1.0, dist_floor=8.0, vel_limit=13.0, y_std_scale=3.0, y_floor=1.5)):
       return preferred_track
   return None
 
@@ -298,7 +309,8 @@ class BoschALeadPolicy:
     gross_limit = max(HONDA_BOSCH_A_GROSS_DISTANCE_M, HONDA_BOSCH_A_GROSS_DISTANCE_SCALE * abs(vision_range))
     if strict_match:
       self.preferred_gross_distance_stale_counts[lead_index] = 0
-    elif distance_mismatch > gross_limit:
+    elif ((not relaxed_match or preferred_track.vLead <= 3.0 or vision_braking_priority(preferred_track, lead)) and
+          (distance_mismatch > gross_limit or (not relaxed_match and vision_range > preferred_track.dRel))):
       self.preferred_gross_distance_stale_counts[lead_index] += 1
     else:
       self.preferred_gross_distance_stale_counts[lead_index] = 0
@@ -385,6 +397,11 @@ class BoschALeadPolicy:
         self.tracks[identifier] = Track(identifier, v_lead, radar.kalman_params)
       measured = bool(point.deprecated.measured and fresh)
       self.tracks[identifier].update(point.dRel, point.yRel, point.vRel, v_lead, measured, measured)
+      if not point.deprecated.measured:
+        # A range-based coast can close faster than its frozen velocity filter.
+        track = self.tracks[identifier]
+        track.vLeadK = min(track.vLeadK, track.vLead)
+
 
   def leads(self, sm, radar, model_v_ego):
     leads = sm['modelV2'].leadsV3

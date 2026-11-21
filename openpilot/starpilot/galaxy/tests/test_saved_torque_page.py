@@ -32,20 +32,31 @@ class TestSavedTorquePage(unittest.TestCase):
   def page(self, name='torque'):
     return self.gateway.page(name, 'session', b'generation')
 
-  def test_retained_tune_restores_full_flat_page_and_can_save(self):
+  def test_retained_tune_restores_normal_and_developer_pages_and_can_save(self):
     page = self.page()
     rows = {row['label']: row for row in page['rows']}
-    self.assertEqual(set(rows), {'Turn Signal Guidance', 'Steering Controller', 'Turn Assist', 'Prep My Vehicle for Tuning',
-                                'Use StarPilot Auto Learn', 'Lat Accel', 'Lateral acceleration — Reset to Default',
-                                'Friction', 'Friction — Reset to Default'})
+    self.assertEqual(set(rows), {'Automatic Turn Initiation', 'Steering Controller', 'Turn Assist', 'Prep My Vehicle for Tuning',
+                                'Use StarPilot Auto Learn', 'Highway Smoothing'})
+    developer = self.page('torque/developer')
+    advanced = {row['label']: row for row in developer['rows']}
+    self.assertEqual(set(advanced), {'Lat Accel', 'Friction', 'Actuator delay'})
+    for label in ('Lat Accel', 'Friction'):
+      self.assertTrue(advanced[label]['resetAvailable'], label)
+      self.assertEqual(advanced[label]['defaultValue'], 'Vehicle/learned')
+      self.assertNotIn(label, rows)
+    self.assertTrue(advanced['Actuator delay']['available'])
     aol_rows = {row['label']: row for row in self.page('aol')['rows']}
     for label in ('Pause steering below', 'Steering resume delay', 'Pause only while signaling'):
       self.assertNotIn(label, rows)
       self.assertTrue(aol_rows[label]['available'], label)
     self.assertIn('Saved vehicle settings', page['subtitle'])
+    self.assertIn('Saved vehicle settings', developer['subtitle'])
     self.assertFalse(any(row['page'] for row in page['rows']))
-    for label in ('Steering Controller', 'Turn Assist', 'Prep My Vehicle for Tuning', 'Lat Accel', 'Friction'):
+    self.assertFalse(any(row['page'] for row in developer['rows']))
+    for label in ('Steering Controller', 'Turn Assist', 'Prep My Vehicle for Tuning'):
       self.assertTrue(rows[label]['available'], label)
+    for label in ('Lat Accel', 'Friction'):
+      self.assertTrue(advanced[label]['available'], label)
     learning = rows['Use StarPilot Auto Learn']
     self.assertTrue(learning['available'])
     self.assertEqual(learning['value'], 'Off')
@@ -63,7 +74,7 @@ class TestSavedTorquePage(unittest.TestCase):
     self.assertEqual(preference.source, 'scope')
     self.assertTrue(self.params.get_bool('ForceAutoTuneOff'))
     self.assertTrue(learning_allowed(self.params, cp), 'Scoped On allows native refinement with either selected controller')
-    page = self.page()
+    page = self.page('torque/developer')
 
     index = next(i for i, row in enumerate(page['rows']) if row['label'] == 'Friction')
     intent = self.gateway.preview(page['view'], index, 1, 'session', b'generation')
@@ -76,14 +87,14 @@ class TestSavedTorquePage(unittest.TestCase):
     self.assertTrue(self.gateway._context('torque').editing_saved_vehicle)
     self.assertEqual(self.context.sample().cp.carFingerprint, 'HYUNDAI_IONIQ_6')
     self.assertEqual(self.gateway._context('slc').cp.carFingerprint, 'HYUNDAI_IONIQ_6')
-    slc = next(row for row in self.page('slc')['rows'] if row['label'] == 'Automatic adoption')
+    slc = next(row for row in self.page('slc')['rows'] if row['label'] == 'Confirm limits')
     self.assertTrue(slc['available'])
     self.offroad.return_value = False
     with patch.object(self.context, 'configuration_allowed', return_value=True):
       self.assertIsNone(self.gateway._context('torque').cp)
 
   def test_pending_edit_is_revoked_when_offroad_context_ends(self):
-    page = self.page()
+    page = self.page('torque/developer')
     index = next(i for i, row in enumerate(page['rows']) if row['label'] == 'Friction')
     intent = self.gateway.preview(page['view'], index, 1, 'session', b'generation')
     self.offroad.return_value = False
@@ -92,11 +103,20 @@ class TestSavedTorquePage(unittest.TestCase):
     self.assertEqual(self.params.get('TorqueOverrideDocument')['vehicles']['HYUNDAI_IONIQ_6']['friction']['mode'], 'source')
 
 
-  def test_turn_signal_guidance_is_on_and_saves_off_through_galaxy(self):
-    from openpilot.starpilot.lateral.lane_change_preferences import read_saved
+  def test_automatic_turn_initiation_is_off_and_saves_on_through_galaxy(self):
+    from openpilot.starpilot.lateral.lane_change_preferences import KEY as LANE_KEY, LaneChangePolicy, read_saved, to_value
+    from openpilot.starpilot.lateral.turn_initiation_preferences import KEY as TURN_KEY
+    self.params.put(LANE_KEY, to_value(LaneChangePolicy(auto_lane_change=True, one_per_signal=False)), block=True)
+    before = read_saved(self.params)
     page = self.page()
-    index = next(i for i, row in enumerate(page['rows']) if row['label'] == 'Turn Signal Guidance')
-    self.assertEqual(page['rows'][index]['value'], 'On')
+    index = next(i for i, row in enumerate(page['rows']) if row['label'] == 'Automatic Turn Initiation')
+    self.assertEqual(page['rows'][index]['value'], 'Off')
+    preview = self.gateway.preview(page['view'], index, 0, 'session', b'generation', value='On')
+    self.assertTrue(self.gateway.confirm(preview['intent'], 'session', b'generation'))
+    self.assertTrue(self.params.get_bool(TURN_KEY))
+    self.assertEqual(read_saved(self.params), before)
+    page = self.page()
     preview = self.gateway.preview(page['view'], index, 0, 'session', b'generation', value='Off')
     self.assertTrue(self.gateway.confirm(preview['intent'], 'session', b'generation'))
-    self.assertFalse(read_saved(self.params).policy.turn_signal_guidance)
+    self.assertFalse(self.params.get_bool(TURN_KEY))
+    self.assertEqual(read_saved(self.params), before)

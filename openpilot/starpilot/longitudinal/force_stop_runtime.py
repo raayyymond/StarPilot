@@ -1,6 +1,7 @@
 """Current-drive Force Stop owner with bounded preference reads and live scene inputs."""
 
 from dataclasses import replace
+import math
 
 from openpilot.starpilot.conditional_mode.curve import frozen_raw_curve
 from openpilot.starpilot.conditional_mode.preferences import CEMOptions, decode_preferences, PreferenceError
@@ -9,11 +10,13 @@ from openpilot.starpilot.conditional_mode.stop import (
   FROZEN_RAW_STOP_DISTANCE_M, STOP_MODEL_RELEASE_MARGIN_M, StopFrame as LightFrame, StopLead, StopLightDetector,
 )
 from openpilot.starpilot.lead_tracking import LeadDetector
+from openpilot.starpilot.longitudinal.enhanced_stop_hold import selected as always_hold_selected
 from openpilot.starpilot.longitudinal.force_stop import ForceStop, StopFrame, StopPlan, vehicle_tune
 from openpilot.starpilot.model_geometry import road_curvature, standstill_clear_horizon, standstill_release_speed
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.longitudinal.stop_resume import StopResume
-from openpilot.starpilot.speed_limits.vision.stop_observation import CONTROL_STOP_MAX_AGE_NS, StopConfirmation, read_stop_evidence
+from openpilot.starpilot.longitudinal.force_stop_braking import eligible as distance_braking_eligible
+from openpilot.starpilot.speed_limits.vision.stop_observation import CONTROL_STOP_MAX_AGE_NS, StopConfirmation
 
 
 KEY = 'ForceStops'
@@ -51,6 +54,7 @@ class ForceStopRuntime:
     self.policy = ForceStop()
     self.resume = StopResume()
     self.vision_stop = StopConfirmation()
+    self.vision_ranged_ns = 0
     self.light = StopLightDetector()
     self.lead = LeadDetector()
     self.plan = StopPlan()
@@ -59,6 +63,7 @@ class ForceStopRuntime:
     self.sources = None
     self.next_refresh_ns = 0
     self.enabled = False
+    self.always_hold = False
     self.takeoff_preferences_valid = False
     self.offset = 0
     self.options = CEMOptions()
@@ -66,6 +71,7 @@ class ForceStopRuntime:
 
   def reset(self):
     self.vision_stop.reset()
+    self.vision_ranged_ns = 0
     self.resume.reset()
     self.policy.reset()
     self.light.reset()
@@ -107,6 +113,7 @@ class ForceStopRuntime:
       if identity != self.identity or drive_id != self.drive_id:
         self.reset()
         self.identity, self.drive_id = identity, drive_id
+        self.always_hold = always_hold_selected(self.params)
       offset = now_boot_ns - now_ns
       if self.clock_offset is None or abs(offset - self.clock_offset) > 1_000_000:
         self.clock_offset = offset
@@ -182,17 +189,30 @@ class ForceStopRuntime:
         self.policy.reset()
         self.plan = StopPlan()
         return self.plan
-      vision_sign = self.vision_stop.observe(
-        read_stop_evidence(sm, now_ns=now_ns, now_boot_ns=now_boot_ns, drive_id=drive_id), now_ns=now_ns)
+      vision_sign = self.vision_stop.observe_message(
+        sm, now_ns=now_ns, now_boot_ns=now_boot_ns, drive_id=drive_id)
+      vision_fresh = bool(vision_sign and 0 <= now_ns - vision_sign <= CONTROL_STOP_MAX_AGE_NS)
+      vision_distance = None
+      if vision_fresh and self.vision_stop.distance_m is not None:
+        self.vision_ranged_ns = vision_sign
+        vision_distance = self.vision_stop.distance_m - float(car.vEgo) * (stamp - vision_sign) / 1e9
+      dashboard_sign = dashboard_stop_sign(sm, now_ns=now_ns, drive_id=drive_id)
+      # A stationary forecast tail alone does not identify a fixed stop line.
       frame = StopFrame(stamp, float(car.vEgo), horizon, light_context, horizon is not None and horizon < 50,
                         bool(model.action.shouldStop), bool(car.standstill), True, bool(car.gasPressed),
                         tracked is not None and tracked.tracked is True, bool(lead.present), float(lead.dRel), float(lead.vLead),
                         raw_curve[1] if raw_curve is not None else False, curvature[0] if curvature is not None else None,
                         bool(car.leftBlinker or car.rightBlinker), float(car.steeringAngleDeg), resume_requested=resume_requested,
-                        perception_available=perception_available,
-                        sign=dashboard_stop_sign(sm, now_ns=now_ns, drive_id=drive_id) or
-                        bool(vision_sign and 0 <= now_ns - vision_sign <= CONTROL_STOP_MAX_AGE_NS))
-      self.plan = self.policy.step(frame, vehicle_tune(str(cp.carFingerprint)), self.offset)
+                        perception_available=perception_available, sign=dashboard_sign or vision_fresh,
+                        dashboard_sign=dashboard_sign, vision_distance_m=vision_distance, always_hold=self.always_hold,
+                        acceleration_mps2=float(car.aEgo), actuator_delay_s=float(cp.longitudinalActuatorDelay),
+                        vision_source_ns=int(vision_sign) if vision_fresh else 0,
+                        acceleration_ns=int(sm.logMonoTime['carState']), sample_ns=now_ns,
+                        moving_preview=bool(perception_available and not model.action.shouldStop and
+                                            len(model.velocity.x) == len(model.position.x) and
+                                            math.isfinite(model.velocity.x[-1])))
+      tune = replace(vehicle_tune(str(cp.carFingerprint)), distance_control=distance_braking_eligible(cp))
+      self.plan = self.policy.step(frame, tune, self.offset)
       if takeoff_enabled:
         self.plan = replace(self.plan, takeoff_light_observed=takeoff_observed, takeoff_light=takeoff_light)
       return self.plan

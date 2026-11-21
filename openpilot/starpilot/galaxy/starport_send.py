@@ -16,6 +16,7 @@ from openpilot.common.utils import atomic_write
 from openpilot.starpilot.system.starport import identity as identity_store
 
 MESSAGE_LIMIT = 60
+DISCORD_HANDLE = re.compile(r"[A-Za-z0-9_.]{2,32}(#[0-9]{4})?")
 WEBHOOK_OVERRIDE_PATH = identity_store.DATA_DIR / "webhook_url"
 THREAD_DIR = identity_store.DATA_DIR / "discord_threads"
 # Obfuscation only; device-local configuration overrides this built-in webhook.
@@ -35,6 +36,11 @@ class SendBusy(Exception):
   pass
 
 
+def official_install() -> bool:
+  from openpilot.starpilot.system.starport.bugsink_transport import device_metadata, is_official_repo
+  return is_official_repo(device_metadata().get("repo"))
+
+
 def webhook_url(override_path: Path = WEBHOOK_OVERRIDE_PATH) -> str:
   try:
     override = override_path.read_text().strip()
@@ -52,9 +58,21 @@ def clean_message(value) -> str:
   if not isinstance(value, str):
     raise SendRejected("The message must be text.")
   message = CONTROL.sub(" ", value).strip()
+  if not message:
+    raise SendRejected("Add a short note about what happened.")
   if len(message) > MESSAGE_LIMIT:
     raise SendRejected(f"Keep the message to {MESSAGE_LIMIT} characters.")
   return message
+
+
+def clean_discord(value) -> str:
+  """An optional Discord username for a follow-up, without the leading @; "" when none was given."""
+  if not isinstance(value, str):
+    raise SendRejected("The Discord username must be text.")
+  handle = value.strip().removeprefix("@")
+  if handle and not DISCORD_HANDLE.fullmatch(handle):
+    raise SendRejected("That doesn't look like a Discord username.")
+  return handle
 
 
 def _car_fingerprint() -> str:
@@ -145,7 +163,7 @@ def _save_thread_id(path: Path, key: str, thread_id: str) -> None:
 
 
 def send(data: bytes, name: str, note: str, summary: dict, url: str | None = None, post=None,
-         thread_dir: Path | None = None) -> str | None:
+         thread_dir: Path | None = None, discord: str = "") -> str | None:
   """Post the zip; return a cache warning after success, or raise SendRejected on an upload failure."""
   url = webhook_url() if url is None else url
   if not url:
@@ -161,8 +179,9 @@ def send(data: bytes, name: str, note: str, summary: dict, url: str | None = Non
            f"Head unit: {summary.get('head_unit') or 'unknown'}",
            f"Setup: {summary.get('setup') or 'unknown'}",
            f"Handshake: {summary.get('handshake') or 'unknown'}",
-           f"Branch {summary.get('branch', '?')} @ {str(summary.get('commit', '?'))[:10]}",
-           f"Note: {note.strip() or '(none)'}"]
+           f"Repo {summary.get('repo', '?')} · Branch {summary.get('branch', '?')} @ {str(summary.get('commit', '?'))[:10]}",
+           f"Note: {note.strip() or '(none)'}",
+           f"Follow-up: Discord `{discord}`" if discord else "Follow-up: not requested"]
   payload = {"content": "\n".join(lines)[:1900], "username": "StarPilot diagnostics", "allowed_mentions": {"parse": []}}
 
   parts = urlsplit(url)
@@ -229,23 +248,27 @@ class StarPortLogSender:
   """One send at a time, off the request thread; the page polls status()."""
 
   def __init__(self, bundle: Callable[..., tuple[str, bytes]], *, sender: Callable[..., str | None] = send,
-               summary: Callable[[], dict] = device_summary, url: Callable[[], str] = webhook_url):
-    self._bundle, self._sender, self._summary, self._url = bundle, sender, summary, url
+               summary: Callable[[], dict] = device_summary, url: Callable[[], str] = webhook_url,
+               official: Callable[[], bool] = official_install):
+    self._bundle, self._sender, self._summary, self._url, self._official = bundle, sender, summary, url, official
     self._lock = threading.Lock()
     self._thread: threading.Thread | None = None
     self._state = {"state": "idle", "message": ""}
+    self._fork: bool | None = None
 
   def status(self) -> dict:
     with self._lock:
-      return {**self._state, "available": bool(self._url()), "messageLimit": MESSAGE_LIMIT}
+      if self._fork is None:
+        self._fork = not self._official()
+      return {**self._state, "available": bool(self._url()), "fork": self._fork, "messageLimit": MESSAGE_LIMIT}
 
-  def start(self, message) -> dict:
-    note = clean_message(message)
+  def start(self, message, discord="") -> dict:
+    note, handle = clean_message(message), clean_discord(discord)
     with self._lock:
       if self._thread is not None and self._thread.is_alive():
         raise SendBusy("StarPort logs are already being sent.")
       self._state = {"state": "sending", "message": "Collecting logs"}
-      self._thread = threading.Thread(target=self._run, args=(note,), name="starport_log_send", daemon=True)
+      self._thread = threading.Thread(target=self._run, args=(note, handle), name="starport_log_send", daemon=True)
       self._thread.start()
     return self.status()
 
@@ -253,7 +276,7 @@ class StarPortLogSender:
     with self._lock:
       self._state.update(values)
 
-  def _run(self, note: str) -> None:
+  def _run(self, note: str, discord: str = "") -> None:
     try:
       summary = self._summary()
       name, data = self._bundle()
@@ -263,7 +286,7 @@ class StarPortLogSender:
         name, data = self._bundle(system_snapshot=False)
         left_out = " The device snapshot was left out to fit Discord's 10 MB limit."
       self._set(message="Sending logs")
-      warning = self._sender(data, name, note, summary)
+      warning = self._sender(data, name, note, summary, discord=discord)
       self._set(state="sent", message=f"Logs sent.{left_out} {warning or 'Thanks!'}".strip(), sentAt=int(time.time()))  # noqa: TID251 shown as a wall-clock time
     except SendRejected as error:
       self._set(state="failed", message=str(error)[:400])

@@ -34,11 +34,12 @@ SOCKET_PATH = starpilot_storage_root() / 'maps/operations.sock'
 MAX_REQUEST = 4096
 MAX_STATUS = 4096
 MAX_CATALOG = 65536
+MAX_REGION_GROUPS = 1024
 MAX_TRANSFER_BYTES = 8 * 1024**3
 MAX_NEW_DISK_BYTES = 16 * 1024**3
 OPERATION_DEADLINE_S = 30 * 60
 GENERATION = re.compile(r'[0-9a-f]{64}\Z')
-TOKEN = re.compile(r'(?:nation|us_state)\.[A-Za-z0-9_-]{1,64}\Z')
+TOKEN = re.compile(r'(?:nation|us_state|ca_province)\.[A-Za-z0-9_-]{1,64}\Z')
 ACTIVE = frozenset(('transferring', 'validating', 'selecting'))
 STATES = frozenset(('idle', 'transferring', 'validating', 'selecting', 'completed',
                     'canceled', 'failed', 'interrupted', 'unavailable'))
@@ -282,7 +283,7 @@ def _catalog() -> list[dict]:
     if len(completed.stdout) > MAX_CATALOG or len(completed.stderr) > MAX_STATUS:
       raise ValueError('catalog output exceeds bound')
     rows = json.loads(completed.stdout, object_pairs_hook=_unique_object)
-    if type(rows) is not list or len(rows) != 229:
+    if type(rows) is not list or len(rows) not in (229, 242):
       raise ValueError('catalog shape invalid')
     seen = set()
     for row in rows:
@@ -292,7 +293,7 @@ def _catalog() -> list[dict]:
           any(type(value) not in (int, float) or not math.isfinite(value) for value in row['bounds']) or
           type(row.get('groups')) is not int or not 0 <= row['groups'] <= 65536 or
           type(row.get('available')) is not bool or
-          (row['available'] and not 1 <= row['groups'] <= 64)):
+          (row['available'] and not 1 <= row['groups'] <= MAX_REGION_GROUPS)):
         raise ValueError('catalog row invalid')
       seen.add(row['token'])
     return rows
@@ -541,7 +542,7 @@ class MapSnapshotOperationOwner:
         self._rows = self._catalog_loader()
         self._rows_identity = identity
       rows = self._rows
-    return {'regions': rows, 'maxGroups': 64, 'maxTransferBytes': MAX_TRANSFER_BYTES,
+    return {'regions': rows, 'maxGroups': MAX_REGION_GROUPS, 'maxTransferBytes': MAX_TRANSFER_BYTES,
             'maxNewDiskBytes': MAX_NEW_DISK_BYTES, 'selectedGeneration': self.snapshot()['selectedGeneration']}
 
   def start(self, request: dict) -> dict:
