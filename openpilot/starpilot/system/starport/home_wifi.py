@@ -8,6 +8,8 @@ that profile out of autoconnect until someone activates it by hand. The comma th
 The keeper does what that tap does. While wlan0 sits disconnected with autoconnect on, it asks for a scan now and
 then, and when a saved network is in the results it activates the most recently used one. A session that pauses
 autoconnect, or any connection attempt under way, keeps it out.
+
+It holds one D-Bus connection for the life of the daemon and replaces it only after an error (see close_router).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from collections.abc import Callable
 
 from openpilot.starpilot.system.starport.network import (
   CONNECTION_ID, DEVICE_STATE_ACTIVATED, DEVICE_STATE_DISCONNECTED, NM_AP_IFACE, NM_DEVICE_IFACE, NM_IFACE, NM_PATH,
-  NM_SETTINGS_CONNECTION_IFACE, NM_WIRELESS_IFACE, NetworkError, NetworkLease, _boottime,
+  NM_SETTINGS_CONNECTION_IFACE, NM_WIRELESS_IFACE, NetworkError, NetworkLease, _boottime, close_router,
 )
 
 NM_SETTINGS_PATH = "/org/freedesktop/NetworkManager/Settings"
@@ -63,6 +65,7 @@ class HomeWifiKeeper:
     self.interface = interface
     self._lease = lease
     self._boottime = boottime
+    self._held: NetworkLease | None = None  # one connection, kept between checks
     self._check_at = 0.0
     self._idle_since: float | None = None
     self._attempt_at = 0.0
@@ -76,18 +79,24 @@ class HomeWifiKeeper:
     if now < self._check_at:
       return
     self._check_at = now + CHECK_S
-    lease = None
     try:
-      lease = self._lease(self.log, self.interface)
-      self._step(lease, now)
+      if self._held is None:
+        self._held = self._lease(self.log, self.interface)
+      self._step(self._held, now)
       self._last_error = ""
     except (NetworkError, OSError) as error:
+      self.close()  # the next check starts on a new connection
       if str(error) != self._last_error:  # a comma without NetworkManager would otherwise log this every check
         self._last_error = str(error)
         self.log("home_wifi_check_failed", error=str(error))
-    finally:
-      if lease is not None and lease.router is not None:
-        lease.router.close()
+
+  def close(self) -> None:
+    held, self._held = self._held, None
+    if held is not None and held.router is not None:
+      try:
+        close_router(held.router)
+      except OSError:
+        pass
 
   def _step(self, lease: NetworkLease, now: float) -> None:
     device = next((path for path, name in lease._wifi_devices() if name == self.interface), "")

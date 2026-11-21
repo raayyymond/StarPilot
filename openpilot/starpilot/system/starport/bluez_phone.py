@@ -30,6 +30,7 @@ from jeepney.low_level import HeaderFields, MessageType
 from jeepney.wrappers import Properties
 
 from openpilot.starpilot.system.starport import hfp
+from openpilot.starpilot.system.starport.network import close_router
 from openpilot.starpilot.system.starport.sdp import AA_WIRELESS_UUID
 
 BLUEZ = "org.bluez"
@@ -230,7 +231,7 @@ class BluezPhone:
     except Exception:
       pass
     self._filter.__exit__(None, None, None)
-    self.router.close()
+    close_router(self.router)
     self._thread.join(timeout=1.0)
 
   def _register_hfp(self) -> None:

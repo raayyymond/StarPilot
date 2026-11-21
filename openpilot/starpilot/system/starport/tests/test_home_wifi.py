@@ -19,6 +19,8 @@ class FakeLease:
     self.world, self.router = world, None
 
   def _wifi_devices(self):
+    if self.world.failing:
+      raise network.NetworkError("NetworkManager did not answer")
     return [(DEVICE, "wlan0")]
 
   def _get(self, path, interface, name):
@@ -53,6 +55,7 @@ class World:
     self.clock = 1000.0
     self.state, self.autoconnect = network.DEVICE_STATE_DISCONNECTED, True
     self.scanned_at = None
+    self.failing = False
     self.in_range = list(in_range)
     self.access_points = {}
     self.profiles = {"/settings/1": profile("RayNetOutside", 50), "/settings/2": profile("Fantasia-5G", 40)}
@@ -134,6 +137,40 @@ def test_a_dbus_failure_is_logged_once_and_checked_again():
   world.keeper._lease = lambda log, interface: FakeLease(world)
   world.run(120)
   assert world.activated == ["/settings/1"]
+
+
+def test_holds_one_connection_and_replaces_it_only_after_an_error():
+  world, opened = World(), []
+
+  def lease(log, interface):
+    opened.append(1)
+    return FakeLease(world)
+  world.keeper._lease = lease
+  world.run(3600)
+  assert len(opened) == 1  # 2026-11-20: one per check ran the daemon out of file descriptors in 4.2 h
+  world.failing = True
+  world.run(60)
+  world.failing = False
+  world.run(60)
+  assert len(opened) >= 2 and world.events.count("home_wifi_check_failed") == 1
+
+
+def test_closing_a_router_leaves_no_descriptor_behind():
+  import os
+  import socket
+  from jeepney.io.threading import DBusConnection, DBusRouter
+
+  def cycle():
+    ours, theirs = socket.socketpair()
+    router = DBusRouter(DBusConnection(ours))
+    network.close_router(router)
+    theirs.close()
+
+  cycle()  # anything allocated once is counted in the baseline
+  before = len(os.listdir("/proc/self/fd"))
+  for _ in range(50):
+    cycle()
+  assert len(os.listdir("/proc/self/fd")) == before
 
 
 def test_supervisor_keeps_home_wifi_only_between_sessions():

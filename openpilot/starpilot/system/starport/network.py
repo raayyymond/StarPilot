@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import socket
+import stat
 import threading
 import time
 import uuid
@@ -91,6 +93,31 @@ class NetworkTimeout(NetworkError):
   """NetworkManager did not answer a D-Bus request in time; the request may still have gone through."""
 
 
+def close_router(router) -> None:
+  """Close a D-Bus router together with its connection and the connection's stop pipe.
+
+  jeepney 0.9.0: DBusRouter.close() leaves the connection open, and DBusConnection.close() never closes the two
+  descriptors of its stop pipe. 2026-11-20: a check that opened a connection every 30 s left 1000 pipe descriptors
+  behind in 4.2 h, the daemon reached its limit of 1024 open files, and every Bluetooth call failed from then on.
+  """
+  conn = getattr(router, "conn", None)
+  try:
+    router.close()
+  finally:
+    try:
+      if conn is not None:
+        conn.close()
+    finally:
+      for name in ("_stop_r", "_stop_w") if conn is not None else ():
+        fd = getattr(conn, name, -1)
+        setattr(conn, name, -1)
+        try:
+          if fd >= 0 and stat.S_ISFIFO(os.fstat(fd).st_mode):
+            os.close(fd)
+        except OSError:
+          pass  # a later jeepney closed it already
+
+
 def _boottime() -> float:
   """NetworkManager's AccessPoint.LastSeen clock."""
   return time.clock_gettime(time.CLOCK_BOOTTIME) if hasattr(time, "CLOCK_BOOTTIME") else time.monotonic()
@@ -123,7 +150,7 @@ def recover_autoconnect(log: Callable[..., None], marker: Path = AUTOCONNECT_MAR
       return False
     finally:
       if lease.router is not None:
-        lease.router.close()
+        close_router(lease.router)
   marker.unlink(missing_ok=True)
   return True
 
@@ -837,6 +864,6 @@ class NetworkLease:
         self.previous_connection = ""
       try:
         if self.router is not None:
-          self.router.close()
+          close_router(self.router)
       finally:
         self.router = None
