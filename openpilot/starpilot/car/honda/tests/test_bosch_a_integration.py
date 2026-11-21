@@ -106,7 +106,7 @@ def test_clarity_retains_nidec_track_decoding_and_no_bosch_metadata():
 def test_honda_configuration_decoder_routing_stays_restricted(identity):
   cp = CarInterface.get_params(identity, gen_empty_fingerprint(), [], False, False, False)
   decoder = RadarInterface(cp)
-  if identity in (CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G):
+  if identity in (CAR.HONDA_ACCORD, CAR.HONDA_CIVIC_BOSCH, CAR.HONDA_CRV_5G):  # the fork verifies the Accord, range-only
     assert decoder.bosch_a is not None
   else:
     assert decoder.bosch_a is None
