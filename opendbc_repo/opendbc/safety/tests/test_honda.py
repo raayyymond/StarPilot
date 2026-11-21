@@ -433,10 +433,35 @@ class TestHondaBoschAltBrakeSafetyBase(TestHondaBoschSafetyBase):
     self.assertTrue(self.safety.get_controls_allowed())
 
 
+def _assert_xcp_carveout(case, bus: int = 1) -> None:
+  for cmd in (0xFF, 0xFE, 0xFD, 0xF8, 0xF7):
+    pkt = libsafety_py.make_CANPacket(0x1EC00079, bus, bytes([cmd]) + bytes(7))
+    case.assertTrue(case._tx(pkt), msg=f"cmd={cmd:#x}")
+  for sz in (1, 2, 6, 7):
+    pkt = libsafety_py.make_CANPacket(0x1EC00079, bus, bytes([0xF4, sz, 0, 0]) + b"\x40\x03\x71\xB4")
+    case.assertTrue(case._tx(pkt), msg=f"f4 sz={sz}")
+
+  # Block non-read/calibration XCP commands, bad bus, short DLC, out-of-range F4 size, and nonzero data[2..3]
+  for bad_cmd in (0xF5, 0xF0, 0xD5, 0x00):
+    case.assertFalse(case._tx(libsafety_py.make_CANPacket(0x1EC00079, bus, bytes([bad_cmd]) + bytes(7))))
+  case.assertFalse(case._tx(libsafety_py.make_CANPacket(0x1EC00079, bus, b"\xFF\x00" + bytes(5))))
+  case.assertFalse(case._tx(libsafety_py.make_CANPacket(0x1EC00079, 0, b"\xFF\x00" + bytes(6))))
+  for bad_pkt in (
+    b"\xF4\x00\x00\x00\x40\x03\x71\xB4",
+    b"\xF4\x08\x00\x00\x40\x03\x71\xB4",
+    b"\xF4\x06\x01\x00\x40\x03\x71\xB4",
+    b"\xF4\x06\x00\x01\x40\x03\x71\xB4",
+  ):
+    case.assertFalse(case._tx(libsafety_py.make_CANPacket(0x1EC00079, bus, bad_pkt)))
+
+
 class TestHondaBoschSafety(HondaPcmEnableBase, TestHondaBoschSafetyBase):
   """
     Covers the Honda Bosch safety mode with stock longitudinal
   """
+
+  def test_xcp_diagnostics(self):
+    _assert_xcp_carveout(self, self.PT_BUS)
 
 
 class TestHondaBoschAltBrakeSafety(HondaPcmEnableBase, TestHondaBoschAltBrakeSafetyBase):
@@ -480,6 +505,8 @@ class TestHondaBoschLongSafety(HondaButtonEnableBase, TestHondaBoschSafetyBase):
 
     not_tester_present = libsafety_py.make_CANPacket(0x18DAB0F1, self.PT_BUS, b"\x03\xAA\xAA\x00\x00\x00\x00\x00")
     self.assertFalse(self._tx(not_tester_present))
+
+    _assert_xcp_carveout(self, self.PT_BUS)
 
   def test_gas_safety_check(self):
     for controls_allowed in [True, False]:

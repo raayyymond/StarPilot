@@ -342,6 +342,18 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // Read-only XCP diagnostic carve-out on radar bus 1 (CONNECT, DISCONNECT, GET_STATUS, GET_SEED, UNLOCK, SHORT_UPLOAD)
+  if (msg->addr == 0x1EC00079U) {
+    uint8_t cmd = msg->data[0];
+    bool allowed_cmd = (cmd == 0xFFU) || (cmd == 0xFEU) || (cmd == 0xFDU) || (cmd == 0xF8U) || (cmd == 0xF7U) || (cmd == 0xF4U);
+    if (!allowed_cmd) {
+      tx = false;
+    }
+    if ((cmd == 0xF4U) && ((msg->data[1] < 1U) || (msg->data[1] > 7U) || (msg->data[2] != 0U) || (msg->data[3] != 0U))) {
+      tx = false;
+    }
+  }
+
   if (msg->addr == 0x200U) {
     tx = tx && honda_interceptor_tx(msg);
   }
@@ -441,6 +453,7 @@ static safety_config honda_bosch_init(uint16_t param) {
     {0x33D, 0, 8, .check_relay = true},
     {0x33DA, 0, 5, .check_relay = true},
     {0x33DB, 0, 8, .check_relay = true},
+    {0x1EC00079, 1, 8, .check_relay = false},
   };
 
   // Bosch w/ gas and brakes
@@ -456,6 +469,7 @@ static safety_config honda_bosch_init(uint16_t param) {
     {0x33DB, 1, 8, .check_relay = true},
     {0x39F, 1, 8, .check_relay = false},
     {0x18DAB0F1, 1, 8, .check_relay = false},
+    {0x1EC00079, 1, 8, .check_relay = false},
   };
 
   static const CanMsg HONDA_MVL_STOCK_TX_MSGS[] = {
