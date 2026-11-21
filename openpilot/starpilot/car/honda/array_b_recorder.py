@@ -1,11 +1,14 @@
 """Fork gate around the verbatim Bosch-A Array B logger (xcp_radar_logger.py, from bob-unify-car).
 
-The logger reads the radar's internal track list at 20 Hz and only records it (rlog event xcp_array_b_20hz and the
-cyan overlay). Nothing here reaches control. This module decides whether it runs at all, and with which layout:
+The logger reads the radar's internal track list at 20 Hz and only records it (rlog event xcp_array_b_20hz).
+Nothing here reaches control. This module decides whether it runs at all, and with which layout:
 
   - only on a verified Bosch-A car (the logger itself would start on every Bosch Honda with a radar);
-  - only for a radar firmware whose Array B address is known. The address moves between builds (A150 0x400371A4,
+  - only for a radar firmware with an Array B address to read. The address moves between builds (A150 0x400371A4,
     A160 0x400371C4), so a firmware with no entry is logged and not polled;
+  - a firmware whose address is not known yet lists the candidates, and the recorder takes them in turn, one slice
+    each, with an array_b_recorder_layout event at every change. The slice whose targets line up with the CAN
+    tracks names the address; it is then pinned here as a single entry;
   - the 1 Hz internal-fusion probe only on the firmware its addresses were read from;
   - it stops for the rest of the drive after repeated lost sessions, or when the radar never answers.
 """
@@ -16,13 +19,18 @@ from openpilot.common.swaglog import cloudlog
 RADAR_ADDRESS = 0x18DAB0F1
 RECORD0_OFFSET = 0x10  # first record sits 16 bytes after the array base
 
-# radar firmware -> Array B base. A150: live on the Civic (Peter). A160: static, from the Civic image.
-ARRAY_B_BASE_BY_FIRMWARE: dict[bytes, int] = {
-  b"36802-TBA-A150": 0x400371A4,
-  b"36802-TBA-A160": 0x400371C4,
+A150_BASE = 0x400371A4  # live on the Civic (Peter)
+A160_BASE = 0x400371C4  # static, from the Civic A160 image
+
+# radar firmware -> Array B base(s). More than one: not known yet, recorded in turn.
+ARRAY_B_BASES_BY_FIRMWARE: dict[bytes, tuple[int, ...]] = {
+  b"36802-TBA-A150": (A150_BASE,),
+  b"36802-TBA-A160": (A160_BASE,),
+  b"36802-TVA-A170": (A160_BASE, A150_BASE),  # the operator's Accord; neither is confirmed for this build
 }
 INTERNAL_FUSION_PROBE_FIRMWARE = frozenset({b"36802-TBA-A150"})
 
+SLICE_NS = 120_000_000_000              # time on one candidate address before the next
 MAX_SESSION_LOSSES = 5                  # sessions that reached READY and were dropped
 CONNECT_DEADLINE_NS = 30_000_000_000    # armed this long without one READY session
 
@@ -41,18 +49,38 @@ def supported(CP) -> bool:
 
 
 class ArrayBRecorder:
-  """The logger's card-facing surface, plus the give-up rule."""
+  """The logger's card-facing surface, plus the candidate rotation and the give-up rule."""
 
-  def __init__(self, logger):
-    self.logger = logger
+  def __init__(self, make_logger, bases: tuple[int, ...]):
+    self.make_logger = make_logger   # base -> a started logger
+    self.bases = bases
+    self.index = 0
+    self.logger = make_logger(bases[0])
+    self.slice_start_ns = 0
     self.armed_ns = 0
     self.was_ready = False
     self.ever_ready = False
     self.session_losses = 0
     self.stopped = False
 
+  def _stop(self, reason: str) -> None:
+    self.stopped = True
+    self.logger.enabled = False
+    self.logger.close()
+    cloudlog.event("array_b_recorder_stopped", reason=reason, session_losses=self.session_losses,
+                   ever_ready=self.ever_ready)
+
+  def _next_layout(self, now_ns: int) -> None:
+    self.logger.enabled = False
+    self.logger.close()
+    self.index = (self.index + 1) % len(self.bases)
+    self.logger = self.make_logger(self.bases[self.index])
+    self.slice_start_ns = int(now_ns)
+    self.was_ready = False
+    cloudlog.event("array_b_recorder_layout", base=self.bases[self.index], mono_ns=int(now_ns))
+
   def _watch(self, now_ns: int) -> None:
-    if self.stopped or not self.logger.enabled:
+    if self.stopped:
       return
     ready = self.logger.state == "READY"
     if ready:
@@ -61,13 +89,20 @@ class ArrayBRecorder:
       self.session_losses += 1
     self.was_ready = ready
     never_answered = self.armed_ns and not self.ever_ready and now_ns - self.armed_ns > CONNECT_DEADLINE_NS
-    if self.session_losses >= MAX_SESSION_LOSSES or never_answered:
-      self.stopped = True
-      self.logger.enabled = False
-      self.logger.close()
-      cloudlog.event("array_b_recorder_stopped", session_losses=self.session_losses, ever_ready=self.ever_ready)
+    if self.session_losses >= MAX_SESSION_LOSSES:
+      self._stop("lost_sessions")
+    elif never_answered:
+      self._stop("no_answer")
+    elif len(self.bases) > 1 and self.slice_start_ns and now_ns - self.slice_start_ns > SLICE_NS:
+      try:
+        self._next_layout(now_ns)
+      except Exception:
+        cloudlog.exception("array_b_recorder: layout change failed")
+        self.stopped = True
 
   def observe_can(self, can_list, now_ns: int, v_ego: float = 0.0) -> None:
+    if self.stopped:
+      return
     self.logger.observe_can(can_list, now_ns, v_ego=v_ego)
     self._watch(now_ns)
 
@@ -75,11 +110,12 @@ class ArrayBRecorder:
     if self.stopped:
       return []
     if not self.armed_ns:
-      self.armed_ns = int(now_ns)
+      self.armed_ns = self.slice_start_ns = int(now_ns)
     return self.logger.next_can_sends(now_ns)
 
   def observe_radar_tracks(self, RD, now_ns: int) -> None:
-    self.logger.observe_radar_tracks(RD, now_ns)
+    if not self.stopped:
+      self.logger.observe_radar_tracks(RD, now_ns)
 
   def close(self) -> None:
     self.logger.close()
@@ -91,18 +127,26 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
     if not supported(CP):
       return None
     firmware = radar_firmware(CP)
-    base = ARRAY_B_BASE_BY_FIRMWARE.get(firmware) if firmware is not None else None
+    bases = ARRAY_B_BASES_BY_FIRMWARE.get(firmware, ()) if firmware is not None else ()
     cloudlog.event("array_b_recorder", firmware=None if firmware is None else firmware.decode(errors="replace"),
-                   base=base, polling=base is not None)
-    if base is None:
+                   bases=list(bases), polling=bool(bases))
+    if not bases:
       return None
 
     from openpilot.starpilot.car.honda import xcp_radar_logger
-    xcp_radar_logger.ARRAY_B_BASE = base
-    xcp_radar_logger.REC0 = base + RECORD0_OFFSET
-    logger = xcp_radar_logger.XcpRadarLogger(CP, send_lock=send_lock, pm=pm, params=params,
+
+    def make_logger(base: int):
+      xcp_radar_logger.ARRAY_B_BASE = base
+      xcp_radar_logger.REC0 = base + RECORD0_OFFSET
+      return xcp_radar_logger.XcpRadarLogger(CP, send_lock=send_lock, pm=pm, params=params,
                                              probe_wayb=firmware in INTERNAL_FUSION_PROBE_FIRMWARE)
-    return ArrayBRecorder(logger) if logger.enabled else None
+
+    recorder = ArrayBRecorder(make_logger, bases)
+    if not recorder.logger.enabled:
+      recorder.close()
+      return None
+    cloudlog.event("array_b_recorder_layout", base=bases[0], mono_ns=0)
+    return recorder
   except Exception:
     cloudlog.exception("array_b_recorder: not started")
     return None
