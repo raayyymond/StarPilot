@@ -26,6 +26,11 @@ XCP_DTO = 0x1EC00179
 
 ARRAY_B_BASE = 0x400371A4
 REC0 = 0x400371B4
+# SHORT_UPLOAD offsets within one 136-byte record. These are the Civic 16-byte-header
+# family defaults; array_b_recorder.py overrides them (with ARRAY_B_BASE/REC0) for a
+# firmware whose record layout differs, e.g. the Accord TVA-A170 8-byte-header family.
+KIN_OFFSET = 16  # X/Vx/Ax
+LAT_OFFSET = 22  # Y/raw_sentinel/Vy
 STRIDE = 136
 NUM_SLOTS = 40
 MAX_ACTIVE_TARGETS = 40
@@ -316,13 +321,13 @@ class XcpRadarLogger:
   def _enqueue_init_locked(self, slot: int, *, moving: bool = True) -> None:
     if moving or self.last_v_ego < 3.0:
       # Push moving targets to front so Y/Vy + age arrive before flags unlocks emission
-      for task in ((slot, 106, 2), (slot, 2, 6), (slot, 22, 6)):
+      for task in ((slot, 106, 2), (slot, 2, 6), (slot, LAT_OFFSET, 6)):
         if task not in self._init_queued:
           self._init_queued.add(task)
           self._init_queue.appendleft(task)
     else:
       # Queue lateral read first; only near/in-path stationary targets enqueue age+flags to protect moving bandwidth
-      task = (slot, 22, 6)
+      task = (slot, LAT_OFFSET, 6)
       if task not in self._init_queued:
         self._init_queued.add(task)
         self._init_queue.append(task)
@@ -385,12 +390,12 @@ class XcpRadarLogger:
     rec["updated_ns"] = now_ns
     rec["last_rtt_ns"] = rtt_ns
 
-    if offset == 16 and size == 6:
+    if offset == KIN_OFFSET and size == 6:
       rec["X_raw"] = int.from_bytes(data[0:2], "big", signed=True)
       rec["Vx_raw"] = int.from_bytes(data[2:4], "big", signed=True)
       rec["Ax_raw"] = int.from_bytes(data[4:6], "big", signed=True)
       rec["kin_updated_ns"] = now_ns
-    elif offset == 22 and size == 6:
+    elif offset == LAT_OFFSET and size == 6:
       rec["Y_raw"] = int.from_bytes(data[0:2], "big", signed=True)
       rec["raw24"] = int.from_bytes(data[2:4], "big", signed=False)
       rec["Vy_raw"] = int.from_bytes(data[4:6], "big", signed=True)
@@ -443,13 +448,13 @@ class XcpRadarLogger:
         self._reset_slot_locked(slot)
       elif flags_read and not is_valid_bit13 and rec["flags_updated_ns"] >= rec["kin_updated_ns"]:
         self._reset_slot_locked(slot)
-      elif offset == 16 and not nonzero_kin and (slot, 106, 2) not in self._init_queued:
+      elif offset == KIN_OFFSET and not nonzero_kin and (slot, 106, 2) not in self._init_queued:
         task = (slot, 106, 2)
         self._init_queued.add(task)
         self._init_queue.append(task)
 
     if (
-      offset == 16
+      offset == KIN_OFFSET
       and size == 6
       and slot in self.active_slots
       and self._assist_shm_path is not None
@@ -642,7 +647,7 @@ class XcpRadarLogger:
       s = self.scan_cursor
       self.scan_cursor = (self.scan_cursor + 1) % NUM_SLOTS
       if s not in self.active_slots:
-        return (s, 16, 6)
+        return (s, KIN_OFFSET, 6)
     return None
 
   def _select_priority_slots_locked(self) -> list[int]:
@@ -719,17 +724,17 @@ class XcpRadarLogger:
     stale_kin_slot = min(group, key=lambda s: (self.slot_cache[s]["kin_updated_ns"], s))
     kin_age = now_ns - self.slot_cache[stale_kin_slot]["kin_updated_ns"]
     if kin_age >= max_stale_ns:
-      _consider(kin_age / max_stale_ns, (stale_kin_slot, 16, 6))
+      _consider(kin_age / max_stale_ns, (stale_kin_slot, KIN_OFFSET, 6))
 
     if lat_stale_ns is not None:
       stale_lat_slot = min(group, key=lambda s: (self.slot_cache[s]["lat_updated_ns"], s))
       lat_ts = self.slot_cache[stale_lat_slot]["lat_updated_ns"]
       if lat_ts == 0:
-        _consider(2_000_000.0, (stale_lat_slot, 22, 6))
+        _consider(2_000_000.0, (stale_lat_slot, LAT_OFFSET, 6))
       else:
         lat_age = now_ns - lat_ts
         if lat_age >= lat_stale_ns:
-          _consider(lat_age / lat_stale_ns, (stale_lat_slot, 22, 6))
+          _consider(lat_age / lat_stale_ns, (stale_lat_slot, LAT_OFFSET, 6))
 
     if fast_newborn_age:
       newborn = [
@@ -774,7 +779,7 @@ class XcpRadarLogger:
     if rec["age_updated_ns"] == 0 or (rec["age"] < 3 and now_ns - rec["age_updated_ns"] >= NEWBORN_AGE_REFRESH_NS):
       return (oldest_kin_slot, 2, 6)
     for field_key, interval_ns, task in (
-      ("lat_updated_ns", OTHER_LAT_INTERVAL_NS, (oldest_kin_slot, 22, 6)),
+      ("lat_updated_ns", OTHER_LAT_INTERVAL_NS, (oldest_kin_slot, LAT_OFFSET, 6)),
       ("flags_updated_ns", OTHER_META_INTERVAL_NS, (oldest_kin_slot, 106, 2)),
       ("age_updated_ns", OTHER_META_INTERVAL_NS, (oldest_kin_slot, 2, 6)),
       ("qual_updated_ns", OTHER_QUAL_INTERVAL_NS, (oldest_kin_slot, 127, 2)),
@@ -782,7 +787,7 @@ class XcpRadarLogger:
       ts = rec[field_key]
       if ts == 0 or (now_ns - ts >= interval_ns and ts < kin_ts):
         return task
-    return (oldest_kin_slot, 16, 6)
+    return (oldest_kin_slot, KIN_OFFSET, 6)
 
   def _next_read_task_locked(self, now_ns: int) -> tuple[int, int, int] | None:
     self._read_seq += 1
@@ -795,7 +800,7 @@ class XcpRadarLogger:
       s = prio_slots[0]
       rec = self.slot_cache[s]
       if now_ns - rec["kin_updated_ns"] >= LEAD_KIN_INTERVAL_NS:
-        return (s, 16, 6)
+        return (s, KIN_OFFSET, 6)
       if rec["age_updated_ns"] == 0 or (rec["age"] < 3 and now_ns - rec["age_updated_ns"] >= NEWBORN_AGE_REFRESH_NS):
         return (s, 2, 6)
       if rec["flags_updated_ns"] == 0:
@@ -803,7 +808,7 @@ class XcpRadarLogger:
       if now_ns - max(rec["age_updated_ns"], rec["flags_updated_ns"]) >= LEAD_META_INTERVAL_NS:
         return (s, 2, 6) if rec["age_updated_ns"] <= rec["flags_updated_ns"] else (s, 106, 2)
       if now_ns - rec["lat_updated_ns"] >= LEAD_LAT_INTERVAL_NS:
-        return (s, 22, 6)
+        return (s, LAT_OFFSET, 6)
       if now_ns - rec["qual_updated_ns"] >= LEAD_QUAL_INTERVAL_NS:
         return (s, 127, 2)
 
@@ -859,13 +864,13 @@ class XcpRadarLogger:
       s = prio_slots[1]
       rec = self.slot_cache[s]
       if now_ns - rec["kin_updated_ns"] >= LEAD2_KIN_INTERVAL_NS:
-        return (s, 16, 6)
+        return (s, KIN_OFFSET, 6)
       if rec["age_updated_ns"] == 0 or (rec["age"] < 3 and now_ns - rec["age_updated_ns"] >= NEWBORN_AGE_REFRESH_NS):
         return (s, 2, 6)
       if rec["flags_updated_ns"] == 0:
         return (s, 106, 2)
       if rec["lat_updated_ns"] == 0 or now_ns - rec["lat_updated_ns"] >= LEAD2_LAT_INTERVAL_NS:
-        return (s, 22, 6)
+        return (s, LAT_OFFSET, 6)
       if now_ns - max(rec["age_updated_ns"], rec["flags_updated_ns"]) >= LEAD2_META_INTERVAL_NS:
         return (s, 2, 6) if rec["age_updated_ns"] <= rec["flags_updated_ns"] else (s, 106, 2)
       if rec["qual_updated_ns"] == 0 or now_ns - rec["qual_updated_ns"] >= OTHER_QUAL_INTERVAL_NS:
@@ -899,7 +904,7 @@ class XcpRadarLogger:
         return probe
 
     if prio_slots:
-      return (prio_slots[0], 16, 6)
+      return (prio_slots[0], KIN_OFFSET, 6)
     return None
 
   def _build_next_cto_locked(self, now_ns: int) -> bytes | None:

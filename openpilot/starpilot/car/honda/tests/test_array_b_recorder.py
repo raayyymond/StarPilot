@@ -22,9 +22,9 @@ def _cp(firmware=(), *, fingerprint=CAR.HONDA_ACCORD, radar_unavailable=False, p
 
 @pytest.fixture(autouse=True)
 def _restore_layout():
-  saved = (xcp_mod.ARRAY_B_BASE, xcp_mod.REC0)
+  saved = (xcp_mod.ARRAY_B_BASE, xcp_mod.REC0, xcp_mod.KIN_OFFSET, xcp_mod.LAT_OFFSET)
   yield
-  xcp_mod.ARRAY_B_BASE, xcp_mod.REC0 = saved
+  (xcp_mod.ARRAY_B_BASE, xcp_mod.REC0, xcp_mod.KIN_OFFSET, xcp_mod.LAT_OFFSET) = saved
 
 
 def test_radar_firmware_takes_the_non_logging_radar_entry():
@@ -48,17 +48,20 @@ def test_unsupported_cars_get_no_recorder(cp):
   assert recorder.build(cp, send_lock=None, pm=None, params=None) is None
 
 
-@pytest.mark.parametrize("firmware, fingerprint, base, probe", [
-  (b"36802-TBA-A150", CAR.HONDA_CIVIC_BOSCH, 0x400371A4, True),
-  (b"36802-TBA-A160", CAR.HONDA_CIVIC_BOSCH, 0x400371C4, False),
+@pytest.mark.parametrize("firmware, fingerprint, base, header, kin, lat, probe", [
+  (b"36802-TBA-A150", CAR.HONDA_CIVIC_BOSCH, 0x400371A4, 0x10, 16, 22, True),
+  (b"36802-TBA-A160", CAR.HONDA_CIVIC_BOSCH, 0x400371C4, 0x10, 16, 22, False),
+  (b"36802-TVA-A170", CAR.HONDA_ACCORD, 0x40034F94, 0x08, 18, 24, False),
 ])
-def test_listed_firmware_starts_on_its_layout(monkeypatch, firmware, fingerprint, base, probe):
+def test_listed_firmware_starts_on_its_layout(monkeypatch, firmware, fingerprint, base, header, kin, lat, probe):
   monkeypatch.delenv("REPLAY", raising=False)
   built = recorder.build(_cp([_fw(firmware + b"\x00\x00")], fingerprint=fingerprint), send_lock=None, pm=None, params=None)
   try:
     assert built is not None and built.logger.enabled
     assert xcp_mod.ARRAY_B_BASE == base
-    assert xcp_mod.REC0 == base + 0x10
+    assert xcp_mod.REC0 == base + header
+    assert xcp_mod.KIN_OFFSET == kin
+    assert xcp_mod.LAT_OFFSET == lat
     assert built.logger._wayb_probe_enabled is probe
   finally:
     if built is not None:
@@ -154,15 +157,17 @@ def test_candidates_are_recorded_in_turn_and_a_change_is_not_a_lost_session():
   assert rec.next_can_sends(4 + 2 * recorder.SLICE_NS) == [] and made[2].sends == 1
 
 
-def test_the_accord_firmware_records_two_raw_windows(monkeypatch):
+def test_the_accord_firmware_pins_its_verified_base(monkeypatch):
   monkeypatch.delenv("REPLAY", raising=False)
-  windows = recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"]
-  assert windows == ((0x40035000, 5440, 7), (0x40038800, 1024, 4))
+  assert recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"] == (0x40034F94,)
+  assert recorder.ARRAY_B_LAYOUTS_BY_FIRMWARE[b"36802-TVA-A170"] == (0x08, 18, 24)
   built = recorder.build(_cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD), send_lock=None, pm=None, params=None)
   try:
-    assert built is not None and built.logger.enabled and built.logger.window == windows[0]
-    built._next_layout(1)
-    assert built.logger.window == windows[1]
+    assert built is not None and built.logger.enabled
+    assert xcp_mod.ARRAY_B_BASE == 0x40034F94
+    assert xcp_mod.REC0 == 0x40034F9C
+    assert xcp_mod.KIN_OFFSET == 18
+    assert xcp_mod.LAT_OFFSET == 24
   finally:
     if built is not None:
       built.close()
@@ -214,7 +219,7 @@ def test_an_unanswered_read_keeps_the_offsets_aligned(monkeypatch):
 
 
 def test_a_block_is_logged_every_1024_bytes(monkeypatch):
-  logger, seen = _raw_logger(monkeypatch, recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"][0])
+  logger, seen = _raw_logger(monkeypatch, (0x40035000, 5440, 7))
   try:
     for now in range(1, 778 + 1):                    # 5440 B in 7 B reads
       tag, addr, size = logger._next_wayb_task_locked(now)

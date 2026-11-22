@@ -21,10 +21,27 @@ from openpilot.common.swaglog import cloudlog
 from typing import NamedTuple
 
 RADAR_ADDRESS = 0x18DAB0F1
-RECORD0_OFFSET = 0x10  # first record sits 16 bytes after the array base
 
 A150_BASE = 0x400371A4  # live on the Civic (Peter)
 A160_BASE = 0x400371C4  # static, from the Civic A160 image
+A170_BASE = 0x40034F94  # live on the Accord (36802-TVA-A170), verified 2026-11-21 via XCP
+
+# Record layout per firmware: (header_size, kin_offset, lat_offset).
+#   header_size: REC0 = base + header_size (offset of the first record from the array base).
+#   kin_offset:  SHORT_UPLOAD offset within a record for X/Vx/Ax.
+#   lat_offset:  SHORT_UPLOAD offset within a record for Y/raw_sentinel/Vy.
+# Civic TBA (A150/A160): 16-byte header, kinematics at +16/+22.
+# Accord TVA (A170): 8-byte header, every kinematic channel shifted +2 -> +18/+24. A170 is the
+#   R6.88 predecessor of the A180 image whose static map pins this same layout at 0x40034FB4
+#   (A170 verified live at A180's base shifted -0x20).
+_CIVIC_LAYOUT = (0x10, 16, 22)
+_TVA_LAYOUT = (0x08, 18, 24)
+
+ARRAY_B_LAYOUTS_BY_FIRMWARE: dict[bytes, tuple[int, int, int]] = {
+  b"36802-TBA-A150": _CIVIC_LAYOUT,
+  b"36802-TBA-A160": _CIVIC_LAYOUT,
+  b"36802-TVA-A170": _TVA_LAYOUT,
+}
 
 
 class RawWindow(NamedTuple):  # same fields as xcp_raw_window.RawWindow, which is only imported once a car needs it
@@ -34,13 +51,10 @@ class RawWindow(NamedTuple):  # same fields as xcp_raw_window.RawWindow, which i
 
 
 # radar firmware -> Array B base(s) or raw windows. More than one: not known yet, recorded in turn.
-# TVA-A170 is the operator's Accord. Route 00000068 (2026-11-21): A160_BASE and A150_BASE both read saturated junk
-# there (0 of 3,894 CAN tracks matched), so they are no longer polled. The two windows are the operator's candidates:
-# a 40 x 136 B table that held a uniform default pattern when probed, and a region of 32-bit floats.
 ARRAY_B_BASES_BY_FIRMWARE: dict[bytes, tuple[int | RawWindow, ...]] = {
   b"36802-TBA-A150": (A150_BASE,),
   b"36802-TBA-A160": (A160_BASE,),
-  b"36802-TVA-A170": (RawWindow(0x40035000, 40 * 136, 7), RawWindow(0x40038800, 1024, 4)),
+  b"36802-TVA-A170": (A170_BASE,),
 }
 INTERNAL_FUSION_PROBE_FIRMWARE = frozenset({b"36802-TBA-A150"})
 
@@ -158,8 +172,11 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
       if isinstance(base, RawWindow):
         from openpilot.starpilot.car.honda.xcp_raw_window import RawWindowLogger
         return RawWindowLogger(CP, window=base, send_lock=send_lock, pm=pm, params=params)
+      header_size, kin_offset, lat_offset = ARRAY_B_LAYOUTS_BY_FIRMWARE[firmware]
       xcp_radar_logger.ARRAY_B_BASE = base
-      xcp_radar_logger.REC0 = base + RECORD0_OFFSET
+      xcp_radar_logger.REC0 = base + header_size
+      xcp_radar_logger.KIN_OFFSET = kin_offset
+      xcp_radar_logger.LAT_OFFSET = lat_offset
       return xcp_radar_logger.XcpRadarLogger(CP, send_lock=send_lock, pm=pm, params=params,
                                              probe_wayb=firmware in INTERNAL_FUSION_PROBE_FIRMWARE)
 
