@@ -9,6 +9,8 @@ Nothing here reaches control. This module decides whether it runs at all, and wi
   - a firmware whose address is not known yet lists the candidates, and the recorder takes them in turn, one slice
     each, with an array_b_recorder_layout event at every change. The slice whose targets line up with the CAN
     tracks names the address; it is then pinned here as a single entry;
+  - a candidate can also be a raw memory window (xcp_raw_window.py), recorded as bytes for offline decoding when the
+    record format itself is in question;
   - the 1 Hz internal-fusion probe only on the firmware its addresses were read from;
   - it stops for the rest of the drive after repeated lost sessions, or when the radar never answers.
 """
@@ -16,17 +18,29 @@ from __future__ import annotations
 
 from openpilot.common.swaglog import cloudlog
 
+from typing import NamedTuple
+
 RADAR_ADDRESS = 0x18DAB0F1
 RECORD0_OFFSET = 0x10  # first record sits 16 bytes after the array base
 
 A150_BASE = 0x400371A4  # live on the Civic (Peter)
 A160_BASE = 0x400371C4  # static, from the Civic A160 image
 
-# radar firmware -> Array B base(s). More than one: not known yet, recorded in turn.
-ARRAY_B_BASES_BY_FIRMWARE: dict[bytes, tuple[int, ...]] = {
+
+class RawWindow(NamedTuple):  # same fields as xcp_raw_window.RawWindow, which is only imported once a car needs it
+  address: int
+  length: int
+  chunk: int
+
+
+# radar firmware -> Array B base(s) or raw windows. More than one: not known yet, recorded in turn.
+# TVA-A170 is the operator's Accord. Route 00000068 (2026-11-21): A160_BASE and A150_BASE both read saturated junk
+# there (0 of 3,894 CAN tracks matched), so they are no longer polled. The two windows are the operator's candidates:
+# a 40 x 136 B table that held a uniform default pattern when probed, and a region of 32-bit floats.
+ARRAY_B_BASES_BY_FIRMWARE: dict[bytes, tuple[int | RawWindow, ...]] = {
   b"36802-TBA-A150": (A150_BASE,),
   b"36802-TBA-A160": (A160_BASE,),
-  b"36802-TVA-A170": (A160_BASE, A150_BASE),  # the operator's Accord; neither is confirmed for this build
+  b"36802-TVA-A170": (RawWindow(0x40035000, 40 * 136, 7), RawWindow(0x40038800, 1024, 4)),
 }
 INTERNAL_FUSION_PROBE_FIRMWARE = frozenset({b"36802-TBA-A150"})
 
@@ -77,7 +91,7 @@ class ArrayBRecorder:
     self.logger = self.make_logger(self.bases[self.index])
     self.slice_start_ns = int(now_ns)
     self.was_ready = False
-    cloudlog.event("array_b_recorder_layout", base=self.bases[self.index], mono_ns=int(now_ns))
+    log_layout(self.bases[self.index], now_ns)
 
   def _watch(self, now_ns: int) -> None:
     if self.stopped:
@@ -121,6 +135,11 @@ class ArrayBRecorder:
     self.logger.close()
 
 
+def log_layout(layout: int | RawWindow, now_ns: int) -> None:
+  raw = isinstance(layout, RawWindow)
+  cloudlog.event("array_b_recorder_layout", base=layout.address if raw else layout, raw=raw, mono_ns=int(now_ns))
+
+
 def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
   """The recorder for this car, or None. Never raises: card must start without it."""
   try:
@@ -129,13 +148,16 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
     firmware = radar_firmware(CP)
     bases = ARRAY_B_BASES_BY_FIRMWARE.get(firmware, ()) if firmware is not None else ()
     cloudlog.event("array_b_recorder", firmware=None if firmware is None else firmware.decode(errors="replace"),
-                   bases=list(bases), polling=bool(bases))
+                   bases=[b.address if isinstance(b, RawWindow) else b for b in bases], polling=bool(bases))
     if not bases:
       return None
 
     from openpilot.starpilot.car.honda import xcp_radar_logger
 
-    def make_logger(base: int):
+    def make_logger(base: int | RawWindow):
+      if isinstance(base, RawWindow):
+        from openpilot.starpilot.car.honda.xcp_raw_window import RawWindowLogger
+        return RawWindowLogger(CP, window=base, send_lock=send_lock, pm=pm, params=params)
       xcp_radar_logger.ARRAY_B_BASE = base
       xcp_radar_logger.REC0 = base + RECORD0_OFFSET
       return xcp_radar_logger.XcpRadarLogger(CP, send_lock=send_lock, pm=pm, params=params,
@@ -145,7 +167,7 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
     if not recorder.logger.enabled:
       recorder.close()
       return None
-    cloudlog.event("array_b_recorder_layout", base=bases[0], mono_ns=0)
+    log_layout(bases[0], 0)
     return recorder
   except Exception:
     cloudlog.exception("array_b_recorder: not started")

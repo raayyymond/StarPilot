@@ -51,7 +51,6 @@ def test_unsupported_cars_get_no_recorder(cp):
 @pytest.mark.parametrize("firmware, fingerprint, base, probe", [
   (b"36802-TBA-A150", CAR.HONDA_CIVIC_BOSCH, 0x400371A4, True),
   (b"36802-TBA-A160", CAR.HONDA_CIVIC_BOSCH, 0x400371C4, False),
-  (b"36802-TVA-A170", CAR.HONDA_ACCORD, 0x400371C4, False),   # first candidate
 ])
 def test_listed_firmware_starts_on_its_layout(monkeypatch, firmware, fingerprint, base, probe):
   monkeypatch.delenv("REPLAY", raising=False)
@@ -155,5 +154,72 @@ def test_candidates_are_recorded_in_turn_and_a_change_is_not_a_lost_session():
   assert rec.next_can_sends(4 + 2 * recorder.SLICE_NS) == [] and made[2].sends == 1
 
 
-def test_the_accord_firmware_lists_both_known_addresses():
-  assert recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"] == (0x400371C4, 0x400371A4)
+def test_the_accord_firmware_records_two_raw_windows(monkeypatch):
+  monkeypatch.delenv("REPLAY", raising=False)
+  windows = recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"]
+  assert windows == ((0x40035000, 5440, 7), (0x40038800, 1024, 4))
+  built = recorder.build(_cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD), send_lock=None, pm=None, params=None)
+  try:
+    assert built is not None and built.logger.enabled and built.logger.window == windows[0]
+    built._next_layout(1)
+    assert built.logger.window == windows[1]
+  finally:
+    if built is not None:
+      built.close()
+
+
+class _Events:
+  def __init__(self, monkeypatch):
+    from openpilot.starpilot.car.honda import xcp_raw_window
+    self.seen = []
+    monkeypatch.setattr(xcp_raw_window.cloudlog, "event", lambda name, **kw: self.seen.append((name, kw)))
+    self.cls = xcp_raw_window.RawWindowLogger
+
+
+def _raw_logger(monkeypatch, window):
+  monkeypatch.delenv("REPLAY", raising=False)
+  events = _Events(monkeypatch)
+  logger = events.cls(_cp([_fw(b"36802-TVA-A170")], fingerprint=CAR.HONDA_ACCORD), window=recorder.RawWindow(*window),
+                      send_lock=None, pm=None, params=None)
+  return logger, events.seen
+
+
+def test_a_raw_window_is_read_front_to_back_and_logged_whole(monkeypatch):
+  logger, seen = _raw_logger(monkeypatch, (0x40038800, 10, 4))
+  try:
+    reads = []
+    for now in range(1, 7):                          # two sweeps of 4 + 4 + 2 bytes
+      tag, addr, size = logger._next_wayb_task_locked(now)
+      reads.append((addr - 0x40038800, size))
+      logger._handle_wayb_reply_locked(tag, size, bytes([0xFF]) + bytes(range(addr & 0xFF, (addr & 0xFF) + size)), now)
+    assert reads == [(0, 4), (4, 4), (8, 2)] * 2
+    assert not logger._primary_lead_urgent_locked(7)
+    assert [name for name, _ in seen] == ["xcp_raw_window"] * 2
+    first = seen[0][1]
+    assert (first["base"], first["offset"], first["start_ns"], first["end_ns"], first["missing"]) == (0x40038800, 0, 1, 3, [])
+    assert bytes.fromhex(first["data"]) == bytes(range(10))
+  finally:
+    logger.close()
+
+
+def test_an_unanswered_read_keeps_the_offsets_aligned(monkeypatch):
+  logger, seen = _raw_logger(monkeypatch, (0x40035000, 8, 4))
+  try:
+    logger._next_wayb_task_locked(1)                 # no reply to the first read
+    tag, addr, size = logger._next_wayb_task_locked(2)
+    logger._handle_wayb_reply_locked(tag, size, b"\xff\x01\x02\x03\x04", 2)
+    assert seen[0][1]["missing"] == [0] and bytes.fromhex(seen[0][1]["data"]) == bytes(4) + b"\x01\x02\x03\x04"
+  finally:
+    logger.close()
+
+
+def test_a_block_is_logged_every_1024_bytes(monkeypatch):
+  logger, seen = _raw_logger(monkeypatch, recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"][0])
+  try:
+    for now in range(1, 778 + 1):                    # 5440 B in 7 B reads
+      tag, addr, size = logger._next_wayb_task_locked(now)
+      logger._handle_wayb_reply_locked(tag, size, bytes(1 + size), now)
+    assert [e["offset"] for _, e in seen] == [0, 1029, 2058, 3087, 4116, 5145]
+    assert sum(len(e["data"]) // 2 for _, e in seen) == 5440 and logger._raw_offset == 0
+  finally:
+    logger.close()
