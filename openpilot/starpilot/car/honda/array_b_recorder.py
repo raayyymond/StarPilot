@@ -1,16 +1,17 @@
-"""Fork gate around the verbatim Bosch-A Array B logger (xcp_radar_logger.py, from bob-unify-car).
+"""Fork gate around the Bosch-A Array B logger (xcp_radar_logger.py, from bob-unify-car; the one fork change in it
+is that the kinematic read offsets are module values, set here per firmware).
 
 The logger reads the radar's internal track list at 20 Hz and only records it (rlog event xcp_array_b_20hz).
 Nothing here reaches control. This module decides whether it runs at all, and with which layout:
 
   - only on a verified Bosch-A car (the logger itself would start on every Bosch Honda with a radar);
-  - only for a radar firmware with an Array B address to read. The address moves between builds (A150 0x400371A4,
-    A160 0x400371C4), so a firmware with no entry is logged and not polled;
-  - a firmware whose address is not known yet lists the candidates, and the recorder takes them in turn, one slice
-    each, with an array_b_recorder_layout event at every change. The slice whose targets line up with the CAN
-    tracks names the address; it is then pinned here as a single entry;
+  - only for a radar firmware with an Array B address to read. The address and the record layout move between
+    builds (A150 0x400371A4, A160 0x400371C4, the Accord's TVA-A170 0x40034F94 with an 8-byte header), so a firmware
+    with no entry is logged and not polled;
+  - a firmware whose address is not known yet can list several candidates, and the recorder takes them in turn, one
+    slice each, with an array_b_recorder_layout event at every change. No firmware does today;
   - a candidate can also be a raw memory window (xcp_raw_window.py), recorded as bytes for offline decoding when the
-    record format itself is in question;
+    record format itself is in question. No firmware uses one today; it is kept as the tool for the next unknown;
   - the 1 Hz internal-fusion probe only on the firmware its addresses were read from;
   - it stops for the rest of the drive after repeated lost sessions, or when the radar never answers.
 """

@@ -1,6 +1,6 @@
 """Fork: record a raw window of the Bosch-A radar's memory, for a firmware whose track list has not been located.
 
-Rides the verbatim logger's session and its one-request-in-flight probe hook (xcp_radar_logger.py stays untouched):
+Rides the logger's session and its one-request-in-flight probe hook, overriding two methods and editing nothing:
 every read goes to the window, front to back, over and over, and the bytes land in the rlog as xcp_raw_window events
 of up to BLOCK bytes. Nothing is decoded here and nothing reaches control. A chunk's time lies between its block's
 start_ns and end_ns, in order.

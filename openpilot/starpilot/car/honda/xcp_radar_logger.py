@@ -1,4 +1,4 @@
-"""Read-only 20 Hz XCP Array B logger for Honda Bosch-A (36802-TBA-A150).
+"""Read-only 20 Hz XCP Array B logger for Honda Bosch-A (36802-TBA-A150 by default; see KIN_OFFSET below).
 
 Observes 0x1EC00179 on CAN bus 1 and emits non-blocking single-in-flight
 CONNECT/GET_STATUS/GET_SEED/UNLOCK/SHORT_UPLOAD requests on 0x1EC00079 (bus 1)
