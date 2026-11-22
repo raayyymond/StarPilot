@@ -15,7 +15,7 @@ from opendbc.car.ford.discovery import (normal_bus0_selection as ford_normal_bus
                                        normal_bus0_queries as ford_normal_bus0_queries, normal_bus_query_brand)
 from opendbc.car.volvo.discovery import normal_bus_topology as volvo_normal_bus_topology
 from opendbc.car.hyundai.discovery import normal_bus_topology
-from opendbc.car.honda.discovery import normal_bus_topology as honda_normal_bus_topology
+from opendbc.car.honda.discovery import eps_needs_obd as honda_eps_needs_obd, normal_bus_topology as honda_normal_bus_topology
 from opendbc.car.chrysler.discovery import normal_bus_topology as chrysler_normal_bus_topology
 from opendbc.car.tesla.discovery import normal_bus0_topology as tesla_normal_bus0_topology
 from opendbc.car.values import BRANDS
@@ -192,6 +192,12 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
         vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, vin_buses)
         car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing,
                                  query_brand=normal_brand, normal_bus_only=True)
+        if normal_brand == 'honda' and honda_eps_needs_obd(match_fw_to_car(car_fw, vin)[1], car_fw):
+          # Fork: read this car's VIN and EPS through the OBD port, as the generic path below does. Without the VIN
+          # the result is never cached, so every start would repeat the query.
+          set_obd_multiplexing(True)
+          vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, (0, 1))
+          car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing, query_brand='honda')
         ecu_rx_addrs = {(fw.responseAddress, fw.subAddress or None, fw.bus) for fw in car_fw if fw.responseAddress > 0}
       else:
         # enable OBD multiplexing for VIN query

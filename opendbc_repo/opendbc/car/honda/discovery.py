@@ -1,4 +1,5 @@
 from opendbc.car.honda.hondacan import honda_checksum
+from opendbc.car.honda.values import CAR
 
 
 # Classic Bosch: PT on bus 1 and the stock ACC camera on bus 2. This selects
@@ -18,3 +19,9 @@ def normal_bus_topology(packets):
           return False
         observed.add(key)
   return observed == NORMAL_BUS_LAYOUT.keys()
+
+
+def eps_needs_obd(candidates, car_fw) -> bool:
+  """Fork: the Accord's EPS answers only through the OBD port (never on the normal bus 1 wiring), and its firmware
+  family decides between angle and torque steering. A normal-bus read that names the Accord is not complete."""
+  return CAR.HONDA_ACCORD in candidates and not any(fw.ecu == "eps" and not fw.logging for fw in car_fw)
