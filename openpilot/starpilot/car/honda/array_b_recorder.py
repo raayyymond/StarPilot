@@ -13,7 +13,12 @@ Nothing here reaches control. This module decides whether it runs at all, and wi
   - a candidate can also be a raw memory window (xcp_raw_window.py), recorded as bytes for offline decoding when the
     record format itself is in question. No firmware uses one today; it is kept as the tool for the next unknown;
   - the 1 Hz internal-fusion probe only on the firmware its addresses were read from;
-  - it stops for the rest of the drive after repeated lost sessions, or when the radar never answers.
+  - it stops for the rest of the drive after repeated lost sessions, or when the radar never answers;
+  - twice a second it also records the logger's whole slot table, unfiltered (rlog event xcp_array_b_slots). The 20 Hz
+    event only carries slots that passed the logger's validity rules, so it cannot show why a car is missing from it:
+    on the first Accord drives (2026-11-22) the lead had no track for 10-40 s at a time while the car's own object
+    list held it. The table shows each slot's raw words, how old each read is, whether the logger counts it active,
+    and how often it was dropped and with which flags.
 """
 from __future__ import annotations
 
@@ -60,6 +65,7 @@ ARRAY_B_BASES_BY_FIRMWARE: dict[bytes, tuple[int | RawWindow, ...]] = {
 INTERNAL_FUSION_PROBE_FIRMWARE = frozenset({b"36802-TBA-A150"})
 
 SLICE_NS = 120_000_000_000              # time on one candidate address before the next
+SLOT_TABLE_NS = 500_000_000             # unfiltered slot table cadence
 MAX_SESSION_LOSSES = 5                  # sessions that reached READY and were dropped
 CONNECT_DEADLINE_NS = 30_000_000_000    # armed this long without one READY session
 
@@ -77,6 +83,61 @@ def supported(CP) -> bool:
           and not bool(CP.radarUnavailable) and not bool(CP.passive))
 
 
+def _age_ms(now_ns: int, stamp_ns: int) -> int:
+  return -1 if stamp_ns <= 0 else int((now_ns - stamp_ns) // 1_000_000)
+
+
+class SlotTable:
+  """The logger's per-slot state as it stands, for the xcp_array_b_slots event. Reads only; sends nothing."""
+
+  def __init__(self, logger):
+    self.logger = logger
+    self.drops: dict[int, list[int]] = {}   # slot -> [times dropped, flags at the last drop, X at the last drop]
+    self.last_ns = 0
+    inner = logger._reset_slot_locked
+
+    def reset(slot: int) -> None:
+      rec = logger.slot_cache[slot]
+      seen = self.drops.setdefault(slot, [0, 0, 0])
+      seen[0] += 1
+      seen[1], seen[2] = int(rec["flags"]), int(rec["X_raw"])
+      inner(slot)
+    logger._reset_slot_locked = reset
+
+  def rows(self, now_ns: int) -> dict:
+    logger = self.logger
+    with logger._lock:
+      slots = []
+      for slot, rec in sorted(logger.slot_cache.items()):
+        drops = self.drops.get(slot, (0, 0, 0))
+        slots.append([
+          slot, int(slot in logger.active_slots),
+          rec["X_raw"], rec["Vx_raw"], rec["Ax_raw"], rec["Y_raw"], rec["Vy_raw"],
+          rec["age"], rec["subflags"], rec["flags"], rec["qual"],
+          _age_ms(now_ns, rec["kin_updated_ns"]), _age_ms(now_ns, rec["lat_updated_ns"]),
+          _age_ms(now_ns, rec["age_updated_ns"]), _age_ms(now_ns, rec["flags_updated_ns"]),
+          drops[0], drops[1], drops[2],
+        ])
+      return dict(mono_ns=int(now_ns), v_ego=round(float(logger.last_v_ego), 3), reads=int(logger._read_seq),
+                  init_queue=len(logger._init_queue), priority=list(logger._select_priority_slots_locked()),
+                  op_matched=list(logger._op_matched_slots), slots=slots)
+
+  def log(self, now_ns: int) -> None:
+    if self.logger.state != "READY" or now_ns - self.last_ns < SLOT_TABLE_NS:
+      return
+    self.last_ns = int(now_ns)
+    cloudlog.event("xcp_array_b_slots", **self.rows(now_ns))
+
+
+def slot_table(logger) -> SlotTable | None:
+  """A table for a logger that keeps one (the raw window logger and a broken one do not)."""
+  try:
+    return SlotTable(logger) if hasattr(logger, "slot_cache") else None
+  except Exception:
+    cloudlog.exception("array_b_recorder: no slot table")
+    return None
+
+
 class ArrayBRecorder:
   """The logger's card-facing surface, plus the candidate rotation and the give-up rule."""
 
@@ -85,6 +146,7 @@ class ArrayBRecorder:
     self.bases = bases
     self.index = 0
     self.logger = make_logger(bases[0])
+    self.slot_table = slot_table(self.logger)
     self.slice_start_ns = 0
     self.armed_ns = 0
     self.was_ready = False
@@ -104,6 +166,7 @@ class ArrayBRecorder:
     self.logger.close()
     self.index = (self.index + 1) % len(self.bases)
     self.logger = self.make_logger(self.bases[self.index])
+    self.slot_table = slot_table(self.logger)
     self.slice_start_ns = int(now_ns)
     self.was_ready = False
     log_layout(self.bases[self.index], now_ns)
@@ -133,6 +196,12 @@ class ArrayBRecorder:
     if self.stopped:
       return
     self.logger.observe_can(can_list, now_ns, v_ego=v_ego)
+    if self.slot_table is not None:
+      try:
+        self.slot_table.log(now_ns)
+      except Exception:
+        cloudlog.exception("array_b_recorder: slot table failed")
+        self.slot_table = None
     self._watch(now_ns)
 
   def next_can_sends(self, now_ns: int):

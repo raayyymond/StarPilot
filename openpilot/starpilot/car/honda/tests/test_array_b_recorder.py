@@ -228,3 +228,65 @@ def test_a_block_is_logged_every_1024_bytes(monkeypatch):
     assert sum(len(e["data"]) // 2 for _, e in seen) == 5440 and logger._raw_offset == 0
   finally:
     logger.close()
+
+
+def _slot_events(monkeypatch):
+  seen = []
+  monkeypatch.setattr(recorder.cloudlog, "event", lambda name, **kw: seen.append((name, kw)))
+  return seen
+
+
+def _accord_recorder(monkeypatch):
+  monkeypatch.delenv("REPLAY", raising=False)
+  built = recorder.build(_cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD), send_lock=None, pm=None, params=None)
+  assert built is not None and built.slot_table is not None
+  return built
+
+
+def test_the_slot_table_records_every_slot_twice_a_second_once_the_session_is_up(monkeypatch):
+  built = _accord_recorder(monkeypatch)
+  try:
+    seen = _slot_events(monkeypatch)
+    logger = built.logger
+    now = 10_000_000_000
+    built.observe_can([], now)
+    assert not [e for e in seen if e[0] == "xcp_array_b_slots"]        # no session yet
+    logger.state = "READY"
+    logger._handle_f4_reply_locked(7, xcp_mod.KIN_OFFSET, 6, b"\xff" + (1408).to_bytes(2, "big") + bytes(4), now, now)
+    built.observe_can([], now)
+    built.observe_can([], now + recorder.SLOT_TABLE_NS - 1)
+    built.observe_can([], now + recorder.SLOT_TABLE_NS)
+    tables = [kw for name, kw in seen if name == "xcp_array_b_slots"]
+    assert len(tables) == 2
+    slots = tables[0]["slots"]
+    assert [row[0] for row in slots] == list(range(xcp_mod.NUM_SLOTS))
+    # slot 7: active, X read just now, flags never read; it is in the table though the 20 Hz event would leave it out
+    assert slots[7][:3] == [7, 1, 1408] and slots[7][11] == 0 and slots[7][14] == -1
+    assert slots[8][1:3] == [0, 0] and slots[8][11] == -1
+    assert tables[1]["slots"][7][11] == recorder.SLOT_TABLE_NS // 1_000_000
+  finally:
+    built.close()
+
+
+def test_the_slot_table_counts_a_dropped_slot_and_keeps_the_flags_it_was_dropped_with(monkeypatch):
+  built = _accord_recorder(monkeypatch)
+  try:
+    logger = built.logger
+    now = 10_000_000_000
+    logger._handle_f4_reply_locked(3, xcp_mod.KIN_OFFSET, 6, b"\xff" + (640).to_bytes(2, "big") + bytes(4), now, now)
+    assert 3 in logger.active_slots
+    logger._handle_f4_reply_locked(3, 106, 2, b"\xff\xc0\x40", now + 1, now + 1)   # flags without the valid bit
+    assert 3 not in logger.active_slots
+    row = built.slot_table.rows(now + 2)["slots"][3]
+    assert row[1:3] == [0, 0] and row[15:] == [1, 0xC040, 640]
+  finally:
+    built.close()
+
+
+def test_a_failing_slot_table_never_stops_the_recorder(monkeypatch):
+  rec, made = _recorder()
+  assert rec.slot_table is None                       # a logger without a slot table gets none
+  rec.slot_table = SimpleNamespace(log=lambda now_ns: 1 / 0)
+  rec.next_can_sends(1)
+  rec.observe_can([], 2)
+  assert rec.slot_table is None and not rec.stopped
