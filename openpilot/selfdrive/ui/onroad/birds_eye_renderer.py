@@ -9,7 +9,7 @@ go through the same matrix on the CPU, drawn as flat-shaded fans in painter's or
 Labels and the speed-limit sign are ordinary 2D drawing in pixels.
 
 The look is flat: a solid black background, no gradients, and panels (the lead label, the overlay card) drawn as
-glass: a faint light fill under a bright hairline rim (bem.GLASS_FILL / GLASS_RIM).
+glass: a dark smoked tint under a bright hairline rim (bem.GLASS_FILL / GLASS_RIM).
 
 Drawing cost: a frame issues O(ribbons) C calls, not O(vertices). Each road edge, lane line and the road fill is
 one single-coloured DrawTriangleStrip per valid run plus a few constant-alpha strips for its soft end (each line
@@ -120,6 +120,7 @@ THROTTLE = ((13, 248, 122), (114, 255, 92))
 NO_THROTTLE = ((242, 242, 242), (242, 242, 242))
 
 BACKGROUND = (0, 0, 0)                # the full-frame view's background: solid black
+ROAD = (30, 34, 44)                   # the road surface between the edges
 PANEL_FILL = (0, 0, 0, 170)           # the overlay card over the camera: smoked glass, under the glass rim
 PANEL_RADIUS = 28                     # px, the overlay panel's corner radius
 LINE_ALPHA_STEP = 0.1                 # each line's soft end: strips within +/-5 % of a linear fade
@@ -807,7 +808,7 @@ class BirdsEyeRenderer(Widget):
       rl.draw_rectangle(int(rect.x), int(rect.y), int(rect.width), int(rect.height), rl.Color(*BACKGROUND, 255))
 
   def _glass(self, rect, roundness: float, segments: int = 8) -> None:
-    """A glass panel: a faint light fill under a bright hairline rim."""
+    """A glass panel: a dark smoked tint under a bright hairline rim."""
     a = self.opacity
     rl.draw_rectangle_rounded(rect, roundness, segments, rl.Color(*bem.GLASS_FILL[:3], int(bem.GLASS_FILL[3] * a)))
     rl.draw_rectangle_rounded_lines_ex(rect, roundness, segments, bem.GLASS_RIM_PX, rl.Color(*bem.GLASS_RIM[:3], int(bem.GLASS_RIM[3] * a)))
@@ -919,7 +920,7 @@ class BirdsEyeRenderer(Widget):
         ok_b = np.isfinite(b)
         yb = np.interp(xs, grid[ok_b], b[ok_b]) if np.count_nonzero(ok_b) >= 2 else np.full(xs.shape, np.nan)
         road_ops = self._faded_strips(np.stack((xs, ya), axis=1), np.stack((xs, yb), axis=1), ok & np.isfinite(yb),
-                                      bem.alpha_groups(bem.taper(xs, end, fade), LINE_ALPHA_STEP), (40, 46, 60), 215 * self.opacity)
+                                      bem.alpha_groups(bem.taper(xs, end, fade), LINE_ALPHA_STEP), ROAD, 215 * self.opacity)
     # Lines with the same rows (the usual case: one model frame, one end) share one ribbon pass.
     styles = self._line_styles(scene)
     rows = [bem.line_rows(grid, line[0], min(reach, bem.std_end(grid, line[5])), start, TAIL_STEP, top) for line in styles]

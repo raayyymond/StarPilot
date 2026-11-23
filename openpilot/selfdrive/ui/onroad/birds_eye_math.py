@@ -433,9 +433,10 @@ def ring_strip(poly: np.ndarray, thickness: float) -> np.ndarray:
   return np.concatenate((out, out[:2]))
 
 
-# Glass panels (the lead label, the HUD's pills and bar tracks, the overlay card's rim): a faint light fill under a
-# bright hairline rim, both flat colours.
-GLASS_FILL = (255, 255, 255, 34)
+# Glass panels (the lead label, the HUD's bar tracks, the music card, the overlay card's rim): a dark smoked tint
+# under a bright hairline rim, both flat colours. The tint is a little darker than the road, so text on a panel
+# keeps its contrast over the road, and a little lighter than the black background, so the panel still shows there.
+GLASS_FILL = (28, 30, 36, 168)
 GLASS_RIM = (255, 255, 255, 112)
 GLASS_RIM_PX = 1.5
 
