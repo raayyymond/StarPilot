@@ -31,8 +31,10 @@ vCruiseCluster, else vCruise, valid in (0, SET_SPEED_NA); "--" otherwise and whe
 false, i.e. disengaged or lateral-only), mph or km/h by `metric`. The numbers are
 twice the birds-eye lead label's size (birds_eye_math.label_font_size over the view rect), with small unit captions.
 
-Status widgets: the mode and follow-distance chips under the speed readout and the wheel pill under the clock, above
-the turn arrows; each on a glass pill (a faint light fill under a bright rim, like the birds-eye lead label).
+Status widgets, drawn straight on the view with no panel behind them: the drive mode and the follow distance as
+left-aligned text under the speed readout, and the steering wheel with its angle under the clock; all above the
+turn arrows. The bars (the acceleration track, the torque track) are glass, like the birds-eye lead label and the
+music card: a faint light fill under a bright rim.
 - Steering wheel: the comma's chffr_wheel art on a round badge, turned by carState.steeringAngleDeg (left-positive, so
   counter-clockwise on screen), green while carControl.latActive and grey otherwise, the whole degrees under it; a
   drawn ring with three spokes when the texture cannot be loaded.
@@ -77,29 +79,23 @@ TURN_SIGNAL_RC = 0.3                           # its pulse filter: jumps bright 
 TURN_SIGNAL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons_mici/onroad/turn_signal_left.png'
 WHEEL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons/chffr_wheel.png'
 
-STATUS_GAP = 12                                # status widgets: gap to the readout or clock above, and between chips
+STATUS_GAP = 8                                 # status widgets: gap to the readout or clock above, and between the two text rows
 READOUT_ROWS = 1.65                            # the speed readout's height (number and caption, as the fonts draw them) over its number size
 CLOCK_ROWS = 1.15                              # the clock's height over its text size
 WHEEL_BADGE = 110                              # steering-wheel badge diameter
-WHEEL_PAD = 8                                  # pill padding around the badge
 WHEEL_ART = 0.78                               # wheel art over the badge diameter (the comma's 144 in a 192 button)
 ANGLE_SIZE = 36                                # the degrees under the badge
-ANGLE_ROW = 46                                 # pill rows under the badge for the degrees
+ANGLE_ROW = 46                                 # rows under the badge for the degrees
 CHIP_SIZE = 34                                 # drive-mode and follow-distance text
-CHIP_HEIGHT = 68
-CHIP_PAD = 24                                  # text inset from the chip's ends
-CHIP_ROUNDNESS = 0.35                          # corner radius over half the chip height: a rounded rectangle, not a capsule
+CHIP_HEIGHT = 46                               # each text row
 MODE_WIDTH = 320
 FOLLOW_WIDTH = 440
 GAP_BARS = ((38, 9), (30, 9), (22, 9))         # the gap icon's bars, nearest first (bottom up): (width, height)
 GAP_BAR_STEP = 14                              # bar pitch
-MIN_GAP_SPEED = 1.0                            # m/s; below this the time gap is not shown
-MAX_TIME_GAP = 9.95                            # seconds; a longer gap is not shown
 PERSONALITIES = ('AGGRESSIVE', 'STANDARD', 'RELAXED')   # log.LongitudinalPersonality by raw value
 
 BACKGROUND = (0, 0, 0)                                       # birds_eye_renderer's solid background
 GLASS_FILL, GLASS_RIM, GLASS_RIM_PX = (255, 255, 255, 34), (255, 255, 255, 112), 1.5   # birds_eye_math's glass panel
-TRACK = (255, 255, 255, 26)
 IDLE = (220, 224, 232)                                       # disengaged fill / track
 TICK = (170, 180, 198)                                       # birds_eye_renderer's rung-label grey
 LIMIT = (235, 238, 245)
@@ -110,8 +106,6 @@ RED = (255, 72, 72)
 ACTUAL = (245, 247, 250)
 SHADOW = (0, 0, 0)
 DOT = (182, 182, 182)                                        # the arc's centre dot
-TORQUE_BACKING, TORQUE_BACKING_PAD = (0, 0, 0, 215), 8      # under the torque bar, which sits over the road
-PILL = GLASS_FILL                                            # the status pills are glass panels
 WHEEL_IDLE = (84, 90, 104)                                   # the badge while lateral is not active
 EXPERIMENTAL = (255, 155, 63)                                # the comma's experimental-mode orange
 TRAFFIC = (96, 190, 255)
@@ -200,7 +194,7 @@ def view_rect(width: float, height: float) -> tuple[float, float, float, float]:
 
 def render_rect(width: float, height: float) -> tuple[float, float, float, float]:
   """Where the birds-eye view draws: right of the acceleration strip, down to the bottom edge. The road runs on
-  under the torque bar, which is drawn over it on its own dark backing."""
+  under the torque bar, whose glass track is drawn over it."""
   strip = accel_geometry(height).strip
   return strip, 0, width - strip, height
 
@@ -346,7 +340,6 @@ class FollowReading:
   bars: int                # 1..3, hudControl.leadDistanceBars
   label: str               # the personality's name, or TRAFFIC
   traffic: bool
-  time_gap: float | None   # seconds to leadOne; None without a lead, near standstill or beyond MAX_TIME_GAP
 
 
 def _message(sm, name: str):
@@ -393,22 +386,6 @@ def personality_index(personality) -> int | None:
   return raw if 0 <= raw < len(PERSONALITIES) else None
 
 
-def time_gap(sm) -> float | None:
-  """Seconds to radarState.leadOne at the current speed; None without a lead or below MIN_GAP_SPEED."""
-  try:
-    lead = getattr(_message(sm, 'radarState'), 'leadOne', None)
-    if lead is None or not getattr(lead, 'present', False):
-      return None
-    distance = _finite(getattr(lead, 'dRel', None))
-    v_ego = _finite(getattr(_message(sm, 'carState'), 'vEgo', None))
-  except (AttributeError, KeyError, TypeError):
-    return None
-  if distance is None or distance <= 0 or v_ego is None or v_ego <= MIN_GAP_SPEED:
-    return None
-  gap = distance / v_ego
-  return gap if gap < MAX_TIME_GAP else None
-
-
 def read_follow(sm) -> FollowReading | None:
   """The driving personality as gap bars, traffic mode and the measured time gap; None before selfdriveState."""
   try:
@@ -419,12 +396,12 @@ def read_follow(sm) -> FollowReading | None:
     traffic = bool(getattr(_message(sm, 'starpilotCarState'), 'trafficModeEnabled', False))
   except (AttributeError, KeyError, TypeError):
     return None
-  return FollowReading(index + 1, 'TRAFFIC' if traffic else PERSONALITIES[index], traffic, time_gap(sm))
+  return FollowReading(index + 1, 'TRAFFIC' if traffic else PERSONALITIES[index], traffic)
 
 
 @dataclass(frozen=True)
 class StatusGeometry:
-  """The status cluster's pills as (x, y, width, height), and the wheel badge inside the first."""
+  """The status widgets' boxes as (x, y, width, height), and the wheel badge inside the first."""
   wheel: tuple[float, float, float, float]
   badge: tuple[float, float, float]   # centre x, centre y, radius
   mode: tuple[float, float, float, float]
@@ -436,18 +413,19 @@ class StatusGeometry:
 
 
 def status_geometry(width: float, height: float) -> StatusGeometry:
-  """Top left, under the speed readout: the mode chip over the follow-distance chip. Top right, under the clock:
-  the wheel pill. All end above the turn arrows (mid height) and the speed-limit sign (right, below the wheel)."""
+  """Top left, under the speed readout: the drive-mode row over the follow-distance row, left-aligned with it. Top
+  right, under the clock: the wheel badge with its degrees. All end above the turn arrows (mid height) and the
+  speed-limit sign (right, below the wheel)."""
   k = height / 1080
   vx, _, vw, _ = view_rect(width, height)
   margin, gap, size = SIGNAL_MARGIN * k, STATUS_GAP * k, readout_size(width, height)
   x = vx + margin
-  chip_h = CHIP_HEIGHT * k
-  mode = (x, margin + READOUT_ROWS * size + gap, MODE_WIDTH * k, chip_h)
-  follow = (x, mode[1] + chip_h + gap, FOLLOW_WIDTH * k, chip_h)
-  side = (WHEEL_BADGE + 2 * WHEEL_PAD) * k
+  row_h = CHIP_HEIGHT * k
+  mode = (x, margin + READOUT_ROWS * size + gap, MODE_WIDTH * k, row_h)
+  follow = (x, mode[1] + row_h + gap, FOLLOW_WIDTH * k, row_h)
+  side = WHEEL_BADGE * k
   wheel = (vx + vw - margin - side, margin + CLOCK_ROWS * CLOCK_SCALE * size + gap, side, side + ANGLE_ROW * k)
-  return StatusGeometry(wheel, (wheel[0] + side / 2, wheel[1] + side / 2, WHEEL_BADGE * k / 2), mode, follow)
+  return StatusGeometry(wheel, (wheel[0] + side / 2, wheel[1] + side / 2, side / 2), mode, follow)
 
 
 def clock_text(now: float | None = None) -> str:
@@ -596,11 +574,9 @@ class BirdsEyeHud:
     strip = int(g.strip)
     k = height / 1080
     rl.draw_rectangle(0, 0, strip, int(height), rl.Color(*BACKGROUND, 255))
-    rl.draw_rectangle(strip - 1, 0, 1, int(height), rl.Color(255, 255, 255, 14))
     long_active = reading is not None and reading.long_active
     limits = self._held_limits(limits, long_active)
-    track = TRACK if long_active else (*IDLE, 46)
-    rl.draw_rectangle_rounded(rl.Rectangle(g.x, g.top, g.width, g.bottom - g.top), 1.0, 8, rl.Color(*track))
+    rl.draw_rectangle_rounded(rl.Rectangle(g.x, g.top, g.width, g.bottom - g.top), 1.0, 8, rl.Color(*GLASS_FILL))
     self._glass_rim((g.x, g.top, g.width, g.bottom - g.top), 1.0)
     tick = 8 * k
     # The zero line is the only fixed mark.
@@ -664,14 +640,8 @@ class BirdsEyeHud:
     thickness = g.thin + (g.thick - g.thin) * strength
     top = g.bottom - thickness
     rl = self.rl
-    track_alpha = round(255 * (0.25 + 0.25 * strength)) if active else 60
-    track = (255, 255, 255, track_alpha) if active else (*IDLE, track_alpha)
-    # The road is drawn under the bar: a dark backing keeps the track and the indicator at the contrast they have
-    # on the black background, whatever passes beneath (lane lines, the path, the ego's shadow).
-    pad = TORQUE_BACKING_PAD * height / 1080
-    rl.draw_rectangle_rounded(rl.Rectangle(g.left - pad, top - pad, g.right - g.left + 2 * pad, thickness + 2 * pad), 1.0, 12,
-                              rl.Color(*TORQUE_BACKING))
-    rl.draw_rectangle_rounded(rl.Rectangle(g.left, top, g.right - g.left, thickness), 1.0, 12, rl.Color(*track))
+    # The track is glass like every other panel; the road shows through it and the indicator carries the contrast.
+    rl.draw_rectangle_rounded(rl.Rectangle(g.left, top, g.right - g.left, thickness), 1.0, 12, rl.Color(*GLASS_FILL))
     self._glass_rim((g.left, top, g.right - g.left, thickness), 1.0, 12)
     reach = torque * (g.right - g.left) / 2
     if alpha > 0.01 and abs(reach) >= 1.0:
@@ -783,11 +753,6 @@ class BirdsEyeHud:
     if follow is not None:
       self._draw_follow(follow, g.follow, k)
 
-  def _pill(self, rect, roundness) -> None:
-    rl = self.rl
-    rl.draw_rectangle_rounded(rl.Rectangle(*rect), roundness, 8, rl.Color(*PILL))
-    self._glass_rim(rect, roundness)
-
   def _fitted(self, text, size, room):
     """(size, width, height) of `text` at `size`, shrunk to fit `room`."""
     w, h = self.text.measure(text, size)
@@ -798,7 +763,6 @@ class BirdsEyeHud:
 
   def _draw_wheel(self, reading: SteeringReading, g: StatusGeometry, k: float) -> None:
     rl = self.rl
-    self._pill(g.wheel, 0.3)
     cx, cy, r = g.badge
     fill = (*GREEN, 235) if reading.lat_active else (*WHEEL_IDLE, 235)
     rl.draw_circle_v(rl.Vector2(cx, cy), r, rl.Color(*fill))
@@ -828,10 +792,10 @@ class BirdsEyeHud:
       text = f"{degrees:d}"
       x, y, w, h = g.wheel
       ring = 0.11 * ANGLE_SIZE * k   # the degree sign is drawn: the bitmap atlases hold ASCII only
-      size, tw, th = self._fitted(text, ANGLE_SIZE * k, w - 2 * WHEEL_PAD * k - 3 * ring)
+      size, tw, th = self._fitted(text, ANGLE_SIZE * k, w - 3 * ring)
       row = y + w   # the rows under the square badge area
       tx = x + (w - tw - 3 * ring) / 2
-      ty = row + (h - w - th) / 2 - WHEEL_PAD * k / 2
+      ty = row + (h - w - th) / 2
       self._angle = (text, size, round(tx), round(ty), tx + tw + 2 * ring, ty + 0.2 * th + ring, ring)
       self._angle_key = key
     text, size, tx, ty, ring_x, ring_y, ring = self._angle
@@ -840,25 +804,23 @@ class BirdsEyeHud:
     rl.draw_ring(rl.Vector2(ring_x, ring_y), 0.55 * ring, ring, 0, 360, 16, color)
 
   def _draw_mode(self, mode: DriveMode, rect, k: float) -> None:
-    self._pill(rect, CHIP_ROUNDNESS)
     if self.text is None:
       return
     key = (mode.experimental, rect)
     if key != self._mode_key:
       x, y, w, h = rect
-      size, tw, th = self._fitted(mode.label, CHIP_SIZE * k, w - 2 * CHIP_PAD * k)
-      self._mode, self._mode_key = (mode.label, size, round(x + (w - tw) / 2), round(y + (h - th) / 2)), key
+      size, _, th = self._fitted(mode.label, CHIP_SIZE * k, w)
+      self._mode, self._mode_key = (mode.label, size, round(x), round(y + (h - th) / 2)), key
     rgb = EXPERIMENTAL if mode.experimental else ACTUAL
     self.text.draw(*self._mode, self.rl.Color(*rgb, 255 if mode.enabled else DIMMED))
 
   def _draw_follow(self, follow: FollowReading, rect, k: float) -> None:
     rl = self.rl
-    self._pill(rect, CHIP_ROUNDNESS)
     x, y, w, h = rect
     rgb = TRAFFIC if follow.traffic else ACTUAL
     # The gap icon: bars widening toward the car, the nearest `bars` of them lit.
     icon_w = GAP_BARS[0][0] * k
-    centre = x + CHIP_PAD * k + icon_w / 2
+    centre = x + icon_w / 2
     base = y + h / 2 + (len(GAP_BARS) * GAP_BAR_STEP - (GAP_BAR_STEP - GAP_BARS[0][1])) * k / 2
     for index, (bar_w, bar_h) in enumerate(GAP_BARS):
       top = base - (index * GAP_BAR_STEP + bar_h) * k
@@ -866,22 +828,12 @@ class BirdsEyeHud:
       rl.draw_rectangle_rounded(rl.Rectangle(centre - bar_w * k / 2, top, bar_w * k, bar_h * k), 1.0, 4, color)
     if self.text is None:
       return
-    gap = None if follow.time_gap is None else round(follow.time_gap, 1)
-    key = (follow.label, gap, rect)
+    key = (follow.label, rect)
     if key != self._follow_key:
-      left = x + CHIP_PAD * k + icon_w + 16 * k
-      right = x + w - CHIP_PAD * k
-      gap_text, gap_draw = ('' if gap is None else f"{gap:.1f} s"), None
-      if gap_text:
-        size, tw, th = self._fitted(gap_text, CHIP_SIZE * k, (right - left) * 0.4)
-        gap_draw = (gap_text, size, round(right - tw), round(y + (h - th) / 2))
-        right -= tw + 16 * k
-      size, tw, th = self._fitted(follow.label, CHIP_SIZE * k, right - left)
-      self._follow, self._follow_key = ((follow.label, size, round(left), round(y + (h - th) / 2)), gap_draw), key
-    label, gap_draw = self._follow
-    self.text.draw(*label, rl.Color(*rgb, 255))
-    if gap_draw is not None:
-      self.text.draw(*gap_draw, rl.Color(*TICK, 255))
+      left = x + icon_w + 16 * k
+      size, _, th = self._fitted(follow.label, CHIP_SIZE * k, x + w - left)
+      self._follow, self._follow_key = (follow.label, size, round(left), round(y + (h - th) / 2)), key
+    self.text.draw(*self._follow, rl.Color(*rgb, 255))
 
   def _draw_clock(self, width, height) -> None:
     """The time of day at the top right of the view, on the readout's top margin."""

@@ -91,24 +91,24 @@ def accel_fills(rl, g):
 
 
 def torque_rects(rl):
-  """The torque bar's own rounded rectangles (track, indicator, notch), without the dark backing under it."""
+  """The torque bar's rounded rectangles: track, indicator, notch."""
   g = accel_geometry(LOGICAL_720P[1])
-  return [call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][0] > g.strip
-          and call[-1] != hud_module.TORQUE_BACKING]
+  return [call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][0] > g.strip]
 
 
-def test_torque_bar_sits_on_a_dark_backing_over_the_road():
-  view, rl, _ = hud(lambda: (sm(), None))
+def test_every_bar_track_is_the_same_glass_and_nothing_else_is_painted_behind_the_widgets():
+  g = accel_geometry(LOGICAL_720P[1])
+  view, rl, _ = status_hud(lambda: (status_sm(), None))
   view.render(*LOGICAL_720P)
-  calls = [call for call in rl.calls if call[0] == 'draw_rectangle_rounded']
-  backing = next(call for call in calls if call[-1] == hud_module.TORQUE_BACKING)
-  track = torque_rects(rl)[0]
-  assert calls.index(backing) < calls.index(track), 'under the track'
-  pad = hud_module.TORQUE_BACKING_PAD
-  assert backing[1] == pytest.approx((track[1][0] - pad, track[1][1] - pad, track[1][2] + 2 * pad, track[1][3] + 2 * pad))
-  assert hud_module.TORQUE_BACKING[:3] == (0, 0, 0) and hud_module.TORQUE_BACKING[3] >= 200, 'nearly opaque black'
-  assert not any(call[0] == 'draw_rectangle' and call[2] >= LOGICAL_720P[1] - hud_module.dock_height(LOGICAL_720P[1])
-                 and call[3] > LOGICAL_720P[0] / 2 for call in rl.calls), 'no black band is painted over the road'
+  accel_track = next(call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][1] == g.top)
+  torque_track = torque_rects(rl)[0]
+  assert accel_track[-1] == torque_track[-1] == hud_module.GLASS_FILL, 'one glass fill for both tracks'
+  rims = [call for call in rl.calls if call[0] == 'draw_rectangle_rounded_lines_ex']
+  assert [rim[1] for rim in rims] == [pytest.approx(accel_track[1]), pytest.approx(torque_track[1])], 'each with the rim, and no other panel'
+  assert all(rim[-1] == hud_module.GLASS_RIM and rim[-2] == hud_module.GLASS_RIM_PX for rim in rims)
+  # The only plain rectangle is the acceleration strip's solid background: no divider line, no band over the road.
+  plain = [call for call in rl.calls if call[0] == 'draw_rectangle']
+  assert [call[1:5] for call in plain] == [(0, 0, int(g.strip), LOGICAL_720P[1])]
 
 
 def test_reading_shows_the_plan_target_only_while_long_active():
@@ -183,7 +183,7 @@ def test_disengaged_bar_is_grey_with_the_setpoint_at_zero():
   assert accel_fills(rl, g) == [], 'no fill away from zero'
   assert [entry for entry in text.drawn if not entry[0].endswith(('AM', 'PM'))] == [], 'only the clock'
   track = next(call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][1] == g.top)
-  assert track[-1][:3] == hud_module.IDLE
+  assert track[-1] == hud_module.GLASS_FILL, 'the track is the same glass engaged or not'
   limit_ticks = [call for call in rl.calls if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.LIMIT]
   assert limit_ticks == [], 'limit ticks only while engaged'
   actual = [call for call in rl.calls if call[0] == 'draw_rectangle_rec' and call[-1][:3] == hud_module.ACTUAL]
@@ -361,7 +361,7 @@ def test_torque_bar_is_flat_and_stays_visible_when_inactive():
     view, rl, _ = hud(lambda: (sm(), 'CP'), feedback=feedback)
     view.render(*LOGICAL_720P)
     track, notch = torque_rects(rl)
-    assert track[1][2] == pytest.approx(t.right - t.left) and track[-1][:3] == hud_module.IDLE
+    assert track[1][2] == pytest.approx(t.right - t.left) and track[-1] == hud_module.GLASS_FILL
 
 
 def test_torque_bar_grows_and_returns_to_centre():
@@ -588,19 +588,15 @@ def test_drive_mode_reader():
 
 
 def test_follow_reader():
-  from openpilot.starpilot.system.starport.birds_eye_hud import FollowReading, personality_index, read_follow, time_gap
+  from openpilot.starpilot.system.starport.birds_eye_hud import FollowReading, personality_index, read_follow
   for raw, name in enumerate(('AGGRESSIVE', 'STANDARD', 'RELAXED')):
-    assert read_follow(status_sm(personality=raw)) == FollowReading(raw + 1, name, False, None), 'bars = raw + 1'
+    assert read_follow(status_sm(personality=raw)) == FollowReading(raw + 1, name, False), 'bars = raw + 1'
   assert personality_index(2) == 2 and personality_index('relaxed') == 2 and personality_index(SimpleNamespace(raw=0)) == 0
   assert personality_index(7) is None and personality_index(None) is None and personality_index('sport') is None
   traffic = read_follow(status_sm(personality=0, traffic=True))
   assert (traffic.bars, traffic.label, traffic.traffic) == (1, 'TRAFFIC', True)
   assert read_follow(status_sm(traffic=False)).label == 'STANDARD'
-  assert read_follow(status_sm(lead=36.0, v_ego=20.0)).time_gap == pytest.approx(1.8)
-  assert time_gap(status_sm(lead=36.0, v_ego=0.9)) is None, 'near standstill'
-  assert time_gap(status_sm(lead=None)) is None, 'no lead'
-  assert time_gap(status_sm(lead=150.0, v_ego=5.0)) is None, 'too long a gap to be worth a number'
-  assert time_gap(status_sm(lead=float('nan'))) is None
+  assert not hasattr(hud_module, 'time_gap') and read_follow(status_sm(lead=36.0)) == read_follow(status_sm()), 'the setting only, no measured gap'
   assert read_follow(sm()) is None, 'selfdriveState unseen'
   unreadable = status_sm()
   unreadable.messages['selfdriveState'].personality = SimpleNamespace(raw=9)
@@ -637,7 +633,7 @@ def test_status_widgets_overlap_nothing(width, height):
   assert g.wheel[0] + g.wheel[2] == pytest.approx(width - margin) and clock[1] + clock[3] < g.wheel[1]
   assert g.wheel[1] + g.wheel[3] <= sign[1], 'ends above the speed-limit sign'
   cx, cy, r = g.badge
-  assert g.wheel[0] <= cx - r and cx + r <= g.wheel[0] + g.wheel[2] and g.wheel[1] <= cy - r
+  assert (cx - r, cx + r, cy - r) == pytest.approx((g.wheel[0], g.wheel[0] + g.wheel[2], g.wheel[1])), 'the badge is the top of its box'
   assert cy + r < g.wheel[1] + g.wheel[3], 'rows left under the badge for the degrees'
   # The now-playing card where the birds-eye screen draws it: bottom left, small and big.
   cards = []
@@ -663,7 +659,7 @@ def test_status_sizes_read_on_a_1280x720_car_screen():
   from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
   g = status_geometry(*LOGICAL_720P)
   assert 2 * g.badge[2] == pytest.approx(110)
-  assert hud_module.CHIP_SIZE == 34 and g.mode[3] == g.follow[3] == pytest.approx(68)
+  assert hud_module.CHIP_SIZE == 34 and g.mode[3] == g.follow[3] == pytest.approx(46)
 
 
 class CountingText(FakeText):
@@ -699,10 +695,8 @@ def test_wheel_badge_follows_lateral_and_falls_back_to_a_drawn_wheel():
   # The right-hand spoke: a left (positive) angle lifts it, counter-clockwise on screen.
   right = spokes[0]
   assert right[2][0] > g.badge[0] and right[2][1] < g.badge[1]
-  pill = next(call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1] == pytest.approx(g.wheel))
-  assert pill[-1] == hud_module.PILL == hud_module.GLASS_FILL
-  assert any(call[0] == 'draw_rectangle_rounded_lines_ex' and call[1] == pytest.approx(g.wheel) and call[-1] == hud_module.GLASS_RIM
-             for call in rl.calls), 'glass: a rim over the fill'
+  assert not any(call[0].startswith('draw_rectangle_rounded') and call[1] == pytest.approx(g.wheel) for call in rl.calls), \
+    'no panel behind the wheel: it sits under the clock on the view'
   angle = next(entry for entry in text.drawn if entry[0] == '12')
   assert angle[1] == pytest.approx(hud_module.ANGLE_SIZE) and g.badge[1] + g.badge[2] <= angle[3] < g.wheel[1] + g.wheel[3]
   assert g.wheel[0] < angle[2] < g.wheel[0] + g.wheel[2]
@@ -794,13 +788,13 @@ def test_drive_mode_chip_is_orange_in_experimental_and_dims_while_not_enabled():
 
   value, size, x, y, color = chip()
   assert value == 'EXPERIMENTAL' and color == (*hud_module.EXPERIMENTAL, 255) == (255, 155, 63, 255)
-  assert size <= hud_module.CHIP_SIZE and g.mode[0] < x and g.mode[1] < y < g.mode[1] + g.mode[3]
+  assert size <= hud_module.CHIP_SIZE and x == pytest.approx(g.mode[0], abs=0.5) and g.mode[1] < y < g.mode[1] + g.mode[3], 'left-aligned'
   assert x + len(value) * size * 0.5 <= g.mode[0] + g.mode[2], 'fits the chip'
-  assert any(call[0] == 'draw_rectangle_rounded' and call[1] == pytest.approx(g.mode) and call[-1] == hud_module.PILL
-             for call in rl.calls)
+  assert not any(call[0].startswith('draw_rectangle_rounded') and call[1] == pytest.approx(g.mode) for call in rl.calls), 'text only'
   state.update(experimental=False)
-  value, size, _, _, color = chip()
+  value, size, chill_x, _, color = chip()
   assert value == 'CHILL' and size == pytest.approx(hud_module.CHIP_SIZE) and color == (*hud_module.ACTUAL, 255)
+  assert chill_x == x, 'both modes start at the same left edge'
   state.update(enabled=False)
   assert chip()[4] == (*hud_module.ACTUAL, hud_module.DIMMED)
   state.update(experimental=True)
@@ -808,7 +802,7 @@ def test_drive_mode_chip_is_orange_in_experimental_and_dims_while_not_enabled():
   assert text.measured.count('CHILL') == 1, 'measured when the mode changes, not when it dims'
 
 
-def test_follow_chip_draws_gap_bars_the_name_and_the_time_gap():
+def test_follow_row_draws_gap_bars_and_the_setting_name():
   from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
   g = status_geometry(*LOGICAL_720P)
   state = {'personality': 0, 'traffic': False, 'lead': None}
@@ -839,16 +833,13 @@ def test_follow_chip_draws_gap_bars_the_name_and_the_time_gap():
   assert hud_module.TRAFFIC not in (hud_module.ACTUAL, hud_module.EXPERIMENTAL, hud_module.GREEN)
   state.update(traffic=False, personality=0, lead=36.0)
   bars, texts = frame()
-  name, gap = texts
-  assert (name[0], gap[0]) == ('AGGRESSIVE', '1.8 s')
-  assert name[2] + len(name[0]) * name[1] * 0.5 <= gap[2], 'the name stops before the time gap'
-  assert gap[2] + len(gap[0]) * gap[1] * 0.5 <= g.follow[0] + g.follow[2]
+  assert [entry[0] for entry in texts] == ['AGGRESSIVE'], 'a lead adds no time gap: the setting only'
+  assert bars[0][1][0] == pytest.approx(g.follow[0]), 'the icon starts at the left edge, under the speed readout'
+  assert not any(call[0].startswith('draw_rectangle_rounded') and call[1] == pytest.approx(g.follow) for call in rl.calls), 'no panel'
   measured = len(text.measured)
-  state['lead'] = 36.4   # still 1.8 s
+  state['lead'] = 44.0
   frame()
   assert len(text.measured) == measured, 'measured only when the displayed value changes'
-  state['lead'] = 44.0
-  assert frame()[1][1][0] == '2.2 s'
 
 
 def test_status_widgets_wait_for_their_services():

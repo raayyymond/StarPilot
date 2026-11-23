@@ -376,6 +376,9 @@ class ProjectionOnroad:
     if widget is not None and feed is not None:
       self.now_playing = widget(self.fonts)
       self._resources.callback(self.now_playing.close)
+      from openpilot.selfdrive.ui.onroad import birds_eye_math
+      # The card is glass like the view's label and the HUD's bars, not the camera composition's tinted wash.
+      self.now_playing.glass = (birds_eye_math.GLASS_FILL, birds_eye_math.GLASS_RIM, birds_eye_math.GLASS_RIM_PX)
       self.now_playing_feed = feed()
       self._resources.callback(self.now_playing_feed.close)
       control, touch = getattr(native, 'now_playing_control', None), getattr(native, 'now_playing_touch', None)
