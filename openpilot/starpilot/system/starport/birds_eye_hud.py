@@ -79,7 +79,8 @@ TURN_SIGNAL_RC = 0.3                           # its pulse filter: jumps bright 
 TURN_SIGNAL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons_mici/onroad/turn_signal_left.png'
 WHEEL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons/chffr_wheel.png'
 
-STATUS_GAP = 8                                 # status widgets: gap to the readout or clock above, and between the two text rows
+STATUS_GAP = 24                                # status widgets: clear space under the readout or the clock, on an 8 px rhythm
+STATUS_ROW_GAP = 16                            # between the drive-mode and follow-distance rows
 READOUT_ROWS = 1.65                            # the speed readout's height (number and caption, as the fonts draw them) over its number size
 CLOCK_ROWS = 1.15                              # the clock's height over its text size
 WHEEL_BADGE = 110                              # steering-wheel badge diameter
@@ -422,7 +423,7 @@ def status_geometry(width: float, height: float) -> StatusGeometry:
   x = vx + margin
   row_h = CHIP_HEIGHT * k
   mode = (x, margin + READOUT_ROWS * size + gap, MODE_WIDTH * k, row_h)
-  follow = (x, mode[1] + row_h + gap, FOLLOW_WIDTH * k, row_h)
+  follow = (x, mode[1] + row_h + STATUS_ROW_GAP * k, FOLLOW_WIDTH * k, row_h)
   side = WHEEL_BADGE * k
   wheel = (vx + vw - margin - side, margin + CLOCK_ROWS * CLOCK_SCALE * size + gap, side, side + ANGLE_ROW * k)
   return StatusGeometry(wheel, (wheel[0] + side / 2, wheel[1] + side / 2, side / 2), mode, follow)
