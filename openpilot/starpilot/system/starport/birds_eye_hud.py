@@ -31,8 +31,8 @@ vCruiseCluster, else vCruise, valid in (0, SET_SPEED_NA); "--" otherwise and whe
 false, i.e. disengaged or lateral-only), mph or km/h by `metric`. The numbers are
 twice the birds-eye lead label's size (birds_eye_math.label_font_size over the view rect), with small unit captions.
 
-Status cluster: bottom left of the view, right of the acceleration strip, above the torque dock and below the left
-turn arrow, each widget on a glass pill (a faint light fill under a bright rim, like the birds-eye lead label).
+Status widgets: the mode and follow-distance chips under the speed readout and the wheel pill under the clock, above
+the turn arrows; each on a glass pill (a faint light fill under a bright rim, like the birds-eye lead label).
 - Steering wheel: the comma's chffr_wheel art on a round badge, turned by carState.steeringAngleDeg (left-positive, so
   counter-clockwise on screen), green while carControl.latActive and grey otherwise, the whole degrees under it; a
   drawn ring with three spokes when the texture cannot be loaded.
@@ -77,16 +77,18 @@ TURN_SIGNAL_RC = 0.3                           # its pulse filter: jumps bright 
 TURN_SIGNAL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons_mici/onroad/turn_signal_left.png'
 WHEEL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons/chffr_wheel.png'
 
-STATUS_BOTTOM = 20                             # status cluster: gap above the torque dock, logical px at 1080 rows
-STATUS_GAP = 12                                # between its pills
-WHEEL_BADGE = 130                              # steering-wheel badge diameter
+STATUS_GAP = 12                                # status widgets: gap to the readout or clock above, and between chips
+READOUT_ROWS = 1.65                            # the speed readout's height (number and caption, as the fonts draw them) over its number size
+CLOCK_ROWS = 1.15                              # the clock's height over its text size
+WHEEL_BADGE = 110                              # steering-wheel badge diameter
 WHEEL_PAD = 8                                  # pill padding around the badge
 WHEEL_ART = 0.78                               # wheel art over the badge diameter (the comma's 144 in a 192 button)
-ANGLE_SIZE = 38                                # the degrees under the badge
-ANGLE_ROW = 52                                 # pill rows under the badge for the degrees
+ANGLE_SIZE = 36                                # the degrees under the badge
+ANGLE_ROW = 46                                 # pill rows under the badge for the degrees
 CHIP_SIZE = 34                                 # drive-mode and follow-distance text
 CHIP_HEIGHT = 68
 CHIP_PAD = 24                                  # text inset from the chip's ends
+CHIP_ROUNDNESS = 0.35                          # corner radius over half the chip height: a rounded rectangle, not a capsule
 MODE_WIDTH = 320
 FOLLOW_WIDTH = 440
 GAP_BARS = ((38, 9), (30, 9), (22, 9))         # the gap icon's bars, nearest first (bottom up): (width, height)
@@ -434,19 +436,18 @@ class StatusGeometry:
 
 
 def status_geometry(width: float, height: float) -> StatusGeometry:
-  """Bottom left of the view: the wheel pill, and right of it the mode chip over the follow-distance chip."""
+  """Top left, under the speed readout: the mode chip over the follow-distance chip. Top right, under the clock:
+  the wheel pill. All end above the turn arrows (mid height) and the speed-limit sign (right, below the wheel)."""
   k = height / 1080
-  vx, _, _, vh = view_rect(width, height)
-  bottom = vh - STATUS_BOTTOM * k
-  x = vx + SIGNAL_MARGIN * k
-  side = (WHEEL_BADGE + 2 * WHEEL_PAD) * k
-  wheel_h = side + ANGLE_ROW * k
-  wheel = (x, bottom - wheel_h, side, wheel_h)
-  chips = x + side + STATUS_GAP * k
+  vx, _, vw, _ = view_rect(width, height)
+  margin, gap, size = SIGNAL_MARGIN * k, STATUS_GAP * k, readout_size(width, height)
+  x = vx + margin
   chip_h = CHIP_HEIGHT * k
-  follow = (chips, bottom - chip_h, FOLLOW_WIDTH * k, chip_h)
-  mode = (chips, follow[1] - STATUS_GAP * k - chip_h, MODE_WIDTH * k, chip_h)
-  return StatusGeometry(wheel, (x + side / 2, wheel[1] + side / 2, WHEEL_BADGE * k / 2), mode, follow)
+  mode = (x, margin + READOUT_ROWS * size + gap, MODE_WIDTH * k, chip_h)
+  follow = (x, mode[1] + chip_h + gap, FOLLOW_WIDTH * k, chip_h)
+  side = (WHEEL_BADGE + 2 * WHEEL_PAD) * k
+  wheel = (vx + vw - margin - side, margin + CLOCK_ROWS * CLOCK_SCALE * size + gap, side, side + ANGLE_ROW * k)
+  return StatusGeometry(wheel, (wheel[0] + side / 2, wheel[1] + side / 2, WHEEL_BADGE * k / 2), mode, follow)
 
 
 def clock_text(now: float | None = None) -> str:
@@ -839,7 +840,7 @@ class BirdsEyeHud:
     rl.draw_ring(rl.Vector2(ring_x, ring_y), 0.55 * ring, ring, 0, 360, 16, color)
 
   def _draw_mode(self, mode: DriveMode, rect, k: float) -> None:
-    self._pill(rect, 1.0)
+    self._pill(rect, CHIP_ROUNDNESS)
     if self.text is None:
       return
     key = (mode.experimental, rect)
@@ -852,7 +853,7 @@ class BirdsEyeHud:
 
   def _draw_follow(self, follow: FollowReading, rect, k: float) -> None:
     rl = self.rl
-    self._pill(rect, 1.0)
+    self._pill(rect, CHIP_ROUNDNESS)
     x, y, w, h = rect
     rgb = TRAFFIC if follow.traffic else ACTUAL
     # The gap icon: bars widening toward the car, the nearest `bars` of them lit.

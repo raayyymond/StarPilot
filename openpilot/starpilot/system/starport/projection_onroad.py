@@ -17,7 +17,7 @@ MODE_NOTICE_NS = 2_000_000_000  # how long the driving-mode banner stays after t
 RECONNECT_NOTICE_NS = 8_000_000_000  # how long "why it reconnected" stays once the car screen is back
 DRIVER_MONITOR_HOLD_NS = 350_000_000
 BIRDS_EYE_SETTINGS_NS = 1_000_000_000  # birds-eye-only mode: how often road colors and longitudinal control are re-read
-BIRDS_EYE_CARD_MARGIN = 12  # birds-eye-only mode: the now-playing card's gap to the HUD's strip and dock, px at 1080 rows
+BIRDS_EYE_CARD_MARGIN = (28, 20)  # birds-eye-only mode: the now-playing card's gap to the HUD's strip and torque bar, px at 1080 rows
 CONTENTS = ('birds_eye', 'full')  # identity.STREAM_CONTENTS: what the car screen shows while driving
 STANDBY_LOGO = Path(__file__).parents[3] / 'selfdrive/assets/images/starpilot_logo.png'
 BUBBLE_REDUNDANT_ALERTS = frozenset(('preLaneChangeLeft', 'preLaneChangeRight', 'laneChange',
@@ -145,15 +145,13 @@ def native_dependencies():
 
 
 def birds_eye_card_placement(placed, width, height, view):
-  """The now-playing placement moved inside `view` (x, y, width, height: the birds-eye HUD's view rect), so the card
-  sits right of the acceleration strip and above the torque dock; a copy, the layout's own dict is not changed."""
+  """The now-playing placement for the birds-eye screen: the bottom left of `view` (x, y, width, height: the HUD's
+  view rect), right of the acceleration strip and above the torque bar, whatever the layout's own position (that
+  is for the camera composition). A copy; the layout's dict, and its size, opacity and enabled, are unchanged."""
   from openpilot.starpilot.system.starport.projection_layout import now_playing_size
-  margin = round(BIRDS_EYE_CARD_MARGIN * height / 1080)
-  card_w, card_h = now_playing_size(placed)
-  left, top = view[0] + margin, view[1] + margin
-  x = max(left, min(placed['x'], min(width, view[0] + view[2]) - margin - card_w))
-  y = max(top, min(placed['y'], view[1] + view[3] - margin - card_h))
-  return {**placed, 'x': x, 'y': y}
+  left, bottom = (round(value * height / 1080) for value in BIRDS_EYE_CARD_MARGIN)
+  _, card_h = now_playing_size(placed)
+  return {**placed, 'x': view[0] + left, 'y': view[1] + view[3] - bottom - card_h}
 
 
 def birds_eye_dependencies():

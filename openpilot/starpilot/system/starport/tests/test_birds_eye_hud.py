@@ -612,45 +612,57 @@ def overlap(a, b):
 
 
 @pytest.mark.parametrize('width, height', [(1920, 1080), LOGICAL_720P, (1280, 720), (2880, 1080)])
-def test_status_cluster_overlaps_nothing(width, height):
+def test_status_widgets_overlap_nothing(width, height):
   from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
   from openpilot.starpilot.system.starport.projection_onroad import birds_eye_card_placement
   k = height / 1080
   g = status_geometry(width, height)
   strip = accel_geometry(height).strip
   vx, vy, vw, vh = view_rect(width, height)
-  pills = g.pills
-  for index, pill in enumerate(pills):
-    assert pill[0] >= strip and pill[0] + pill[2] <= vx + vw / 2, 'in the left half of the view, right of the accel strip'
-    assert pill[1] + pill[3] <= vh, 'above the torque dock'
-    for other in pills[index + 1:]:
-      assert not overlap(pill, other)
+  margin = hud_module.SIGNAL_MARGIN * k
+  size = readout_size(width, height)
+  readout = (strip, 0, vw / 2, margin + hud_module.READOUT_ROWS * size)
+  clock = (vx + vw / 2, 0, vw / 2, margin + hud_module.CLOCK_ROWS * hud_module.CLOCK_SCALE * size)
+  arrow_h = hud_module.SIGNAL_HEIGHT * k
+  arrow_w = arrow_h * 208 / 192
+  arrows = [(strip + margin, height / 2 - arrow_h / 2, arrow_w, arrow_h), (width - margin - arrow_w, height / 2 - arrow_h / 2, arrow_w, arrow_h)]
+  sign_h = max(56.0, 0.12 * height)   # birds_eye_renderer._speed_limit_sign: right-aligned, below the turn arrow's reserve
+  sign = (width - 16 - 0.8 * sign_h, (hud_module.SIGNAL_MARGIN + hud_module.SIGNAL_HEIGHT) * k, 0.8 * sign_h, sign_h)
+  t = torque_geometry(width, height)
+  torque = (t.left, t.bottom - t.thick, t.right - t.left, t.thick)
+  # The chips sit under the speed readout at the left margin, the mode chip over the follow chip.
+  assert g.mode[0] == g.follow[0] == pytest.approx(strip + margin)
+  assert readout[1] + readout[3] < g.mode[1] and g.mode[1] + g.mode[3] < g.follow[1], 'under the readout, stacked'
+  # The wheel pill sits under the clock at the right margin, above the speed-limit sign.
+  assert g.wheel[0] + g.wheel[2] == pytest.approx(width - margin) and clock[1] + clock[3] < g.wheel[1]
+  assert g.wheel[1] + g.wheel[3] <= sign[1], 'ends above the speed-limit sign'
   cx, cy, r = g.badge
   assert g.wheel[0] <= cx - r and cx + r <= g.wheel[0] + g.wheel[2] and g.wheel[1] <= cy - r
   assert cy + r < g.wheel[1] + g.wheel[3], 'rows left under the badge for the degrees'
-  # The left turn arrow at mid height, the speed readout at the top and the torque bar in the dock.
-  arrow_h = hud_module.SIGNAL_HEIGHT * k
-  arrow = (strip + hud_module.SIGNAL_MARGIN * k, height / 2 - arrow_h / 2, arrow_h * 208 / 192, arrow_h)
-  readout = (strip, 0, vw, hud_module.SIGNAL_MARGIN * k + 1.4 * readout_size(width, height))
-  t = torque_geometry(width, height)
-  torque = (t.left, t.bottom - t.thick, t.right - t.left, t.thick)
-  # The now-playing card where the birds-eye screen draws it, small and big.
+  # The now-playing card where the birds-eye screen draws it: bottom left, small and big.
   cards = []
-  for size in ('small', 'big'):
-    placed = {'x': width - 30 - 520, 'y': height - 30 - 96, 'enabled': True, 'size': size}   # the layout's default
+  for card_size in ('small', 'big'):
+    placed = {'x': width - 30 - 520, 'y': height - 30 - 96, 'enabled': True, 'size': card_size}   # the layout's default
     placed = birds_eye_card_placement(placed, width, height, (vx, vy, vw, vh))
-    cards.append((placed['x'], placed['y'], *((520, 96) if size == 'small' else (640, 264))))
-  for pill in pills:
-    for other in (arrow, readout, torque, *cards):
+    cards.append((placed['x'], placed['y'], *((520, 96) if card_size == 'small' else (640, 264))))
+  pills = g.pills
+  for index, pill in enumerate(pills):
+    assert pill[0] >= strip and pill[0] + pill[2] <= width and pill[1] >= 0
+    for other in (*pills[index + 1:], *arrows, torque, *cards):
       assert not overlap(pill, other), (pill, other)
+  for chip in (g.mode, g.follow):
+    assert not overlap(chip, readout) and not overlap(chip, clock)
+  assert not overlap(g.wheel, clock) and not overlap(g.wheel, sign)
   for card in cards:
-    assert card[0] >= strip and card[1] + card[3] <= vh and not overlap(card, torque) and not overlap(card, readout)
+    assert card[0] == pytest.approx(strip + margin, abs=1) and card[1] + card[3] <= vh, 'bottom left, above the torque bar'
+    assert not overlap(card, torque) and not overlap(card, readout)
+  assert not overlap(cards[0], arrows[0]), 'the small card is clear of the left turn arrow'
 
 
 def test_status_sizes_read_on_a_1280x720_car_screen():
   from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
   g = status_geometry(*LOGICAL_720P)
-  assert 2 * g.badge[2] == pytest.approx(130)
+  assert 2 * g.badge[2] == pytest.approx(110)
   assert hud_module.CHIP_SIZE == 34 and g.mode[3] == g.follow[3] == pytest.approx(68)
 
 

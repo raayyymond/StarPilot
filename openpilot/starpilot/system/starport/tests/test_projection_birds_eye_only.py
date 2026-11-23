@@ -248,27 +248,20 @@ class TestBirdsEyeOnly(unittest.TestCase):
     view = self.view(native, layout)
     return view, native, widget, feed, order
 
-  def test_card_placement_is_moved_above_the_dock_and_right_of_the_strip(self):
+  def test_card_is_placed_bottom_left_above_the_torque_bar_and_right_of_the_strip(self):
     from openpilot.starpilot.system.starport import birds_eye_hud
     for viewport in (VIEWPORT, (1860, 1080), (1920, 1080), (1280, 720)):
       width, height = viewport
       rect = birds_eye_hud.view_rect(width, height)
-      margin = round(projection.BIRDS_EYE_CARD_MARGIN * height / 1080)
+      left, bottom = (round(value * height / 1080) for value in projection.BIRDS_EYE_CARD_MARGIN)
       default = dict(default_layout_for_viewport(VIEWPORT)['widgets']['now_playing'], x=width - 30 - 520, y=height - 30 - 96)
-      if width >= 1860:  # the smallest canvas a layout document describes
-        self.assertEqual(default, default_layout_for_viewport(viewport)['widgets']['now_playing'])
-      self.assertGreater(default['y'] + 96, rect[3], 'the layout default lands on the torque dock')
       saved = dict(default)
       moved = projection.birds_eye_card_placement(default, width, height, rect)
       self.assertEqual(default, saved, 'the layout document is not changed')
-      self.assertEqual((moved['x'], moved['y']), (default['x'], rect[3] - margin - 96))
+      self.assertEqual((moved['x'], moved['y']), (rect[0] + left, rect[3] - bottom - 96))
       self.assertEqual({key: moved[key] for key in moved if key not in 'xy'}, {key: default[key] for key in default if key not in 'xy'})
       big = projection.birds_eye_card_placement({**default, 'size': 'big', 'x': 0, 'y': 0}, width, height, rect)
-      self.assertEqual((big['x'], big['y']), (rect[0] + margin, margin), 'right of the acceleration strip')
-      corner = projection.birds_eye_card_placement({**default, 'size': 'big', 'x': width, 'y': height}, width, height, rect)
-      self.assertEqual((corner['x'], corner['y']), (width - margin - 640, rect[3] - margin - 264))
-      inside = {**default, 'x': rect[0] + 200, 'y': 300}
-      self.assertEqual(projection.birds_eye_card_placement(inside, width, height, rect), inside, 'a card in the view stays put')
+      self.assertEqual((big['x'], big['y']), (rect[0] + left, rect[3] - bottom - 264), 'the layout position is for the camera composition')
 
   def test_card_is_fed_only_while_driving_and_placed_and_draws_after_the_hud(self):
     view, native, widget, feed, order = self.music()
@@ -286,7 +279,10 @@ class TestBirdsEyeOnly(unittest.TestCase):
     state = order[-1][1]
     placed = state.customization['layouts']['large']['now_playing']
     saved = view.customization['widgets']['now_playing']
-    self.assertEqual((placed['x'], placed['y']), (saved['x'], 1080 - 140 - 12 - 96), 'above the torque dock')
+    from openpilot.starpilot.system.starport import birds_eye_hud
+    strip = birds_eye_hud.accel_geometry(1080).strip
+    self.assertEqual((placed['x'], placed['y']), (strip + 28, 1080 - 140 - 20 - 96), 'bottom left, above the torque bar')
+    self.assertNotEqual(placed['x'], saved['x'])
     self.assertEqual((state.alert.size, state.viewport_width), ('none', VIEWPORT[0]))
     view.render()
     self.assertIs(order[-1][1], state, 'the moved placement is built once per layout, not per frame')
@@ -297,7 +293,9 @@ class TestBirdsEyeOnly(unittest.TestCase):
     view.prepare()
     feed.set_enabled.assert_called_with(False)
     view.render()
-    self.assertEqual(order[-1][1].customization['layouts']['large']['now_playing'], layout['widgets']['now_playing'])
+    redrawn = order[-1][1].customization['layouts']['large']['now_playing']
+    self.assertEqual({**redrawn, 'x': 600, 'y': 300}, layout['widgets']['now_playing'], 'a new layout is picked up; only its position is replaced')
+    self.assertEqual((redrawn['x'], redrawn['y']), (placed['x'], placed['y']))
     view.close()
     self.assertEqual(order[-2:], ['feed_closed', 'widget_closed'])
 

@@ -105,6 +105,7 @@ SOFT_ENDS = False           # lines and the path end with a hard cut: the design
 MIN_DRAW_DISTANCE = 10.0
 MAX_DRAW_DISTANCE = 100.0
 LABEL_PAD = 6.0
+LABEL_ROUNDNESS = 0.35  # the label pill's corner radius over half its height: a rounded rectangle, not a capsule
 LABEL_SMOOTHING = 0.5   # per frame, toward the glyph-attached label position
 LABEL_SNAP_PX = 80.0    # a jump larger than this (side flip, a new lead) is taken directly
 SUBLABEL_SCALE = 0.62   # curve tag, relative to the distance label
@@ -1300,7 +1301,7 @@ class BirdsEyeRenderer(Widget):
     y = min(max(float(screen[:, 1].mean()) - box_h / 2, rect.y + 4 + pad), rect.y + rect.height - box_h - 4 - pad)
     x, y = self._label_position(previous, x, y)
     pill = rl.Rectangle(x - pad, y - pad, box_w + 2 * pad, box_h + 2 * pad)
-    roundness = 1.0
+    roundness = LABEL_ROUNDNESS
     self._glass(pill, roundness)
     if hard_brake:  # modelV2.meta.hardBrakePredicted: the nearest lead's pill border pulses red
       pulse = 0.5 + 0.5 * math.sin(2 * math.pi * HARD_BRAKE_HZ * self.clock())
