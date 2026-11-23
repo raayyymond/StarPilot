@@ -9,7 +9,7 @@ go through the same matrix on the CPU, drawn as flat-shaded fans in painter's or
 Labels and the speed-limit sign are ordinary 2D drawing in pixels.
 
 The look is flat: a solid black background, no gradients, and panels (the lead label, the overlay card) drawn as
-glass: a dark smoked tint under a bright hairline rim (bem.GLASS_FILL / GLASS_RIM).
+glass: a smoked tint under a bright hairline rim (bem.GLASS_FILL / GLASS_RIM).
 
 Drawing cost: a frame issues O(ribbons) C calls, not O(vertices). Each road edge, lane line and the road fill is
 one single-coloured DrawTriangleStrip per valid run plus a few constant-alpha strips for its soft end (each line
@@ -808,7 +808,7 @@ class BirdsEyeRenderer(Widget):
       rl.draw_rectangle(int(rect.x), int(rect.y), int(rect.width), int(rect.height), rl.Color(*BACKGROUND, 255))
 
   def _glass(self, rect, roundness: float, segments: int = 8) -> None:
-    """A glass panel: a dark smoked tint under a bright hairline rim."""
+    """A glass panel: a smoked tint under a bright hairline rim."""
     a = self.opacity
     rl.draw_rectangle_rounded(rect, roundness, segments, rl.Color(*bem.GLASS_FILL[:3], int(bem.GLASS_FILL[3] * a)))
     rl.draw_rectangle_rounded_lines_ex(rect, roundness, segments, bem.GLASS_RIM_PX, rl.Color(*bem.GLASS_RIM[:3], int(bem.GLASS_RIM[3] * a)))

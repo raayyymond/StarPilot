@@ -34,7 +34,7 @@ twice the birds-eye lead label's size (birds_eye_math.label_font_size over the v
 Status widgets, drawn straight on the view with no panel behind them: the drive mode and the follow distance as
 left-aligned text under the speed readout, and the steering wheel with its angle under the clock; all above the
 turn arrows. The bars (the acceleration track, the torque track) are glass, like the birds-eye lead label and the
-music card: a dark smoked tint under a bright rim.
+music card: a smoked tint under a bright rim.
 - Steering wheel: the comma's chffr_wheel art on a round badge, turned by carState.steeringAngleDeg (left-positive, so
   counter-clockwise on screen), green while carControl.latActive and grey otherwise, the whole degrees under it; a
   drawn ring with three spokes when the texture cannot be loaded.
@@ -96,7 +96,7 @@ GAP_BAR_STEP = 14                              # bar pitch
 PERSONALITIES = ('AGGRESSIVE', 'STANDARD', 'RELAXED')   # log.LongitudinalPersonality by raw value
 
 BACKGROUND = (0, 0, 0)                                       # birds_eye_renderer's solid background
-GLASS_FILL, GLASS_RIM, GLASS_RIM_PX = (28, 30, 36, 168), (255, 255, 255, 112), 1.5   # birds_eye_math's glass panel
+GLASS_FILL, GLASS_RIM, GLASS_RIM_PX = (46, 50, 60, 218), (255, 255, 255, 112), 1.5   # birds_eye_math's glass panel
 IDLE = (220, 224, 232)                                       # disengaged fill / track
 TICK = (170, 180, 198)                                       # birds_eye_renderer's rung-label grey
 LIMIT = (235, 238, 245)
