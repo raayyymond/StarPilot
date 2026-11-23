@@ -2,7 +2,7 @@
 
 Frames are rendered only while requested. Touch input controls navigation favorites and drive bookmarks.
 Onroad, each new camera frame is drawn exactly once, as soon as it lands (see
-CameraPacer). With stream_content "birds_eye" (the default) no camera is drawn,
+CameraPacer). With stream_content "birds_eye" (Galaxy's "3D drive render" set to StarPort, the default) no camera is drawn,
 so frames follow the encoder interval. When the encoder takes NV12, the frame is converted on the GPU,
 and it can be read back without stalling the renderer.
 """
@@ -142,6 +142,12 @@ def wait_for_request(producer: FrameProducer) -> FrameRequest:
   raise TimeoutError("Android Auto did not request current UI frames")
 
 
+def saved_stream_content(params) -> str:
+  """The car screen's content for the saved "3D drive render" choice; ``params`` needs only the read interface."""
+  from openpilot.starpilot.ui import drive_render
+  return drive_render.stream_content(drive_render.read(params))
+
+
 def run(frames_path: str, touch_path: str | None = None, control_path: str | None = None,
         stream_content: str | None = None) -> int:
   if os.geteuid() == 0:
@@ -200,7 +206,12 @@ def run(frames_path: str, touch_path: str | None = None, control_path: str | Non
     from openpilot.starpilot.system.starport import identity as identity_store
     config = identity_store.load_config()
     # A preview (./aapreview --stream-content) may override the saved choice; starportd never passes it.
+    content_override = stream_content
     stream_content = stream_content or config["stream_content"]
+    if content_override is None:
+      # Galaxy's "3D drive render" choice decides for this connection: the render only when StarPort is chosen,
+      # the front camera when it is off or drawn on the comma's own screen.
+      stream_content = saved_stream_content(ui_state.params)
     viewport = (geometry.logical_width, geometry.logical_height)
     watcher = ProjectionLayoutWatcher(viewport, display_seed=comma_display_seed)
     layout = ProjectionOnroad(viewport=viewport, customization=watcher.load(),

@@ -16,7 +16,7 @@ from typing import Protocol
 from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.starpilot.ui.onroad_rear_fog import render_rear_fog
-from openpilot.starpilot.ui import clip
+from openpilot.starpilot.ui import clip, drive_render
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.starpilot.ui.onroad_customization import (CLOCK_WIDGET, MODE_WIDGET, RAIL_WIDGETS, STOPPED_TIMER_WIDGET, placement, rgba,
                                                          widget_order, widget_size)
@@ -144,6 +144,9 @@ class OnroadView:
     self.projection_exit_layer: ProjectionControlLayer | None = None
     # The native screen sets this while Android Auto streams the car view: draw black + alerts only.
     self.streaming_blackout: Callable[[], bool] | None = None
+    # The native comma 3 / 3X screen sets this (an onroad_drive_render.DriveRenderLayer): the 3D drive render
+    # replaces the camera composition while Galaxy's "3D drive render" is set to Comma display.
+    self.drive_render = None
     self.pip_layer = pip_layer
     self.stock_confidence_layer: OverlayLayer | None = None
     self.stock_confidence_reset: Callable[[], None] | None = None
@@ -184,10 +187,47 @@ class OnroadView:
       raise ValueError("Camera observation requires a camera renderer")
     if (blackout := getattr(self, "streaming_blackout", None)) is not None and blackout():
       self._alerts_only(state)
+    elif self.drive_render_active(state):
+      self._drive_render(state)
     elif self.fonts.profile == Profile.LARGE:
       self._large(state)
     else:
       self._compact(state)
+
+  def drive_render_active(self, state: OnroadState) -> bool:
+    """The comma's own large screen draws the 3D drive render in place of the camera for this frame.
+
+    Never the projection, a layout or replay preview, or the reverse driver camera; a render that cannot be built
+    leaves the camera composition in place.
+    """
+    layer = getattr(self, "drive_render", None)
+    return bool(layer is not None and self.fonts.profile == Profile.LARGE and self.projection_viewport is None and
+                state.visual_preview is None and not state.reverse_driver_camera and
+                drive_render.effective(state.customization.get(drive_render.FIELD), True) == drive_render.DEVICE and
+                layer.ready())
+
+  def _drive_render(self, state: OnroadState) -> None:
+    """The 3D drive render over the content area: no camera receive/upload, model overlay, widgets, map or PiP work.
+
+    Alerts, the developer sidebar, the blind-spot and signal borders and the engagement-colour border stay.
+    """
+    width, height = state.viewport_width, 1080
+    frame = rl.Rectangle(0, 0, width, height)
+    content = rl.Rectangle(30, 30, width - 60, height - 60)
+    rl.draw_rectangle_rec(frame, rl.BLACK)
+    clip.begin_scissor_mode(30, 30, int(content.width), int(content.height))
+    try:
+      self.drive_render.render(content, state)
+      if (quick_select := getattr(self, 'quick_select_layer', None)) is not None:
+        quick_select(content, state)
+      self.alert.render(content, state.alert)
+    finally:
+      clip.end_scissor_mode()
+    if state.appearance.show_developer_sidebar:
+      render_live_sidebar(self.fonts, rl.Rectangle(width, 0, SIDEBAR_WIDTH, height), state.developer_metrics)
+    rl.draw_rectangle_lines_ex(frame, 30, rl.BLACK)
+    rl.draw_rectangle_rounded_lines_ex(content, 0.12, 10, 30, axis_status_color(state))
+    render_large_half_borders(state, state.observed_ns / 1e9 if state.observed_ns else rl.get_time(), content, int(height))
 
   def _alerts_only(self, state: OnroadState) -> None:
     """Black screen with only the alert layer: no camera receive/upload, model, HUD, map or PiP work."""
