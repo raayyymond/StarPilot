@@ -150,7 +150,7 @@ def test_streaming_blackout_still_wins():
 
 def test_layer_builds_once_places_the_view_and_hud_and_closes():
   render_view, hud = Mock(), Mock()
-  hud.view_rect.return_value = (60, 0, 1740, 900)
+  hud.render_rect.return_value = (60, 0, 1740, 1020)
   factory = Mock(return_value=(render_view, hud))
   ui = NS(has_longitudinal_control=False)
   layer = onroad_drive_render.DriveRenderLayer('fonts', ui, factory=factory)
@@ -163,8 +163,8 @@ def test_layer_builds_once_places_the_view_and_hud_and_closes():
     rl.Rectangle = lambda *values: values
     content = NS(x=30, y=30, width=1800, height=1020)
     layer.render(content, current)
-  hud.view_rect.assert_called_once_with(1800, 1020)
-  render_view.render.assert_called_once_with((90, 30, 1740, 900))
+  hud.render_rect.assert_called_once_with(1800, 1020)
+  render_view.render.assert_called_once_with((90, 30, 1740, 1020))
   assert (render_view.panel, render_view.opacity, render_view.metric, render_view.long_control) == (False, 1.0, False, False)
   assert render_view.road_style == {'path': '#11223344'} and render_view.parent_clip is content
   rl.rl_translatef.assert_called_once_with(30, 30, 0)

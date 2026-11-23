@@ -48,7 +48,7 @@ class DriveRenderLayer:
     view.metric = bool(state.metric)
     view.road_style = state.customization.get('roadColors', {}).get('large', {})
     view.long_control = bool(getattr(self.ui_state, 'has_longitudinal_control', True))
-    x, y, width, height = hud.view_rect(content.width, content.height)
+    x, y, width, height = hud.render_rect(content.width, content.height)
     view.render(rl.Rectangle(content.x + x, content.y + y, width, height))
     hud.metric = view.metric
     # The HUD draws from (0, 0) and sets no scissors of its own, so a translation places it.

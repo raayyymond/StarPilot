@@ -91,8 +91,24 @@ def accel_fills(rl, g):
 
 
 def torque_rects(rl):
+  """The torque bar's own rounded rectangles (track, indicator, notch), without the dark backing under it."""
   g = accel_geometry(LOGICAL_720P[1])
-  return [call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][0] > g.strip]
+  return [call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1][0] > g.strip
+          and call[-1] != hud_module.TORQUE_BACKING]
+
+
+def test_torque_bar_sits_on_a_dark_backing_over_the_road():
+  view, rl, _ = hud(lambda: (sm(), None))
+  view.render(*LOGICAL_720P)
+  calls = [call for call in rl.calls if call[0] == 'draw_rectangle_rounded']
+  backing = next(call for call in calls if call[-1] == hud_module.TORQUE_BACKING)
+  track = torque_rects(rl)[0]
+  assert calls.index(backing) < calls.index(track), 'under the track'
+  pad = hud_module.TORQUE_BACKING_PAD
+  assert backing[1] == pytest.approx((track[1][0] - pad, track[1][1] - pad, track[1][2] + 2 * pad, track[1][3] + 2 * pad))
+  assert hud_module.TORQUE_BACKING[:3] == (0, 0, 0) and hud_module.TORQUE_BACKING[3] >= 200, 'nearly opaque black'
+  assert not any(call[0] == 'draw_rectangle' and call[2] >= LOGICAL_720P[1] - hud_module.dock_height(LOGICAL_720P[1])
+                 and call[3] > LOGICAL_720P[0] / 2 for call in rl.calls), 'no black band is painted over the road'
 
 
 def test_reading_shows_the_plan_target_only_while_long_active():
@@ -308,7 +324,8 @@ def test_geometry_at_1280x720():
   assert t.right - t.left == pytest.approx(0.75 * LOGICAL_720P[0]) and t.left > g.strip
   assert (t.thin, t.thick) == (28, 112), '2x the arc thickness'
   assert vh == LOGICAL_720P[1] - dock_height(LOGICAL_720P[1])
-  assert t.bottom - t.thick > vh, 'the grown bar never reaches into the view'
+  assert t.bottom - t.thick > vh, 'the grown bar never reaches into the widget area'
+  assert hud_module.render_rect(*LOGICAL_720P) == (vx, 0, vw, LOGICAL_720P[1]), 'the road itself runs on under the bar'
   physical = accel_geometry(720)
   assert physical.width == 19 and physical.strip == 74
 

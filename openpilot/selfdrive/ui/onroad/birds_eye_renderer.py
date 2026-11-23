@@ -1332,9 +1332,9 @@ class BirdsEyeRenderer(Widget):
     try:
       from openpilot.starpilot.system.starport import birds_eye_hud as hud
       reserve = hud.SIGNAL_MARGIN + hud.SIGNAL_HEIGHT
-      frame_rows = 1080 - (hud.TORQUE_MAX + 2 * hud.TORQUE_MARGIN)  # the view rect stops above the torque dock
+      frame_rows = 1080
     except ImportError:
-      reserve, frame_rows = 288, 940
+      reserve, frame_rows = 288, 1080
     return rect.y + reserve * rect.height / frame_rows
 
   def _speed_limit_sign(self, scene, rect) -> None:

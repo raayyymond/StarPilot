@@ -108,6 +108,7 @@ RED = (255, 72, 72)
 ACTUAL = (245, 247, 250)
 SHADOW = (0, 0, 0)
 DOT = (182, 182, 182)                                        # the arc's centre dot
+TORQUE_BACKING, TORQUE_BACKING_PAD = (0, 0, 0, 215), 8      # under the torque bar, which sits over the road
 PILL = GLASS_FILL                                            # the status pills are glass panels
 WHEEL_IDLE = (84, 90, 104)                                   # the badge while lateral is not active
 EXPERIMENTAL = (255, 155, 63)                                # the comma's experimental-mode orange
@@ -189,9 +190,17 @@ def dock_height(height: float) -> float:
 
 
 def view_rect(width: float, height: float) -> tuple[float, float, float, float]:
-  """Where the birds-eye view draws: right of the acceleration strip and above the torque dock."""
+  """The area clear of the HUD's own bars, where widgets and labels are laid out: right of the acceleration strip
+  and above the torque bar's band."""
   strip = accel_geometry(height).strip
   return strip, 0, width - strip, height - dock_height(height)
+
+
+def render_rect(width: float, height: float) -> tuple[float, float, float, float]:
+  """Where the birds-eye view draws: right of the acceleration strip, down to the bottom edge. The road runs on
+  under the torque bar, which is drawn over it on its own dark backing."""
+  strip = accel_geometry(height).strip
+  return strip, 0, width - strip, height
 
 
 @dataclass(frozen=True)
@@ -544,6 +553,10 @@ class BirdsEyeHud:
   def view_rect(width: float, height: float) -> tuple[float, float, float, float]:
     return view_rect(width, height)
 
+  @staticmethod
+  def render_rect(width: float, height: float) -> tuple[float, float, float, float]:
+    return render_rect(width, height)
+
   def geometry(self, height: float) -> AccelGeometry:
     if self._geometry_key != height:
       self._geometry, self._geometry_key = accel_geometry(height), height
@@ -552,7 +565,6 @@ class BirdsEyeHud:
   def render(self, width: float, height: float) -> None:
     sm, car_params = self.source()
     geometry = self.geometry(height)
-    self._draw_dock(width, height, geometry.strip)
     now_ns = time.monotonic_ns()
     self._draw_accel(geometry, read_accel(sm, now_ns), read_limits(sm, now_ns), height)
     self._draw_torque(sm, car_params, width, height)
@@ -560,12 +572,6 @@ class BirdsEyeHud:
     self._draw_readout(sm, width, height, geometry.strip)
     self._draw_status(sm, width, height)
     self._draw_clock(width, height)
-
-  def _draw_dock(self, width, height, strip) -> None:
-    """The torque dock continues the view's own solid background."""
-    rl = self.rl
-    top = int(height - dock_height(height))
-    rl.draw_rectangle(int(strip), top, int(width - strip), int(height) - top, rl.Color(*BACKGROUND, 255))
 
   def _glass_rim(self, rect, roundness, segments=8) -> None:
     """The bright hairline rim that makes a filled rounded rectangle read as glass."""
@@ -659,6 +665,11 @@ class BirdsEyeHud:
     rl = self.rl
     track_alpha = round(255 * (0.25 + 0.25 * strength)) if active else 60
     track = (255, 255, 255, track_alpha) if active else (*IDLE, track_alpha)
+    # The road is drawn under the bar: a dark backing keeps the track and the indicator at the contrast they have
+    # on the black background, whatever passes beneath (lane lines, the path, the ego's shadow).
+    pad = TORQUE_BACKING_PAD * height / 1080
+    rl.draw_rectangle_rounded(rl.Rectangle(g.left - pad, top - pad, g.right - g.left + 2 * pad, thickness + 2 * pad), 1.0, 12,
+                              rl.Color(*TORQUE_BACKING))
     rl.draw_rectangle_rounded(rl.Rectangle(g.left, top, g.right - g.left, thickness), 1.0, 12, rl.Color(*track))
     self._glass_rim((g.left, top, g.right - g.left, thickness), 1.0, 12)
     reach = torque * (g.right - g.left) / 2

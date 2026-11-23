@@ -421,7 +421,8 @@ class ProjectionOnroad:
         self.birds_eye.long_control = long_control
 
   def _render_birds_eye_only(self):
-    """The birds-eye view over the logical frame, clear of the HUD's acceleration strip and torque dock; no border or brand text."""
+    """The birds-eye view over the logical frame, right of the HUD's acceleration strip and running on under its
+    torque bar; no border or brand text."""
     view = self.birds_eye
     view.panel = False
     view.opacity = 1.0
@@ -429,7 +430,9 @@ class ProjectionOnroad:
     view.metric = bool(getattr(self.native.ui_state, 'is_metric', True))
     view.road_style = self._road_style
     hud = getattr(self, 'hud', None)
-    rect = hud.view_rect(self.width, self.height) if hud is not None else (0, 0, self.width, self.height)
+    rect = (0, 0, self.width, self.height)
+    if hud is not None:
+      rect = (getattr(hud, 'render_rect', None) or hud.view_rect)(self.width, self.height)
     view.render(self.native.rl.Rectangle(*rect))
     if hud is not None:
       hud.metric = view.metric
