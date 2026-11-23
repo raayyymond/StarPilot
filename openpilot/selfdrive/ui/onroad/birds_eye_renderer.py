@@ -1,16 +1,19 @@
-"""Tesla-style birds-eye (top-down chase view) of the model's road, plan and leads.
+"""Birds-eye view of the model's road, plan and leads: a 3D chase camera above and behind the car.
 
-Pure 2D: everything is mapped through birds_eye_math.car_to_widget, no camera matrix.
-Geometry is resampled onto one forward-distance grid so every line has the same sample
-count, which keeps the ribbons simple and lets frames be blended without jitter.
+The road is drawn by raylib through a camera matrix (birds_eye_math.view_params): for the ground pass the camera
+is raylib's modelview, so road fill, lane lines, edges, path, shadows and the ego's glow are plain 2D raylib
+shapes in meters (x forward, y right) that the GPU projects onto the ground plane. Their geometry is resampled
+onto one forward-distance grid, built once per model frame and replayed from cache; the camera moving (the
+speed zoom gliding) changes one matrix and rebuilds nothing. Cars are low-poly bodies whose few dozen vertices
+go through the same matrix on the CPU, drawn as flat-shaded fans in painter's order, so no depth buffer is used.
+Labels, the far fade and the speed-limit sign are ordinary 2D drawing in pixels.
 
 Drawing cost: a frame issues O(ribbons) C calls, not O(vertices). Each road edge, lane line and the road fill is
 one single-coloured DrawTriangleStrip per valid run plus a few constant-alpha strips for its soft end (each line
 ends at its own distance, bem.line_rows); the far-end fade is a few background-coloured gradient rectangles laid
-over them (bem.overlay_bands). The path is drawn after those
-overlays as a handful of constant-alpha strips that step through its own fade; only the per-row colour modes
-(experimental accel tint, rainbow, colour gradient) still replay per-vertex quads, for the path alone. Car glyphs
-are one DrawTriangleFan per polygon plus one outline strip.
+over the finished road (bem.overlay_bands). The path is a handful of constant-alpha strips that step through its
+soft end; only the per-row colour modes (experimental accel tint, rainbow, colour gradient) replay per-vertex
+quads, for the path alone. A car is one DrawTriangleFan per face that looks toward the camera (about ten).
 """
 from collections.abc import Callable
 import ctypes
@@ -20,6 +23,7 @@ from itertools import chain, repeat, starmap
 import math
 import operator
 import time
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import numpy as np
@@ -34,10 +38,16 @@ class _CColor(ctypes.Structure):
   _fields_ = [(channel, ctypes.c_ubyte) for channel in "rgba"]
 
 
+class _CMatrix(ctypes.Structure):
+  """raylib's Matrix: its 16 floats in memory order are the rows of the matrix as written on paper."""
+  _fields_ = [(f"m{i}", ctypes.c_float) for i in (0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15)]
+
+
 class _Raw:
   """The C functions of the raylib library the UI runs on, looked up by name in that same library (as the native
   extension does), so an op replays a point buffer and a prebuilt Color with no argument conversion. The nanobind
-  bindings have no rlColor4ub or back-face culling calls, and their strip and fan calls take a Python sequence."""
+  bindings have no rlColor4ub, back-face culling or modelview calls, and their strip and fan calls take a Python
+  sequence."""
 
   def __init__(self, path: str):
     library = ctypes.CDLL(path)
@@ -59,12 +69,19 @@ class _Raw:
     self.rlGetTextureIdDefault = bind("rlGetTextureIdDefault", restype=ctypes.c_uint)
     self.rlDisableBackfaceCulling = bind("rlDisableBackfaceCulling")
     self.rlEnableBackfaceCulling = bind("rlEnableBackfaceCulling")
+    self.rlDrawRenderBatchActive = bind("rlDrawRenderBatchActive")
+    self.rlGetMatrixModelview = bind("rlGetMatrixModelview", restype=_CMatrix)
+    self.rlGetMatrixTransform = bind("rlGetMatrixTransform", restype=_CMatrix)
+    self.rlSetMatrixModelview = bind("rlSetMatrixModelview", _CMatrix)
+    self.rlPushMatrix = bind("rlPushMatrix")
+    self.rlPopMatrix = bind("rlPopMatrix")
+    self.rlLoadIdentity = bind("rlLoadIdentity")
 
 
 _raw = _Raw(native_library_path)
 
 EGO_FRONT = 1.5      # meters from the camera to the ego front bumper
-EGO_LENGTH = 4.6     # car outlines are 4.6 x 1.9 m at the lane lines' px/m (sideways x lateral_stretch)
+EGO_LENGTH = 4.6     # car bodies are 4.6 x 1.9 m, true to the road's scale
 EGO_WIDTH = 1.9
 LEAD_LENGTH = 4.6
 LEAD_WIDTH = 1.9
@@ -74,11 +91,14 @@ EDGE_WIDTH = 0.28
 MODEL_LEAD_PROB = 0.5
 SMOOTHING = 0.55     # blend toward each new model frame
 LEAD_SMOOTHING = 0.5
-# Lines narrower than this many pixels are widened to it: what the zoomed-out (highway) view shows. Zoomed in,
-# the metre widths are wider anyway.
+# Lines narrower than this many pixels are widened to it: what the far end of the view shows. Near the car the
+# metre widths are wider anyway.
 LANE_MIN_PX = 3.0
 EGO_LANE_MIN_PX = 3.5
 EDGE_MIN_PX = 3.5
+PATH_MIN_PX = 3.0
+WIDTH_REFERENCE_STEP = 8.0  # m of zoom per width reference: the minimum widths are sized for the zoom rounded up to it
+TAIL_STEP = 0.5             # m between rows in a ribbon's soft end
 # model_renderer.MIN/MAX_DRAW_DISTANCE (not imported: that module needs Params and the UI state at import).
 MIN_DRAW_DISTANCE = 10.0
 MAX_DRAW_DISTANCE = 100.0
@@ -101,6 +121,7 @@ NO_THROTTLE = ((242, 242, 242), (242, 242, 242))
 BACKGROUND_TOP, BACKGROUND_BOTTOM = (26, 31, 44), (8, 9, 13)  # the full-frame gradient (birds_eye_hud copies it)
 PANEL_BG = (10, 12, 18)
 PANEL_ALPHA = 235
+PANEL_RADIUS = 28                     # px, the overlay panel's corner radius
 FADE_HOLD, FADE_END = 0.6, 0.95       # the lane lines' far fade (height fractions), now drawn as an overlay
 LINE_ALPHA_STEP = 0.1                 # each line's soft end: strips within +/-5 % of a linear fade
 PATH_ALPHA_STEP = 0.04                # the path's stepped fade: each strip within +/-2 % of the smooth alpha
@@ -115,6 +136,12 @@ CURVE_CEILING = (222, 228, 240)       # a ceiling the planner is not using
 CURVE_CONTROLLING = (246, 184, 64)    # = bem.CAUTION_LEAD: the curve ceiling is controlling
 STOP_RED = (240, 64, 56)
 HARD_BRAKE_HZ = 2.0
+GHOST_OUTLINE = 0.12                  # m, the lane-change ghost's outline width
+SHADOW_ALPHA = 70
+EGO_BODY, EGO_GLASS = (238, 241, 247), (48, 58, 76)
+EGO_LIGHT, EGO_BRAKE = (150, 34, 34), (255, 56, 44)   # the ego's tail lights: idle, braking
+LEAD_GLASS, LEAD_LIGHT = (64, 72, 88), (176, 44, 44)
+BRAKE_LIGHT_ACCEL = -1.2              # m/s^2: the ego's tail lights also light below this measured deceleration
 
 
 @dataclass
@@ -169,6 +196,7 @@ class BirdsEyeScene:
   # line (laneLines[2]), 0 none. Only that line turns blue, as in the camera view.
   lane_centering_direction: int = 0
   v_ego: float | None = None      # carState.vEgo: drives the speed-based zoom
+  braking: bool = False           # carState.brakePressed, or decelerating harder than BRAKE_LIGHT_ACCEL
   draw_distance: float = MAX_DRAW_DISTANCE  # camera-view visibility: modelV2.position.x[-1] clipped
   lead_one_d: float | None = None  # radarState.leadOne.dRel while present: where the camera view cuts the path
   valid: bool = False
@@ -398,64 +426,132 @@ def _emit(*layers: Layer) -> None:
   _raw.rlSetTexture(0)
 
 
-def _ribbon_quads(left: np.ndarray, right: np.ndarray, rows: np.ndarray, valid: np.ndarray, bottom: float) -> Layer:
+def _ribbon_quads(left: np.ndarray, right: np.ndarray, rows: np.ndarray, valid: np.ndarray) -> Layer:
   """Quads between consecutive valid rows of (N, 2) ribbon sides with one RGBA per row.
 
-  Rows fully transparent at both ends and quads wholly below the rect bottom are dropped."""
+  Rows fully transparent at both ends are dropped."""
   rgba = np.clip(rows, 0, 255).astype(np.int32)
   verts = np.concatenate((left[:-1], right[:-1], right[1:], left[1:]), axis=-1)
   keep = valid[:-1] & valid[1:] & ((rgba[:-1, 3] > 0) | (rgba[1:, 3] > 0))
-  keep &= verts[:, 1::2].min(axis=-1) <= bottom
   cols = np.concatenate((rgba[:-1], rgba[1:]), axis=-1)
   return _layer(cols[keep], verts[keep])
 
 
+# ---- the ground pass ----------------------------------------------------------------------------
+
+def _matrix_array(matrix: _CMatrix) -> np.ndarray:
+  return np.frombuffer(matrix, dtype=np.float32).reshape(4, 4).astype(np.float64)
+
+
+def _begin_ground(view: bem.ViewParams) -> _CMatrix:
+  """Make raylib project the ground plane: until _end_ground, every 2D shape drawn (in meters, x forward, y right)
+  lands on the road as the camera sees it. Returns the modelview to restore.
+
+  raylib applies a pushed matrix to each vertex on the CPU as an affine transform, which cannot carry the
+  perspective divide, so the camera goes into the modelview (the GPU's matrix, as in raylib's own 3D mode) with
+  the caller's pushed transform folded in ahead of it, and the CPU transform is identity for the pass. With no
+  matrix pushed, rlgl's transform slot holds a copy of the modelview and is not applied, so it is left out."""
+  _raw.rlDrawRenderBatchActive()
+  saved = _raw.rlGetMatrixModelview()
+  modelview, outer = _matrix_array(saved), _matrix_array(_raw.rlGetMatrixTransform())
+  if np.allclose(outer, modelview):
+    outer = np.eye(4)
+  _raw.rlPushMatrix()
+  _raw.rlLoadIdentity()
+  camera = modelview @ outer @ bem.ground_matrix(view)
+  _raw.rlSetMatrixModelview(_CMatrix(*camera.astype(np.float32).ravel().tolist()))
+  return saved
+
+
+def _end_ground(saved: _CMatrix) -> None:
+  _raw.rlDrawRenderBatchActive()
+  _raw.rlSetMatrixModelview(saved)
+  _raw.rlPopMatrix()
+
+
+# ---- car bodies ---------------------------------------------------------------------------------
+
+SKIRT, BELT, ROOF_HEIGHT = 0.22, 0.86, 1.46   # meters above the road: underside, window line, roof
+BODY, GLASS, LIGHT = 0, 1, 2                  # a face's part: which palette entry colours it
+AMBIENT, DIFFUSE = 0.56, 0.5                  # flat shading: a face is AMBIENT + DIFFUSE * max(0, normal . light)
+LIGHT_DIRECTION = np.array([-0.35, -0.3, 0.9]) / np.linalg.norm([-0.35, -0.3, 0.9])  # toward the light: above, behind, left
+
+
+class CarMesh(NamedTuple):
+  """A low-poly car centred at the origin (x forward, y right, z up), faces in painter order for a camera above:
+  body walls, tail lights, deck, cabin walls, roof. Every face is a convex polygon."""
+  vertices: np.ndarray   # (V, 3)
+  parts: tuple           # per face: BODY, GLASS or LIGHT
+  normals: np.ndarray    # (F, 3), outward
+  centres: np.ndarray    # (F, 3)
+  index: np.ndarray      # the faces' vertex indices, concatenated
+  starts: tuple          # (F + 1,) offsets of each face in index
+
+
 @lru_cache(maxsize=8)
-def _car_body(length: float, width: float) -> np.ndarray:
-  """Hull 8, roof 4 and windshield 4 points of a car glyph centered at the origin, car-frame meters."""
-  scale = np.array([length / 4.6, width / 1.9])
-  return np.concatenate((bem.car_outline(0.0, 0.0, 0.0, length, width, chamfer=0.38 * width / 1.9), ROOF * scale, SHIELD * scale))
+def _car_mesh(length: float, width: float) -> CarMesh:
+  sl, sw = length / 4.6, width / 1.9
+  chamfer = 0.38 * sw
+  hull = bem.car_outline(0.0, 0.0, 0.0, length, width, chamfer=chamfer)
 
-
-WHEEL = np.array([(0.36, -0.12), (-0.36, -0.12), (-0.36, 0.12), (0.36, 0.12)])
-ROOF = np.array([(0.45, -0.64), (-1.05, -0.66), (-1.05, 0.66), (0.45, 0.64)])
-SHIELD = np.array([(1.2, -0.62), (0.6, -0.7), (0.6, 0.7), (1.2, 0.62)])
-# Car glyph polygon sizes, in point order: [4 wheels x 4,] hull 8, roof 4, windshield 4. One fan each.
-CAR_LAYOUT = (8, 4, 4)
-EGO_LAYOUT = (4, 4, 4, 4, 8, 4, 4)
-WHEEL_STEP = math.radians(0.25)  # ego front-wheel angle resolution
-OUTLINE_PX = 1.5
+  def ring(points, z):
+    return np.column_stack((points, np.full(len(points), z)))
+  cabin_base = np.array([(0.95 * sl, -0.84 * sw), (0.95 * sl, 0.84 * sw), (-1.6 * sl, 0.84 * sw), (-1.6 * sl, -0.84 * sw)])
+  cabin_roof = np.array([(0.3 * sl, -0.7 * sw), (0.3 * sl, 0.7 * sw), (-1.05 * sl, 0.7 * sw), (-1.05 * sl, -0.7 * sw)])
+  rear, outer = -length / 2 - 0.01, width / 2 - chamfer
+  lights = [(rear, side * y, z) for side in (-1, 1) for y, z in ((outer, 0.54), (outer - 0.4 * sw, 0.54), (outer - 0.4 * sw, 0.76), (outer, 0.76))]
+  vertices = np.vstack((ring(hull, SKIRT), ring(hull, BELT), ring(cabin_base, BELT), ring(cabin_roof, ROOF_HEIGHT), np.array(lights)))
+  walls = [(i, (i + 1) % 8, 8 + (i + 1) % 8, 8 + i) for i in range(8)]
+  cabin = [(16, 17, 21, 20), (17, 18, 22, 21), (18, 19, 23, 22), (19, 16, 20, 23)]
+  faces = [*walls, (24, 25, 26, 27), (28, 29, 30, 31), tuple(range(8, 16)), *cabin, (20, 21, 22, 23)]
+  parts = (BODY,) * 8 + (LIGHT,) * 2 + (BODY,) + (GLASS,) * 4 + (BODY,)
+  normals, centres = [], []
+  for face in faces:
+    points = vertices[list(face)]
+    normal = np.cross(points[1] - points[0], points[2] - points[0])
+    normal /= np.linalg.norm(normal)
+    centre = points.mean(axis=0)
+    normals.append(normal if normal @ (centre - (0.0, 0.0, 0.6)) > 0 else -normal)
+    centres.append(centre)
+  starts = tuple(np.concatenate(([0], np.cumsum([len(face) for face in faces]))).tolist())
+  return CarMesh(vertices, parts, np.array(normals), np.array(centres), np.concatenate(faces), starts)
 
 
 class RoadDraw(NamedTuple):
-  """Cached ops for one road geometry: road fill, edges + lane lines, and the fade overlays drawn over them."""
+  """Cached ops for one road geometry, in meters on the ground: the road fill, then edges + lane lines."""
   road: list
   lines: list
-  overlay: list
 
 
 class PathDraw(NamedTuple):
-  """Cached path ops: constant-alpha strips (or per-vertex quads in a per-row colour mode), the curvature edge,
-  and where the path ends (car frame x, y, heading) for the stop bar."""
+  """Cached path ops in meters on the ground: constant-alpha strips (or per-vertex quads in a per-row colour
+  mode), the curvature edge, and where the path ends (car frame x, y, heading) for the stop bar."""
   strips: list
   quads: Layer
   curve_edge: list
   end: tuple[float, float, float] | None
 
 
-NO_ROAD = RoadDraw([], [], [])
+class Reference(NamedTuple):
+  """The camera that line widths are sized against: the view's height and config at the zoom rounded up to
+  WIDTH_REFERENCE_STEP, so road geometry is rebuilt only when the zoom crosses a step, never as it glides."""
+  key: tuple
+  view: bem.ViewParams
+
+
+NO_ROAD = RoadDraw([], [])
 NO_PATH = PathDraw([], EMPTY, [], None)
 _UNSET = object()
 
 
 class BirdsEyeRenderer(Widget):
-  """Top-down chase view. Feed it with poll(sm, started_frame) or ingest(...), then render(rect).
+  """3D chase view. Feed it with poll(sm, started_frame) or ingest(...), then render(rect).
 
   panel=True draws a rounded translucent card (overlay); panel=False fills the rect edge to edge.
 
-  Geometry that only changes with the rect, the settings, the lateral state or a new model frame (road, lane
-  lines, path, the ego glyph) is built once and replayed from cache. Scene arrays are treated as immutable:
-  ingest() replaces them, and the cache keys on their identity.
+  Geometry that only changes with the settings, the lateral state or a new model frame (road, lane lines, path)
+  is built once in meters and replayed from cache whatever the camera does. Scene arrays are treated as
+  immutable: ingest() replaces them, and the cache keys on their identity.
   """
 
   def __init__(self, config: bem.BirdsEyeConfig | None = None, text=None,
@@ -527,6 +623,9 @@ class BirdsEyeRenderer(Widget):
       scene.right_blindspot = bool(getattr(car_state, 'rightBlindspot', False))
       v_ego = getattr(car_state, 'vEgo', None)
       scene.v_ego = float(v_ego) if v_ego is not None and math.isfinite(v_ego) else scene.v_ego
+      a_ego = getattr(car_state, 'aEgo', None)
+      scene.braking = bool(getattr(car_state, 'brakePressed', False)) or (
+        isinstance(a_ego, (int, float)) and math.isfinite(a_ego) and a_ego < BRAKE_LIGHT_ACCEL)
     if engaged is not None:
       scene.engaged = bool(engaged)
     if experimental is not None:
@@ -624,7 +723,7 @@ class BirdsEyeRenderer(Widget):
 
   def view_config(self) -> bem.BirdsEyeConfig:
     """self.config zoomed for the current speed, widened to keep a radar leadOne on screen (filtered and quantized: see
-    bem.ZoomFilter)."""
+    bem.ZoomFilter). Calling it advances the zoom filter by the time since the last call."""
     if self._zoom.cfg is not self.config:
       self._zoom = bem.ZoomFilter(self.config)
     now = self.clock()
@@ -634,32 +733,60 @@ class BirdsEyeRenderer(Widget):
     lead_front = lead + EGO_FRONT + LEAD_LENGTH if lead is not None else None
     return bem.zoomed_config(self.config, self._zoom.update(self.scene.v_ego, dt, lead_front))
 
+  def _views(self, rect, cfg: bem.BirdsEyeConfig) -> tuple[bem.ViewParams, Reference]:
+    """The camera for this frame and the reference that line widths are sized against.
+
+    The camera follows the zoom filter's unquantized value, so it glides; only the matrix changes with it."""
+    value = self._zoom.value
+    x_max = cfg.x_max if value is None else round(min(value, bem.far_x_max(self.config)), 2)
+    key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), x_max, self.config)
+    view = self._cached('view', key, lambda: bem.view_params(rect, bem.zoomed_config(self.config, x_max)))
+    return view, self._reference(rect.height, x_max)
+
+  def _reference(self, height: float, x_max: float) -> Reference:
+    step = math.ceil(x_max / WIDTH_REFERENCE_STEP - 1e-9) * WIDTH_REFERENCE_STEP
+    key = (float(height), step, self.config)
+
+    def build():
+      square = SimpleNamespace(x=0.0, y=0.0, width=float(height), height=float(height))
+      return Reference(key, bem.view_params(square, bem.zoomed_config(self.config, step)))
+    return self._cached('reference', key, build)
+
   def draw(self, rect: rl.Rectangle) -> None:
     from openpilot.starpilot.ui import clip
-    cfg = self.view_config()
-    rect_key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), cfg)
-    view = self._cached('view', rect_key, lambda: bem.view_params(rect, cfg))
+    view, reference = self._views(rect, self.view_config())
     self._background(rect)
     clip.begin_scissor_mode(rect.x, rect.y, rect.width, rect.height)
     _raw.rlDisableBackfaceCulling()
     try:
       scene = self.scene
+      leads = self._lead_poses(scene, view)
+      saved = _begin_ground(view)
+      try:
+        if scene.valid:
+          if scene.path is not None:
+            target = 1.0 if scene.allow_throttle else 0.0
+            self._throttle_blend += (target - self._throttle_blend) * 0.2
+            if abs(target - self._throttle_blend) < 0.01:  # settle, so the cached path stops being rebuilt
+              self._throttle_blend = target
+          road = self._road_draw(scene, reference)
+          _run(road.road)
+          _run(road.lines)
+          path = self._path_draw(scene, reference)
+          _run(path.strips)
+          _emit(path.quads)
+          _run(path.curve_edge)
+          _run(self._marks(scene, reference, path))
+        _run(self._lane_change_ghost(scene))
+        _run(self._shadows([pose for _, pose in leads]))
+        self._ego_ground()
+      finally:
+        _end_ground(saved)
       if scene.valid:
-        if scene.path is not None:
-          target = 1.0 if scene.allow_throttle else 0.0
-          self._throttle_blend += (target - self._throttle_blend) * 0.2
-        road = self._road_draw(scene, rect, rect_key, view)
-        _run(road.road)
-        _run(road.lines)
-        _run(road.overlay)
-        path = self._path_draw(scene, rect, rect_key, view)
-        _run(path.strips)
-        _emit(path.quads)
-        _run(path.curve_edge)
-        self._marks(scene, rect, view, path)
-      self._lane_change_ghost(scene, rect, rect_key, view)
-      self._leads(scene, rect, view)
-      self._ego(scene, rect, rect_key, view)
+        _run(self._overlay(rect))
+        self._curve_label(scene, rect, view)
+      self._leads(scene, rect, view, leads)
+      self._ego(scene, view)
       self._speed_limit_sign(scene, rect)
     finally:
       rl.rl_draw_render_batch_active()
@@ -672,7 +799,7 @@ class BirdsEyeRenderer(Widget):
       rl.draw_rectangle_rounded_lines_ex(rect, self._roundness(rect), 12, 2, rl.Color(255, 255, 255, int(40 * self.opacity)))
 
   def _roundness(self, rect) -> float:
-    return min(1.0, 2 * 28 / max(1.0, min(rect.width, rect.height)))
+    return min(1.0, 2 * PANEL_RADIUS / max(1.0, min(rect.width, rect.height)))
 
   def _background(self, rect) -> None:
     if self.panel:
@@ -689,41 +816,40 @@ class BirdsEyeRenderer(Widget):
     return (*(a + (b - a) * t for a, b in zip(BACKGROUND_TOP, BACKGROUND_BOTTOM, strict=True)), 255 * alpha)
 
   @staticmethod
-  def _height_fraction(ys: np.ndarray, rect) -> np.ndarray:
-    """0 at the bottom of the rect, 1 at the top: the axis every fade and gradient here runs along."""
-    return np.clip((rect.y + rect.height - ys) / max(1.0, rect.height), 0.0, 1.0)
-
-  @staticmethod
-  def _fade(rgb, alpha, t: np.ndarray, hold: float = 0.6, end: float = 0.95) -> np.ndarray:
-    """Per-row RGBA holding alpha near the car and fading out toward the far edge.
-
-    rgb (3,) or (..., 3) and alpha scalar or (...,) broadcast against the rows t (..., N)."""
-    t = np.asarray(t, dtype=np.float64)
-    rows = np.empty((*t.shape, 4))
-    rows[..., :3] = np.asarray(rgb, dtype=np.float64)[..., None, :] if np.ndim(rgb) > 1 else rgb
-    rows[..., 3] = np.asarray(alpha, dtype=np.float64)[..., None] * np.interp(t, [0.0, hold, end], [1.0, 0.8, 0.0])
+  def _rows(rgb, alpha, n: int) -> np.ndarray:
+    """(n, 4) per-row RGBA of one colour (rgb (3,) or (n, 3)) at one alpha."""
+    rows = np.empty((n, 4))
+    rows[:, :3] = rgb
+    rows[:, 3] = alpha
     return rows
 
   @staticmethod
   def _sample(gradient: Gradient, t: np.ndarray, alpha_scale: float = 1.0) -> np.ndarray:
-    """CPU sample of a shader Gradient (colors[0] at the bottom) at height fractions t."""
+    """CPU sample of a shader Gradient (colors[0] nearest the car) at fractions t of the path's length."""
     stops = np.asarray(gradient.stops, dtype=np.float64)
     cols = np.array([(c.r, c.g, c.b, c.a) for c in gradient.colors], dtype=np.float64)
     out = np.stack([np.interp(t, stops, cols[:, i]) for i in range(4)], axis=1)
     out[:, 3] *= alpha_scale
     return out
 
+  @staticmethod
+  def _half_width(width_m, min_px, xs: np.ndarray, reference: Reference) -> np.ndarray:
+    """Half the drawn width (m) of a ribbon at each row: its real width, or min_px pixels of the reference camera
+    where that is wider (far away, where a painted line would otherwise shrink below a pixel and shimmer)."""
+    return np.maximum(width_m, min_px * bem.meters_per_pixel(xs, reference.view)) / 2
+
   # ---- road and lines ---------------------------------------------------------------------------
 
-  def _road_draw(self, scene, rect, rect_key, view) -> RoadDraw:
-    """Road, edges and lane lines; rebuilt only when the geometry, the draw distance or a setting changes."""
+  def _road_draw(self, scene, reference: Reference) -> RoadDraw:
+    """Road, edges and lane lines; rebuilt only when the geometry, the draw distance, the width reference or a
+    setting changes. The camera is not part of the key: the ops are in meters."""
     reach = round(scene.draw_distance * 2) / 2  # 0.5 m steps steady the cache key
     style = self.road_style
     arrays = (scene.grid, *scene.lanes, *scene.edges, scene.lane_probs, scene.lane_stds, scene.edge_stds,
               *scene.lane_ystds, *scene.edge_ystds)
-    key = (rect_key, self.opacity, self.panel, style.get('laneLines'), tuple(map(id, arrays)), reach,
+    key = (reference.key, self.opacity, style.get('laneLines'), tuple(map(id, arrays)), reach,
            scene.lat_active, scene.lane_centering_direction)
-    return self._cached('road', key, lambda: self._build_road(scene, rect, view, reach), keep=arrays)
+    return self._cached('road', key, lambda: self._build_road(scene, reference, reach), keep=arrays)
 
   def _road_pair(self, scene) -> list:
     """(offsets, yStd) of the two lines bounding the road fill: the road edges, else the outer lane lines."""
@@ -776,34 +902,30 @@ class BirdsEyeRenderer(Widget):
                     (color.a if color is default else min(255, color.a / 0.7)) * certainty * self.opacity, lane_ystds[i]))
     return lines
 
-  def _build_road(self, scene, rect, view, reach=MAX_DRAW_DISTANCE) -> RoadDraw:
-    """The road fill, edges and lane lines, each ending at its own distance with a soft end.
+  def _build_road(self, scene, reference: Reference, reach=MAX_DRAW_DISTANCE) -> RoadDraw:
+    """The road fill, edges and lane lines as ground-plane strips in meters, each ending at its own distance.
 
     Each line stops at min(reach, where its own yStd passes bem.LINE_STD_LIMIT, its data end) and fades out over its
-    last bem.end_fade_length metres as a few constant-alpha strips (LINE_ALPHA_STEP). The far end of the view fades
-    through the overlay (the old per-row fade, one set of gradient rectangles)."""
+    last bem.end_fade_length metres as a few constant-alpha strips (LINE_ALPHA_STEP), unless that soft end starts
+    beyond the reference zoom's top edge, where it could not be seen. The far end of the view fades through the
+    overlay (one set of gradient rectangles over the finished road)."""
     grid = scene.grid
-    bottom = rect.y + rect.height
-    xs_px = []
+    start, top = self.config.x_min, reference.view.x_max
     road_ops: list = []
     pair = self._road_pair(scene)
     if pair:
       (a, a_std), (b, b_std) = pair
       end = min(reach, bem.std_end(grid, a_std), bem.std_end(grid, b_std))
-      rows = bem.line_rows(grid, np.where(np.isfinite(b), a, np.nan), end, view.x_min, self._tail_step(view), view.x_max)
+      rows = bem.line_rows(grid, np.where(np.isfinite(b), a, np.nan), end, start, TAIL_STEP, top)
       if rows is not None:
         xs, ya, ok, end, fade = rows
         ok_b = np.isfinite(b)
         yb = np.interp(xs, grid[ok_b], b[ok_b]) if np.count_nonzero(ok_b) >= 2 else np.full(xs.shape, np.nan)
-        left = bem.car_to_widget(np.stack((xs, ya), axis=1), rect, self.config, view).astype(np.float64)
-        right = bem.car_to_widget(np.stack((xs, yb), axis=1), rect, self.config, view).astype(np.float64)
-        road_ops = self._faded_strips(left, right, ok & np.isfinite(yb), bem.alpha_groups(bem.taper(xs, end, fade), LINE_ALPHA_STEP),
-                                      (40, 46, 60), 215 * self.opacity, bottom)
-        xs_px += [left[ok, 0], right[ok, 0]]
-    # Lines with the same rows (the usual case: one model frame, one end) share one projection and ribbon pass.
+        road_ops = self._faded_strips(np.stack((xs, ya), axis=1), np.stack((xs, yb), axis=1), ok & np.isfinite(yb),
+                                      bem.alpha_groups(bem.taper(xs, end, fade), LINE_ALPHA_STEP), (40, 46, 60), 215 * self.opacity)
+    # Lines with the same rows (the usual case: one model frame, one end) share one ribbon pass.
     styles = self._line_styles(scene)
-    step = self._tail_step(view)
-    rows = [bem.line_rows(grid, line[0], min(reach, bem.std_end(grid, line[5])), view.x_min, step, view.x_max) for line in styles]
+    rows = [bem.line_rows(grid, line[0], min(reach, bem.std_end(grid, line[5])), start, TAIL_STEP, top) for line in styles]
     batches: dict = {}
     for i, r in enumerate(rows):
       if r is not None:
@@ -813,10 +935,9 @@ class BirdsEyeRenderer(Widget):
       xs, _, _, end, fade = rows[members[0]]
       lateral = np.stack([rows[i][1] for i in members])
       ok = np.stack([rows[i][2] for i in members])
-      pts = np.stack((np.broadcast_to(xs, lateral.shape), lateral), axis=-1).reshape(-1, 2)
-      centre = bem.car_to_widget(pts, rect, self.config, view).astype(np.float64).reshape(*lateral.shape, 2)
+      centre = np.stack((np.broadcast_to(xs, lateral.shape), lateral), axis=-1)
       width_m, min_px = np.array([(styles[i][1], styles[i][2]) for i in members]).T
-      half = np.maximum(width_m[:, None] * bem.scale_at(xs, view)[None, :], min_px[:, None]) / 2
+      half = np.maximum(width_m[:, None], min_px[:, None] * bem.meters_per_pixel(xs, reference.view)[None, :]) / 2
       left, right = bem.ribbon_sides(centre, half, ok)
       groups = bem.alpha_groups(bem.taper(xs, end, fade), LINE_ALPHA_STEP)
       for k, i in enumerate(members):
@@ -825,20 +946,16 @@ class BirdsEyeRenderer(Widget):
     for i, line in enumerate(styles):
       if i in sides:
         left, right, ok, groups = sides[i]
-        line_ops += self._faded_strips(left, right, ok, groups, line[3], line[4], bottom)
-        xs_px += [left[ok, 0], right[ok, 0]]
-    xs_px = np.concatenate(xs_px) if xs_px else np.empty(0)
-    overlay = self._overlay(rect, xs_px) if xs_px.size else []
-    return RoadDraw(road_ops, line_ops, overlay)
+        line_ops += self._faded_strips(left, right, ok, groups, line[3], line[4])
+    return RoadDraw(road_ops, line_ops)
 
   @staticmethod
-  def _faded_strips(left, right, valid, groups, rgb, alpha, bottom) -> list:
+  def _faded_strips(left, right, valid, groups, rgb, alpha) -> list:
     """Strip ops for one ribbon: rows in the constant-alpha groups of its soft end (bem.alpha_groups), each split
-    at gaps; strips wholly below the rect bottom dropped."""
-    low = np.minimum(left[:, 1], right[:, 1]) > bottom
+    at gaps."""
     runs, colors = [], []
     for s, e, f in groups:
-      if f * alpha < 1.0 or low[s:e].all():
+      if f * alpha < 1.0:
         continue
       for lo, hi in ([(s, e)] if valid[s:e].all() else [(s + lo, s + hi) for lo, hi in bem.valid_runs(valid[s:e])]):
         if hi - lo >= 2:
@@ -846,25 +963,23 @@ class BirdsEyeRenderer(Widget):
           colors.append((*rgb, f * alpha))
     return _strips(bem.strip_points(left, right), runs, colors)
 
-  @staticmethod
-  def _tail_step(view) -> float:
-    """Row spacing (m) in a fading stretch: ~6 px on screen, so zoomed in a step of the fade stays a thin band."""
-    return float(np.clip(6.0 / max(view.lateral_ppm, 1e-3), 0.25, 1.0))
-
-  def _overlay(self, rect, xs: np.ndarray) -> list:
-    """Gradient-rectangle ops that fade the road toward the background at the far end of the view (bem.overlay_bands),
-    over the road's horizontal extent only."""
-    x0 = int(max(rect.x, math.floor(float(xs.min())) - 2))
-    x1 = int(min(rect.x + rect.width, math.ceil(float(xs.max())) + 2))
-    ops = []
-    if x1 <= x0:
+  def _overlay(self, rect) -> list:
+    """Gradient-rectangle ops in pixels that fade the far end of the road toward the background (bem.overlay_bands),
+    drawn over the finished ground pass. In the panel they stay clear of its rounded corners."""
+    def build():
+      inset = PANEL_RADIUS if self.panel else 0
+      x0, x1 = int(rect.x + inset), int(rect.x + rect.width - inset)
+      ops = []
+      if x1 <= x0:
+        return ops
+      for y0, y1, a0, a1 in bem.overlay_bands(rect.y, rect.height, None, None, FADE_HOLD, FADE_END):
+        top, bot = int(round(y0)), int(round(y1))
+        if bot > top:
+          ops.append((_raw.DrawRectangleGradientV, x0, top, x1 - x0, bot - top,
+                      _ccolor(self._background_at(top, rect, a0)), _ccolor(self._background_at(bot, rect, a1))))
       return ops
-    for y0, y1, a0, a1 in bem.overlay_bands(rect.y, rect.height, None, None, FADE_HOLD, FADE_END):
-      top, bot = int(round(y0)), int(round(y1))
-      if bot > top:
-        ops.append((_raw.DrawRectangleGradientV, x0, top, x1 - x0, bot - top,
-                    _ccolor(self._background_at(top, rect, a0)), _ccolor(self._background_at(bot, rect, a1))))
-    return ops
+    key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), self.opacity, self.panel)
+    return self._cached('overlay', key, build)
 
   # ---- path -------------------------------------------------------------------------------------
 
@@ -879,18 +994,18 @@ class BirdsEyeRenderer(Widget):
         end = min(end, x - LEAD_PATH_GAP)
     return end
 
-  def _path_draw(self, scene, rect, rect_key, view) -> PathDraw:
+  def _path_draw(self, scene, reference: Reference) -> PathDraw:
     from openpilot.starpilot.ui.road_colors import path_mode
     if scene.path is None:
       return NO_PATH
     end = round(self._path_end(scene, scene.draw_distance) * 4) / 4  # 0.25 m steps: a lead's jitter replays the cache
     style = self.road_style
     mode = path_mode(style)
-    build = lambda: self._build_path(scene, rect, view, end)  # noqa: E731
+    build = lambda: self._build_path(scene, reference, end)  # noqa: E731
     if scene.engaged and mode == 'rainbow':  # animated: rebuilt every frame
       return build()
     arrays = (scene.grid, scene.path, scene.path_accel, scene.path_curvature)
-    key = (rect_key, self.opacity, tuple(map(id, arrays)), end, self._throttle_blend, scene.engaged, scene.experimental,
+    key = (reference.key, self.opacity, tuple(map(id, arrays)), end, self._throttle_blend, scene.engaged, scene.experimental,
            mode, style.get('path'))
     return self._cached('path', key, build, keep=arrays)
 
@@ -905,20 +1020,21 @@ class BirdsEyeRenderer(Widget):
     accel = scene.path_accel
     return bool(scene.experimental and accel is not None and np.isfinite(accel).any())
 
-  def _path_rgb_alpha(self, scene) -> tuple[tuple, float, float, float]:
-    """(rgb, alpha, hold, end) of a single-colour path: the old _path_rows fade parameters."""
+  def _path_rgb_alpha(self, scene) -> tuple[tuple, float]:
+    """(rgb, alpha) of a single-colour path."""
     a = self.opacity
     if not scene.engaged:
-      return (205, 210, 222), 150 * a, 0.3, 0.9
+      return (205, 210, 222), 150 * a
     blend = self._throttle_blend
     rgb = tuple(n + (th - n) * blend for n, th in zip(NO_THROTTLE[0], THROTTLE[0], strict=True))
-    return rgb, 210 * a, 0.35, 0.9
+    return rgb, 210 * a
 
-  def _build_path(self, scene, rect, view, end: float) -> PathDraw:
-    """The path from just ahead of the ego to `end`, ending softly over its last bem.end_fade_length metres.
+  def _build_path(self, scene, reference: Reference, end: float) -> PathDraw:
+    """The path from just ahead of the ego to `end` as a ground-plane ribbon in meters, ending softly over its last
+    bem.end_fade_length metres.
 
-    Single-colour modes step the fade through constant-alpha strips (resampled every ~6 px, so each strip is
-    within PATH_ALPHA_STEP / 2 of the smooth per-row alpha); per-row colour modes keep per-vertex quads."""
+    Single-colour modes step that fade through constant-alpha strips (rows every TAIL_STEP in the fade, so each
+    strip is within PATH_ALPHA_STEP / 2 of the smooth alpha); per-row colour modes keep per-vertex quads."""
     grid, ys_all = scene.grid, scene.path
     x0 = EGO_FRONT - 0.5
     runs = bem.valid_runs(np.isfinite(ys_all) & (grid >= x0) & (grid <= end))
@@ -931,32 +1047,26 @@ class BirdsEyeRenderer(Widget):
       gy = np.append(gy, np.interp(end, grid[hi - 1:hi + 1], ys_all[hi - 1:hi + 1]))
     if gx.size < 2:
       return NO_PATH
-    per_vertex = self._per_vertex_path(scene)
-    # Single-colour: resampled every ~6 px (the centreline is piecewise linear between grid rows anyway).
-    xs = gx if per_vertex else np.append(np.arange(gx[0], gx[-1] - 0.1, self._tail_step(view)), gx[-1])
+    fade = bem.end_fade_length(gx[0], gx[-1])
+    body = gx[gx < gx[-1] - fade - 1e-6]
+    xs = np.concatenate((body, np.arange(gx[-1] - fade, gx[-1] - 1e-6, TAIL_STEP), [gx[-1]]))
     ys = np.interp(xs, gx, gy)
-    centre = bem.car_to_widget(np.stack((xs, ys), axis=1), rect, self.config, view).astype(np.float64)
-    u = (xs - xs[0]) / max(1e-3, view.x_max - xs[0])
-    half = np.maximum(PATH_WIDTH * (1.0 - 0.35 * u) * bem.scale_at(xs, view), 3.0) / 2
     ok = np.ones(xs.size, dtype=bool)
-    left, right = bem.ribbon_sides(centre, half, ok)
-    t = self._height_fraction(centre[:, 1], rect)
-    taper = bem.taper(xs, xs[-1], bem.end_fade_length(xs[0], xs[-1]))
-    bottom = rect.y + rect.height
+    left, right = bem.ribbon_sides(np.stack((xs, ys), axis=1), self._half_width(PATH_WIDTH, PATH_MIN_PX, xs, reference), ok)
+    taper = bem.taper(xs, xs[-1], fade)
     strips: list = []
     quads: Layer = EMPTY
-    if per_vertex:
+    if self._per_vertex_path(scene):
       accel = scene.path_accel
       accel_rows = np.interp(xs, grid, np.nan_to_num(accel)) if accel is not None else np.empty(0)
-      rows = self._path_rows(scene, t, accel_rows)
+      rows = self._path_rows(scene, (xs - xs[0]) / max(1e-3, xs[-1] - xs[0]), accel_rows)
       rows[:, 3] *= taper
-      quads = _ribbon_quads(left, right, rows, ok, bottom)
+      quads = _ribbon_quads(left, right, rows, ok)
       factor = rows[:, 3] / 255
     else:
-      rgb, alpha, hold, fade_end = self._path_rgb_alpha(scene)
-      factor = np.interp(t, [0.0, hold, fade_end], [1.0, 0.8, 0.0]) * taper * alpha / 255
-      low = np.minimum(left[:, 1], right[:, 1]) > bottom
-      groups = [(s, e, a) for s, e, a in bem.alpha_groups(factor, PATH_ALPHA_STEP) if a * 255 >= 1.0 and not low[s:e].all()]
+      rgb, alpha = self._path_rgb_alpha(scene)
+      factor = taper * alpha / 255
+      groups = [(s, e, a) for s, e, a in bem.alpha_groups(factor, PATH_ALPHA_STEP) if a * 255 >= 1.0]
       strips = _strips(bem.strip_points(left, right), [(s, e) for s, e, _ in groups], [(*rgb, 255 * a) for _, _, a in groups])
     edge = self._curve_edge(scene, xs, left, right, factor)
     heading = math.atan2(ys[-1] - ys[-2], xs[-1] - xs[-2])
@@ -983,11 +1093,11 @@ class BirdsEyeRenderer(Widget):
     return ops
 
   def _path_rows(self, scene, t: np.ndarray, accel: np.ndarray) -> np.ndarray:
-    """Per-row path color, chosen the way ModelRenderer picks the camera path's color."""
+    """Per-row path color along the fraction t of its length, chosen the way ModelRenderer picks the camera path's."""
     from openpilot.starpilot.ui.road_colors import path_mode, solid_gradient
     a = self.opacity
     if not scene.engaged:
-      return self._fade((205, 210, 222), 150 * a, t, hold=0.3, end=0.9)
+      return self._rows((205, 210, 222), 150 * a, t.size)
     style = self.road_style
     mode = path_mode(style)
     if mode == 'rainbow':
@@ -1004,12 +1114,10 @@ class BirdsEyeRenderer(Widget):
       hue = np.clip(60 + acc * 35, 0, 120) / 360
       sat = np.minimum(np.abs(acc * 1.5), 1)
       light = np.interp(sat, [0, 1], [0.95, 0.62])
-      rows = self._fade((0, 0, 0), 215 * a, t, hold=0.35, end=0.9)
-      rows[:, :3] = bem.hls_to_rgb(hue, light, sat) * 255
-      return rows
+      return self._rows(bem.hls_to_rgb(hue, light, sat) * 255, 215 * a, t.size)
     blend = self._throttle_blend
     rgb = np.array([n + (th - n) * blend for n, th in zip(NO_THROTTLE[0], THROTTLE[0], strict=True)])
-    return self._fade(rgb, 210 * a, t, hold=0.35, end=0.9)
+    return self._rows(rgb, 210 * a, t.size)
 
   def _path_profile(self, scene):
     """(distances, offsets, slopes) of the path's finite points, or None: what lateral_at/heading_at derive per call."""
@@ -1044,7 +1152,7 @@ class BirdsEyeRenderer(Widget):
   def _road_heading(self, scene, x: float) -> float:
     """Road direction at x: mean slope of the ego lane lines, else of the road edges, else the planned path.
 
-    The path bends with steering intent; the lane lines are the road, so a lead glyph does not turn with the wheel."""
+    The path bends with steering intent; the lane lines are the road, so a lead does not turn with the wheel."""
     for profiles in self._road_profiles(scene):
       heading = bem.mean_heading(profiles, x)
       if heading is not None:
@@ -1057,28 +1165,41 @@ class BirdsEyeRenderer(Widget):
     """Label size: bem.label_font_size (the stream HUD's readout is a multiple of it)."""
     return bem.label_font_size(rect.height)
 
-  def _bar(self, rect, view, x: float, y: float, heading: float, along: float, across: float, rgba) -> np.ndarray:
-    """A bar across the path drawn as one fan; returns its screen corners."""
-    pts = bem.car_to_widget(bem.segment_quad(x, y, heading, along, across), rect, self.config, view)
-    _run([_fan(pts, rgba)])
-    return pts
+  @staticmethod
+  def _bar(x: float, y: float, heading: float, along: float, across: float, rgba) -> tuple:
+    """A bar across the path on the ground, as one fan op in meters."""
+    return _fan(bem.segment_quad(x, y, heading, along, across), rgba)
 
-  def _marks(self, scene, rect, view, path: PathDraw) -> None:
-    """action.shouldStop: a red bar at the path's end. Curve speed (only with SHOW_CURVE_MARK): a bar at the binding
-    distance with its speed."""
+  def _curve_place(self, scene, x_max: float) -> tuple[float, float, float]:
+    x = float(np.clip(scene.curve.distance, EGO_FRONT + 3.0, x_max - 3.0))
+    return x, self._lateral_at(scene, x), self._heading_at(scene, x)
+
+  def _marks(self, scene, reference: Reference, path: PathDraw) -> list:
+    """Ground ops. action.shouldStop: a red bar at the path's end. Curve speed (only with SHOW_CURVE_MARK): a bar at
+    the binding distance (its speed tag is _curve_label). Bars are at least a few pixels deep."""
     a = self.opacity
+    ops = []
     if scene.should_stop and path.end is not None:
       x, y, heading = path.end
-      self._bar(rect, view, x, y, heading, max(0.6, 4.0 / float(bem.depth_scale_at(x, view))), PATH_WIDTH * 1.5,
-                _rgba(STOP_RED, 235 * a))
+      ops.append(self._bar(x, y, heading, max(0.6, 4.0 * float(bem.meters_per_pixel(x, reference.view))), PATH_WIDTH * 1.5,
+                           _rgba(STOP_RED, 235 * a)))
+    curve = scene.curve
+    if curve is not None and SHOW_CURVE_MARK:
+      x, y, heading = self._curve_place(scene, reference.view.x_max)
+      rgb = CURVE_CONTROLLING if curve.controlling else CURVE_CEILING if curve.ceiling else CURVE_CANDIDATE
+      ops.append(self._bar(x, y, heading, max(0.45, 3.0 * float(bem.meters_per_pixel(x, reference.view))), PATH_WIDTH * 1.9,
+                           _rgba(rgb, 225 * a)))
+    return ops
+
+  def _curve_label(self, scene, rect, view) -> None:
+    """The curve mark's speed tag, in pixels beside its bar (only with SHOW_CURVE_MARK)."""
     curve = scene.curve
     if curve is None or not SHOW_CURVE_MARK:
       return
-    x = float(np.clip(curve.distance, EGO_FRONT + 3.0, view.x_max - 3.0))
-    y, heading = self._lateral_at(scene, x), self._heading_at(scene, x)
+    a = self.opacity
+    x, y, heading = self._curve_place(scene, view.x_max)
     rgb = CURVE_CONTROLLING if curve.controlling else CURVE_CEILING if curve.ceiling else CURVE_CANDIDATE
-    pts = self._bar(rect, view, x, y, heading, max(0.45, 3.0 / float(bem.depth_scale_at(x, view))), PATH_WIDTH * 1.9,
-                    _rgba(rgb, 225 * a))
+    pts = bem.car_to_widget(bem.segment_quad(x, y, heading, 0.5, PATH_WIDTH * 1.9), rect, view=view)
     text = f"{bem.speed_text(curve.speed_mps, self.metric)} {'km/h' if self.metric else 'mph'}"
     size = self._font_size(rect) * SUBLABEL_SCALE
     w, h = self.text.measure(text, size)
@@ -1093,85 +1214,106 @@ class BirdsEyeRenderer(Widget):
 
   # ---- cars -------------------------------------------------------------------------------------
 
-  def _cars(self, view, rect, poses, local, layout, hull_at: int, colors, outlines, outline_px: float = OUTLINE_PX
-            ) -> tuple[list[list], np.ndarray]:
-    """Car glyphs: poses (C, 3) of (x, y, heading), shared car-frame points local (P, 2) split into convex polygons
-    of the sizes in layout, filled with colors (C, polygons, 4) as one fan each, then a hull outline strip in
-    outlines (C, 4). Returns one op list per car and the hulls (C, 8, 2) in pixels; transparent parts are skipped.
+  @staticmethod
+  def _cars(view, poses, mesh: CarMesh, palettes) -> tuple[list[list], np.ndarray]:
+    """Car bodies: poses (C, 3) of (x, y, heading) on the road, one mesh for all, palettes[c] = the (rgb, alpha) of
+    its BODY, GLASS and LIGHT faces. Returns one op list per car and every car's vertices in pixels (C, V, 2).
 
-    Each glyph is rigid: its centre and its heading go through the view mapping, then the car is drawn at the view's
-    scale there (true length, lateral_stretch wider) and rotated on screen. Mapping the rotated corners instead sheared
-    a turned car into a parallelogram, because the view is wider sideways than forward."""
+    The vertices go through the camera on the CPU (a few dozen points per car), and each face that looks toward
+    the camera is drawn as one fan, flat-shaded by its normal. The mesh's face order is a painter's order for a
+    camera above the cars and every face is convex, so no depth buffer is needed."""
     poses = np.asarray(poses, dtype=np.float64).reshape(-1, 3)
     count = poses.shape[0]
-    probes = np.concatenate((poses[:, :2], poses[:, :2] + (1.0, 0.0), poses[:, :2] + (0.0, 1.0)))
-    mapped = bem.car_to_widget(probes, rect, self.config, view).astype(np.float64)
-    centre = mapped[:count]
-    forward_ppm = centre[:, 1] - mapped[count:2 * count, 1]
-    lateral_ppm = mapped[2 * count:, 0] - centre[:, 0]
-    turn = np.arctan2(lateral_ppm * np.sin(poses[:, 2]), forward_ppm * np.cos(poses[:, 2]))  # the heading, on screen
-    cos_t, sin_t = np.cos(turn)[:, None], np.sin(turn)[:, None]
-    along = local[None, :, 0] * forward_ppm[:, None]
-    across = local[None, :, 1] * lateral_ppm[:, None]
-    screen = np.empty((count, local.shape[0], 2))
-    screen[..., 0] = centre[:, None, 0] + along * sin_t + across * cos_t
-    screen[..., 1] = centre[:, None, 1] - along * cos_t + across * sin_t
-    hulls = screen[:, hull_at:hull_at + 8]
-    cars = []
-    for c in range(poses.shape[0]):
-      ops, offset = [], 0
-      for k, n in enumerate(layout):
-        if colors[c][k][3] > 0:
-          ops.append(_fan(screen[c, offset:offset + n], colors[c][k]))
-        offset += n
-      if outlines[c][3] > 0:
-        ops.append(_strip(bem.ring_strip(hulls[c], outline_px), outlines[c]))
-      cars.append(ops)
-    return cars, hulls
+    cos_h, sin_h = np.cos(poses[:, 2])[:, None], np.sin(poses[:, 2])[:, None]
 
-  def _lane_change_ghost(self, scene, rect, rect_key, view) -> None:
-    """While the model's lane change is pending or under way, an outline of the ego car one lane over on that side:
-    dim before the change starts, green once it does, red when that side's blind spot is set."""
+    def turn(local):  # (P, 3) car-local -> (C, P, 3) turned by each heading
+      out = np.empty((count, local.shape[0], 3))
+      out[..., 0] = local[None, :, 0] * cos_h - local[None, :, 1] * sin_h
+      out[..., 1] = local[None, :, 0] * sin_h + local[None, :, 1] * cos_h
+      out[..., 2] = local[None, :, 2]
+      return out
+    offset = np.concatenate((poses[:, :2], np.zeros((count, 1))), axis=1)[:, None, :]
+    world = turn(mesh.vertices) + offset
+    screen = bem.car_to_widget(world.reshape(-1, 3), None, view=view).reshape(count, -1, 2)
+    normals = turn(mesh.normals)
+    visible = (normals * (np.asarray(view.position) - (turn(mesh.centres) + offset))).sum(axis=-1) > 0
+    shade = AMBIENT + DIFFUSE * np.clip(normals @ LIGHT_DIRECTION, 0.0, None)
+    points = np.ascontiguousarray(screen[:, mesh.index], dtype=np.float32)
+    base, vector2, per_car = points.ctypes.data, 2 * points.itemsize, mesh.index.size
+    fan, starts, parts = _raw.DrawTriangleFan, mesh.starts, mesh.parts
+    cars = []
+    for c in range(count):
+      ops: list = []
+      palette = palettes[c]
+      for f in np.flatnonzero(visible[c]).tolist():
+        part = parts[f]
+        rgb, alpha = palette[part]
+        if alpha <= 0:
+          continue
+        k = 1.0 if part == LIGHT else float(shade[c, f])
+        ops.append((fan, base + (c * per_car + starts[f]) * vector2, starts[f + 1] - starts[f],
+                    _ccolor((min(255.0, rgb[0] * k), min(255.0, rgb[1] * k), min(255.0, rgb[2] * k), alpha))))
+      ops.append((_keep, points))
+      cars.append(ops)
+    return cars, screen
+
+  def _shadows(self, poses) -> list:
+    """Ground ops: a soft dark footprint under each car at poses (x, y, heading), a little larger than its body."""
+    alpha = SHADOW_ALPHA * self.opacity
+    return [_fan(bem.car_outline(x, y, heading, LEAD_LENGTH + 0.5, LEAD_WIDTH + 0.35, chamfer=0.55), (0, 0, 0, alpha))
+            for x, y, heading in poses]
+
+  def _ego_ground(self) -> None:
+    """The ego's shadow and the glow around it, drawn on the road during the ground pass (meters)."""
+    a = self.opacity
+    cx = EGO_FRONT - EGO_LENGTH / 2
+    rl.draw_circle_gradient(rl.Vector2(cx, 0.0), EGO_LENGTH * 0.95, rl.Color(120, 170, 255, int(70 * a)), rl.Color(120, 170, 255, 0))
+    _run(self._shadows([(cx, 0.0, 0.0)]))
+
+  def _lane_change_ghost(self, scene) -> list:
+    """Ground ops. While the model's lane change is pending or under way, an outline of the ego car one lane over
+    on that side: dim before the change starts, green once it does, red when that side's blind spot is set."""
     state, side = scene.lane_change_state, scene.lane_change_direction
     if not SHOW_LANE_CHANGE_GHOST or state == 0 or side == 0:
-      return
+      return []
     width = round(bem.lane_width(scene.lanes, scene.grid, EGO_FRONT, side), 1)
     blocked = scene.left_blindspot if side < 0 else scene.right_blindspot
     rgb, alpha = (GHOST_BLOCKED, 0.6) if blocked else (GHOST_GO, 0.5) if state >= 2 else (GHOST_PRE, 0.35)
 
     def build():
-      cx = EGO_FRONT - EGO_LENGTH / 2
-      cars, _ = self._cars(view, rect, [(cx, side * width, 0.0)], _car_body(EGO_LENGTH, EGO_WIDTH), CAR_LAYOUT, 0,
-                           [[(0, 0, 0, 0), (*rgb, int(40 * alpha * self.opacity)), (0, 0, 0, 0)]],
-                           [_rgba(rgb, 255 * alpha * self.opacity)], outline_px=2.5)
-      return cars[0]
-    _run(self._cached('ghost', (rect_key, self.opacity, side, width, rgb, alpha), build))
+      outline = bem.car_outline(EGO_FRONT - EGO_LENGTH / 2, side * width, 0.0, EGO_LENGTH, EGO_WIDTH, chamfer=0.38)
+      return [_fan(outline, _rgba(rgb, 40 * alpha * self.opacity)),
+              _strip(bem.ring_strip(outline, GHOST_OUTLINE), _rgba(rgb, 255 * alpha * self.opacity))]
+    return self._cached('ghost', (self.opacity, side, width, rgb, alpha), build)
 
-  def _leads(self, scene, rect, view) -> None:
+  def _lead_poses(self, scene, view) -> list[tuple]:
+    """(lead, (x, y, heading) of its centre), far to near, for the leads whose rear bumper is inside the view."""
+    leads = [lead for lead in sorted(scene.leads, key=lambda lead: -lead.d_rel) if lead.d_rel + EGO_FRONT <= view.x_max]
+    poses = []
+    for lead in leads:
+      # The body's rear bumper is at dRel ahead of the ego front bumper: exactly the gap the label prints.
+      cx = lead.d_rel + EGO_FRONT + LEAD_LENGTH / 2
+      poses.append((lead, (cx, lead.y, self._road_heading(scene, cx))))
+    return poses
+
+  def _leads(self, scene, rect, view, leads=None) -> None:
+    """Lead bodies, far to near so a nearer car covers a farther one, and the closest lead's distance label."""
     size = self._font_size(rect)
-    # A lead whose rear bumper is beyond the zoomed view is dropped, label and all.
-    leads = [lead for lead in sorted(scene.leads, key=lambda lead: -lead.d_rel)
-             if lead.d_rel + EGO_FRONT <= view.x_max]
+    leads = self._lead_poses(scene, view) if leads is None else leads
     if not leads:
       self._labels = []
       return
-    poses, colors, outlines, rgbs = [], [], [], []
-    for lead in leads:
-      # The outline's rear bumper is at dRel ahead of the ego front bumper: exactly the gap the label prints.
-      cx = lead.d_rel + EGO_FRONT + LEAD_LENGTH / 2
-      poses.append((cx, lead.y, self._road_heading(scene, cx)))
+    palettes, rgbs = [], []
+    for lead, _ in leads:
       rgb = bem.lead_color(lead.d_rel, lead.v_rel if math.isfinite(lead.v_rel) else 0.0)
-      a = (1.0 if lead.radar else 0.7) * self.opacity
-      glass = (64, 72, 88, int(170 * a))
-      colors.append((_rgba(rgb, 245 * a), glass, (*glass[:3], int(glass[3] * 0.7))))
-      outlines.append(_rgba((255, 255, 255), 60 * a))
+      alpha = 255 * (1.0 if lead.radar else 0.7) * self.opacity
+      palettes.append(((rgb, alpha), (LEAD_GLASS, alpha), (LEAD_LIGHT, alpha)))
       rgbs.append(rgb)
-    cars, hulls = self._cars(view, rect, poses, _car_body(LEAD_LENGTH, LEAD_WIDTH), CAR_LAYOUT, 0, colors, outlines)
-    # Far to near, so a nearer car covers a farther one.
+    cars, screens = self._cars(view, [pose for _, pose in leads], _car_mesh(LEAD_LENGTH, LEAD_WIDTH), palettes)
     previous, self._labels = self._labels, []
-    for lead, rgb, ops, screen in zip(leads, rgbs, cars, hulls, strict=True):
+    for (lead, _), rgb, ops, screen in zip(leads, rgbs, cars, screens, strict=True):
       _run(ops)
-      if lead is leads[-1]:  # only the closest lead carries a distance
+      if lead is leads[-1][0]:  # only the closest lead carries a distance
         self._lead_label(lead, rgb, screen, rect, size, previous, scene.hard_brake)
 
   def _lead_label(self, lead, rgb, screen, rect, size, previous, hard_brake: bool) -> None:
@@ -1194,7 +1336,7 @@ class BirdsEyeRenderer(Widget):
     self.text.draw(text, size, x, y, _color(rgb, 255 * self.opacity))
 
   def _label_position(self, previous: list[tuple[float, float]], x: float, y: float) -> tuple[float, float]:
-    """Follow the glyph with a light filter, then snap to whole pixels, so a label neither jitters nor slides
+    """Follow the car with a light filter, then snap to whole pixels, so a label neither jitters nor slides
     by sub-pixel amounts (each would redraw every glyph edge on the stream)."""
     near = min(previous, key=lambda p: math.hypot(p[0] - x, p[1] - y), default=None)
     if near is not None and math.hypot(near[0] - x, near[1] - y) < LABEL_SNAP_PX:
@@ -1202,29 +1344,12 @@ class BirdsEyeRenderer(Widget):
     self._labels.append((x, y))
     return float(round(x)), float(round(y))
 
-  def _ego_glyph(self, rect, view, wheel_angle: float) -> tuple[list, tuple]:
-    a = self.opacity
-    cx = EGO_FRONT - EGO_LENGTH / 2
-    centre = bem.car_to_widget(np.array([[cx, 0.0]]), rect, self.config, view)[0]
-    glow = (rl.Vector2(float(centre[0]), float(centre[1])), EGO_WIDTH * float(bem.scale_at(cx, view)) * 1.3,
-            rl.Color(120, 170, 255, int(55 * a)), rl.Color(120, 170, 255, 0))
-    length, width = EGO_LENGTH, EGO_WIDTH
-    front = bem.rotate_offsets(WHEEL, 0, 0, wheel_angle)
-    wheels = [(front if fx > 0 else WHEEL) + np.array([fx, side * (width / 2 - 0.02)])
-              for fx, side in ((length / 2 - 0.9, -1), (length / 2 - 0.9, 1), (-length / 2 + 0.85, -1), (-length / 2 + 0.85, 1))]
-    body, glass = (238, 241, 247, int(255 * a)), (48, 58, 76, int(255 * a))
-    colors = [[(16, 18, 24, body[3])] * 4 + [body, glass, (*glass[:3], int(glass[3] * 0.7))]]
-    cars, _ = self._cars(view, rect, [(cx, 0.0, 0.0)], np.concatenate((*wheels, _car_body(length, width))), EGO_LAYOUT, 16,
-                         colors, [(255, 255, 255, int(110 * a))])
-    return cars[0], glow
-
-  def _ego(self, scene, rect, rect_key, view) -> None:
-    # Rounded to WHEEL_STEP so small steering jitter replays the cached glyph (0.25 deg is ~0.1 px on a wheel).
-    wheel_angle = round(bem.ego_wheel_angle(scene.steering_deg) / WHEEL_STEP) * WHEEL_STEP
-    ops, glow = self._cached('ego', (rect_key, self.opacity, wheel_angle), lambda: self._ego_glyph(rect, view, wheel_angle))
-    rl.draw_circle_gradient(*glow)
-    # No blinker arrows here: the HUD draws a large corner arrow (scene.left/right_blinker are kept for it).
-    _run(ops)
+  def _ego(self, scene, view) -> None:
+    """The ego body, its tail lights bright while it brakes. Steering is the HUD's wheel, not drawn on the car."""
+    alpha = 255 * self.opacity
+    palette = ((EGO_BODY, alpha), (EGO_GLASS, alpha), (EGO_BRAKE if scene.braking else EGO_LIGHT, alpha))
+    cars, _ = self._cars(view, [(EGO_FRONT - EGO_LENGTH / 2, 0.0, 0.0)], _car_mesh(EGO_LENGTH, EGO_WIDTH), [palette])
+    _run(cars[0])
 
   # ---- speed limit ------------------------------------------------------------------------------
 

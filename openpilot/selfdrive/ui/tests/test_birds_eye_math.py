@@ -11,81 +11,72 @@ from openpilot.selfdrive.ui.onroad import birds_eye_math as bem
 RECT = SimpleNamespace(x=100.0, y=50.0, width=520.0, height=650.0)
 
 
-def test_ego_bottom_centre_and_far_edge_top():
+def test_the_ground_at_x_min_is_the_bottom_edge_and_at_x_max_the_top_edge():
   cfg = bem.BirdsEyeConfig()
   pts = bem.car_to_widget(np.array([[cfg.x_min, 0.0], [cfg.x_max, 0.0]]), RECT, cfg)
-  assert pts[0, 0] == pytest.approx(RECT.x + RECT.width / 2)
-  assert pts[0, 1] == pytest.approx(RECT.y + RECT.height * (1 - cfg.bottom_pad))
-  assert pts[1, 1] == pytest.approx(RECT.y + RECT.height * cfg.top_pad, abs=1e-3)
+  assert pts[0, 0] == pytest.approx(RECT.x + RECT.width / 2) == pytest.approx(pts[1, 0])
+  assert pts[0, 1] == pytest.approx(RECT.y + RECT.height, abs=1e-3)
+  assert pts[1, 1] == pytest.approx(RECT.y, abs=1e-3)
 
 
-def test_default_is_linear_and_stretched_sideways():
+def test_the_camera_is_above_and_behind_the_car_looking_down_the_road():
   cfg = bem.DEFAULT_CONFIG
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
   view = bem.view_params(stream, cfg)
-  assert view.k == 0.0
-  forward = float(bem.depth_scale_at(30.0, view))
-  assert cfg.lateral_stretch == 1.3
-  assert forward == pytest.approx(720 * (1 - cfg.top_pad - cfg.bottom_pad) / (cfg.x_max - cfg.x_min)), 'the forward zoom is unchanged'
-  assert view.lateral_ppm == pytest.approx(1.3 * forward), 'sideways is drawn 30 % wider'
-  true_scale = bem.view_params(stream, bem.BirdsEyeConfig(lateral_stretch=1.0))
-  assert true_scale.lateral_ppm == pytest.approx(float(bem.depth_scale_at(30.0, true_scale))) == pytest.approx(forward)
-  narrow = SimpleNamespace(x=0.0, y=0.0, width=200.0, height=720.0)
-  assert bem.view_params(narrow, cfg).lateral_ppm == pytest.approx(200 / (2 * cfg.lateral_range)), 'a narrow rect still fits the lanes'
-  # 3.7 m sideways is 1.3x the pixel count of 3.7 m forward.
-  pts = bem.car_to_widget(np.array([[10.0, -1.85], [10.0, 1.85], [13.7, -1.85]]), stream, cfg)
-  assert pts[1, 0] - pts[0, 0] == pytest.approx(1.3 * (pts[0, 1] - pts[2, 1]), rel=1e-4)
+  x, y, height = view.position
+  near, far = math.radians(cfg.pitch + cfg.fov / 2), math.radians(cfg.pitch - cfg.fov / 2)
+  assert y == 0.0 and x < cfg.x_min < 0.0 and height > 10.0, 'behind the bottom edge of the view, well above the road'
+  assert height == pytest.approx((cfg.x_max - cfg.x_min) / (1 / math.tan(far) - 1 / math.tan(near)))
+  assert x == pytest.approx(cfg.x_min - height / math.tan(near))
+  assert far > 0, 'the horizon is never in view'
+  assert view.focal == pytest.approx(360 / math.tan(math.radians(cfg.fov / 2)))
+  # Sideways scale falls with the distance from the camera: the far end is drawn about a third as wide.
+  near_ppm, far_ppm = bem.scale_at(np.array([cfg.x_min, cfg.x_max]), view)
+  assert far_ppm / near_ppm == pytest.approx(math.sin(far) / math.sin(near), rel=1e-6)
+  assert 0.25 < far_ppm / near_ppm < 0.4
+  assert float(bem.meters_per_pixel(30.0, view)) == pytest.approx(1 / float(bem.scale_at(30.0, view)))
+  # scale_at and depth_scale_at are the pixel derivatives of the projection.
+  step = 1e-3
+  pts = bem.car_to_widget(np.array([[30.0, 0.0], [30.0, step], [30.0 + step, 0.0]]), stream, cfg, view).astype(np.float64)
+  wide = bem.car_to_widget(np.array([[30.0, 0.0], [30.0, 1.0], [31.0, 0.0]]), stream, cfg, view).astype(np.float64)
+  assert wide[1, 0] - wide[0, 0] == pytest.approx(float(bem.scale_at(30.0, view)), rel=1e-4)
+  assert wide[0, 1] - wide[2, 1] == pytest.approx(float(bem.depth_scale_at(30.5, view)), rel=1e-2)
+  assert pts[0, 1] == pytest.approx(pts[1, 1]), 'no roll: a sideways step stays on its pixel row'
+  # A point above the road is drawn higher on screen than the road under it.
+  raised = bem.car_to_widget(np.array([[30.0, 0.0, 0.0], [30.0, 0.0, 1.5]]), stream, cfg, view)
+  assert raised[1, 1] < raised[0, 1] and raised[1, 0] == pytest.approx(raised[0, 0])
 
 
-def test_orthographic_is_linear_and_uniform():
-  cfg = bem.BirdsEyeConfig(perspective=0.0, isotropic=False)
-  xs = np.array([0.0, 10.0, 20.0, 40.0])
-  pts = bem.car_to_widget(np.stack((xs, np.full_like(xs, 2.0)), axis=1), RECT, cfg)
-  dy = np.diff(pts[:, 1]) / np.diff(xs)
-  assert np.allclose(dy, dy[0])
-  assert np.allclose(pts[:, 0], pts[0, 0]), 'a straight lane stays vertical with no perspective'
-  view = bem.view_params(RECT, cfg)
-  assert view.lateral_ppm == pytest.approx(RECT.width / (2 * cfg.lateral_range))
-
-
-def test_perspective_narrows_distance_and_keeps_lines_straight():
-  cfg = bem.BirdsEyeConfig(perspective=1.0)
-  view = bem.view_params(RECT, cfg)
-  assert view.k > 0
-  near, far = bem.scale_at(np.array([0.0, cfg.x_max]), view)
-  assert far < near
-  u0 = (0 - cfg.x_min) / (cfg.x_max - cfg.x_min)
-  assert near / far == pytest.approx((1 + view.k) / (1 + view.k * u0))
-  # A straight diagonal on the ground stays collinear on screen (homography).
+def test_straight_lines_stay_straight_and_farther_is_higher():
+  cfg = bem.BirdsEyeConfig()
+  # A straight diagonal on the ground stays collinear on screen (the ground maps through a homography).
   xs = np.linspace(0, 70, 8)
   pts = bem.car_to_widget(np.stack((xs, 0.1 * xs - 3), axis=1), RECT, cfg).astype(np.float64)
   a, b = pts[0], pts[-1]
   cross = (b[0] - a[0]) * (pts[:, 1] - a[1]) - (b[1] - a[1]) * (pts[:, 0] - a[0])
   assert np.abs(cross).max() / np.linalg.norm(b - a) < 0.5
-  # Monotonic: farther is always higher on screen.
   ys = bem.car_to_widget(np.stack((np.linspace(-6, 90, 50), np.zeros(50)), axis=1), RECT, cfg)[:, 1]
   assert np.all(np.diff(ys) < 0)
+  # A lane keeps its side and converges toward the centre with distance.
+  lane = bem.car_to_widget(np.array([[0.0, 1.8], [40.0, 1.8], [80.0, 1.8]]), RECT, cfg)[:, 0] - (RECT.x + RECT.width / 2)
+  assert lane[0] > lane[1] > lane[2] > 0
 
 
-def test_isotropic_at_ego_with_full_perspective():
-  cfg = bem.BirdsEyeConfig(perspective=1.0)
-  view = bem.view_params(RECT, cfg)
-  x0 = cfg.x_min
-  assert float(bem.depth_scale_at(x0, view)) == pytest.approx(float(bem.scale_at(x0, view)), rel=1e-6)
-
-
-def test_right_is_positive_and_scale_follows_rect():
-  cfg = bem.BirdsEyeConfig(isotropic=False)
+def test_right_is_positive_and_scale_follows_the_rect_height():
+  cfg = bem.BirdsEyeConfig()
   pts = bem.car_to_widget(np.array([[0.0, -2.0], [0.0, 2.0]]), RECT, cfg)
   assert pts[0, 0] < RECT.x + RECT.width / 2 < pts[1, 0]
-  wide = SimpleNamespace(x=0, y=0, width=1800, height=1020)
-  view = bem.view_params(wide, cfg)
-  assert view.lateral_ppm == pytest.approx(1020 * cfg.max_ppm_fraction), 'a wide frame caps the scale by its height'
+  small = bem.view_params(SimpleNamespace(x=0, y=0, width=900, height=510), cfg)
+  tall = bem.view_params(SimpleNamespace(x=0, y=0, width=900, height=1020), cfg)
+  wide = bem.view_params(SimpleNamespace(x=0, y=0, width=1800, height=1020), cfg)
+  assert float(bem.scale_at(20.0, tall)) == pytest.approx(2 * float(bem.scale_at(20.0, small)))
+  assert float(bem.scale_at(20.0, wide)) == pytest.approx(float(bem.scale_at(20.0, tall))), 'a wider rect shows more road, not a larger one'
+  assert wide.position == tall.position == small.position, 'the camera depends on the config, not on the rect'
 
 
-def test_far_behind_points_stay_finite():
-  cfg = bem.BirdsEyeConfig(perspective=1.0)
-  pts = bem.car_to_widget(np.array([[-500.0, 1.0]]), RECT, cfg)
+def test_points_behind_the_camera_stay_finite():
+  cfg = bem.BirdsEyeConfig()
+  pts = bem.car_to_widget(np.array([[-500.0, 1.0], [-25.0, 0.0]]), RECT, cfg)
   assert np.isfinite(pts).all()
 
 
@@ -247,9 +238,8 @@ def _renderer_with_scene():
 
 def _layers(view, rect=RECT):
   """(road, path) draws for the current scene, as draw() would fetch them."""
-  key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), view.config)
-  pv = bem.view_params(rect, view.config)
-  return view._road_draw(view.scene, rect, key, pv), view._path_draw(view.scene, rect, key, pv)
+  reference = view._reference(rect.height, view.config.x_max)
+  return view._road_draw(view.scene, reference), view._path_draw(view.scene, reference)
 
 
 def _op_points(op) -> np.ndarray:
@@ -269,18 +259,25 @@ def test_scene_geometry_is_cached_until_an_input_changes():
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   view, radar = _renderer_with_scene()
   (road, path) = first = _layers(view)
-  assert road.road and road.lines and road.overlay and path.strips, 'road, lines, fade overlay and path all produce ops'
+  assert road.road and road.lines and path.strips, 'road, lines and path all produce ops'
   lines = _draw_ops(road.lines)
   assert all(op[0] is ber._raw.DrawTriangleStrip for op in lines) and len(lines) == 2 + 4, 'one strip per edge and lane line'
   assert len(_draw_ops(road.road)) == 1, 'the road fill is one strip'
-  assert all(op[0] is ber._raw.DrawRectangleGradientV for op in road.overlay)
+  overlay = view._overlay(RECT)
+  assert overlay and all(op[0] is ber._raw.DrawRectangleGradientV for op in overlay)
+  assert view._overlay(RECT) is overlay, 'the far fade is built once per rect'
   assert _layers(view)[0] is first[0] and _layers(view)[1] is first[1], 'an unchanged scene replays the cached ops'
   view.ingest(None, radar, None)
   assert _layers(view)[0] is first[0], 'leads and car state alone keep the road'
+  moved = SimpleNamespace(x=40.0, y=10.0, width=900.0, height=RECT.height)
+  assert _layers(view, moved)[0] is first[0], 'the ops are in meters: where the rect is and how wide does not matter'
+  for x_max in (73.0, 78.5, 80.0):
+    assert view._reference(RECT.height, x_max).key == view._reference(RECT.height, 80.0).key, 'a gliding zoom keeps the road'
+  assert view._reference(RECT.height, 80.5).key != view._reference(RECT.height, 80.0).key, 'a zoom step of the width reference rebuilds'
   view.opacity = 0.5
   assert _layers(view)[0] is not first[0], 'opacity is part of the key'
   again = _layers(view)[0]
-  assert _layers(view, SimpleNamespace(x=0.0, y=0.0, width=300.0, height=400.0))[0] is not again, 'so is the rect'
+  assert _layers(view, SimpleNamespace(x=0.0, y=0.0, width=300.0, height=400.0))[0] is not again, 'so is the height (minimum widths)'
   again = _layers(view)
   view.ingest(_model(path_y=0.5), radar, None)
   assert _layers(view)[0] is not again[0] and _layers(view)[1] is not again[1], 'a new model frame rebuilds'
@@ -305,17 +302,64 @@ def test_one_strip_per_ribbon_run_and_per_vertex_only_for_row_colour_modes():
   assert len(path.quads) % 6 == 0
 
 
-def test_ego_glyph_cache_ignores_steering_jitter_below_its_resolution(monkeypatch):
-  import openpilot.selfdrive.ui.onroad.birds_eye_renderer as ber
+def _fan_colors(ops):
+  return [(op[3].r, op[3].g, op[3].b, op[3].a) for op in _draw_ops(ops)]
+
+
+def _drawn_faces(ops, car, mesh) -> set:
+  """The mesh face indices one car's op list draws, read back from each fan's place in the shared point buffer."""
+  base = ops[-1][1].ctypes.data
+  return {mesh.starts.index((op[1] - base) // 8 - car * mesh.index.size) for op in _draw_ops(ops)}
+
+
+def test_car_bodies_draw_only_the_faces_that_look_toward_the_camera():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
+  view = bem.view_params(stream, bem.DEFAULT_CONFIG)
+  mesh = ber._car_mesh(ber.LEAD_LENGTH, ber.LEAD_WIDTH)
+  assert mesh.vertices[:, 0].min() == pytest.approx(-2.31) and mesh.vertices[:, 0].max() == pytest.approx(2.3), '4.6 m plus the lights'
+  assert np.ptp(mesh.vertices[:, 1]) == pytest.approx(1.9) and mesh.vertices[:, 2].max() == ber.ROOF_HEIGHT
+  assert np.allclose(np.linalg.norm(mesh.normals, axis=1), 1.0)
+  up = mesh.normals[:, 2] > 0.99
+  assert up.sum() == 2 and [mesh.parts[i] for i in np.flatnonzero(up)] == [ber.BODY, ber.BODY], 'the deck and the roof face up'
+  body, glass, light = ((200, 100, 50), 255), ((10, 20, 30), 255), ((250, 0, 0), 255)
+  cars, screens = ber.BirdsEyeRenderer._cars(view, [(40.0, 0.0, 0.0), (40.0, -9.0, 0.0), (40.0, 9.0, 0.0)], mesh, [(body, glass, light)] * 3)
+  assert screens.shape == (3, mesh.vertices.shape[0], 2)
+  ahead, left, right = (_draw_ops(ops) for ops in cars)
+  assert all(op[0] is ber._raw.DrawTriangleFan for op in ahead)
+  assert len(ahead) < len(mesh.parts), 'the front of a car ahead is not drawn'
+  assert _fan_colors(ahead).count((250, 0, 0, 255)) == 2, 'both tail lights, unshaded'
+  left_wall, right_wall, front_wall = 1, 5, 7  # hull edges: the two flanks and the nose
+  faces = [_drawn_faces(ops, car, mesh) for car, ops in enumerate(cars)]
+  assert not faces[0] & {left_wall, right_wall, front_wall}, 'dead ahead: neither flank, and never the nose'
+  assert right_wall in faces[1] and left_wall not in faces[1], 'a car to the left shows its right flank'
+  assert left_wall in faces[2] and right_wall not in faces[2], 'and one to the right its left flank'
+  assert len(left) == len(right)
+  shades = {color for color in _fan_colors(ahead) if color[2] != 0 and color[0] > color[1] > color[2] and color[0] > 100}
+  assert len(shades) >= 2, 'faces are shaded by their normals: the roof is brighter than the rear'
+  # Hidden parts: a palette alpha of zero drops that part's faces.
+  cars, _ = ber.BirdsEyeRenderer._cars(view, [(40.0, 0.0, 0.0)], mesh, [(body, (glass[0], 0), light)])
+  assert len(_draw_ops(cars[0])) < len(ahead)
+
+
+def test_the_ego_tail_lights_follow_braking(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   view, _ = _renderer_with_scene()
-  built = []
-  monkeypatch.setattr(view, '_ego_glyph', lambda rect, v, wheel_angle: built.append(wheel_angle) or ([], ()))
-  monkeypatch.setattr(ber.rl, 'draw_circle_gradient', lambda *args: None)
-  rect_key = (RECT.x, RECT.y, RECT.width, RECT.height, view.config)
-  for steering in (5.0, 5.05, 5.1, 9.0):
-    view.scene.steering_deg = steering
-    view._ego(view.scene, RECT, rect_key, None)
-  assert len(built) == 2, 'sub-0.25 degree wheel changes reuse the glyph; a real turn rebuilds it'
+  drawn = []
+  monkeypatch.setattr(ber, '_run', lambda ops: drawn.append(_fan_colors(ops)))
+  camera = bem.view_params(RECT, view.config)
+  view._ego(view.scene, camera)
+  assert (*ber.EGO_LIGHT, 255) in drawn[-1] and (*ber.EGO_BRAKE, 255) not in drawn[-1]
+  car = SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=20.0, aEgo=-0.4, brakePressed=True)
+  view.ingest(None, None, car)
+  view._ego(view.scene, camera)
+  assert drawn[-1].count((*ber.EGO_BRAKE, 255)) == 2, 'the brake pedal lights them'
+  car.brakePressed, car.aEgo = False, ber.BRAKE_LIGHT_ACCEL - 0.5
+  view.ingest(None, None, car)
+  assert view.scene.braking, 'so does a firm deceleration without the pedal (openpilot braking)'
+  car.aEgo = 0.0
+  view.ingest(None, None, car)
+  assert not view.scene.braking
 
 
 def _text_recorder():
@@ -399,19 +443,12 @@ def test_distance_rungs_are_gone():
   assert not hasattr(BirdsEyeRenderer, '_ticks')
 
 
-def test_default_forward_scale_is_linear_and_cars_are_true_to_scale():
+def test_cars_are_true_to_scale_and_the_drawn_gap_is_the_printed_gap():
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   cfg = bem.DEFAULT_CONFIG
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
   view = bem.view_params(stream, cfg)
-  assert cfg.perspective == 0.0 and view.k == 0.0
   front = ber.EGO_FRONT
-  xs = np.array([front, front + 15.0, front + 30.0, front + 60.0])
-  ys = bem.car_to_widget(np.stack((xs, np.zeros(4)), axis=1), stream, cfg)[:, 1]
-  gaps = ys[0] - ys[1:]
-  assert gaps / gaps[0] == pytest.approx([1.0, 2.0, 4.0], rel=1e-5), 'twice the distance is twice the pixels'
-  ppm, wide = float(bem.depth_scale_at(0.0, view)), view.lateral_ppm
-  assert gaps[1] / ppm == pytest.approx(30.0, rel=1e-4), 'the drawn gap is the printed gap'
   # The printed number is radar dRel unchanged.
   radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=30.0, yRel=0.0, vRel=0.0),
                           leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
@@ -419,19 +456,22 @@ def test_default_forward_scale_is_linear_and_cars_are_true_to_scale():
   assert lead.d_rel == 30.0
   assert bem.distance_label(lead.d_rel) == '30 m' and bem.distance_label(lead.d_rel, metric=False) == '33 yd'
   assert bem.distance_label(91.44, metric=False) == '100 yd'
-  # Lead and ego outlines: 4.6 x 1.9 m at the lane lines' px/m, the lead's rear bumper at dRel.
+  # Lead and ego bodies: 4.6 x 1.9 m on the road, the lead's rear bumper at dRel ahead of the ego's front bumper.
   assert (ber.EGO_LENGTH, ber.EGO_WIDTH, ber.LEAD_LENGTH, ber.LEAD_WIDTH) == (4.6, 1.9, 4.6, 1.9)
   renderer = ber.BirdsEyeRenderer(text=object())
-  body = ber._car_body(ber.LEAD_LENGTH, ber.LEAD_WIDTH)
-  cx = lead.d_rel + front + ber.LEAD_LENGTH / 2
-  _, hulls = renderer._cars(view, stream, [(cx, 0.0, 0.0)], body, ber.CAR_LAYOUT, 0, [[(1, 1, 1, 1)] * 3], [(1, 1, 1, 1)])
-  hull = hulls[0]
-  assert np.ptp(hull[:, 0]) / wide == pytest.approx(1.9, rel=1e-3)
-  assert np.ptp(hull[:, 1]) / ppm == pytest.approx(4.6, rel=1e-3)
-  assert (ys[0] - hull[:, 1].max()) / ppm == pytest.approx(30.0, abs=0.01)
-  assert 3.7 * wide / np.ptp(hull[:, 0]) == pytest.approx(3.7 / 1.9, rel=1e-3), 'a lane is ~2 car widths'
-  # A 60 m lead's whole outline and the whole ego fit on the stream frame.
-  far = bem.car_to_widget(np.array([[60.0 + front + ber.LEAD_LENGTH, 0.0], [front - ber.EGO_LENGTH, 0.0]]), stream, cfg)
+  renderer.scene.leads = [lead]
+  (_, pose), = renderer._lead_poses(renderer.scene, view)
+  mesh = ber._car_mesh(ber.LEAD_LENGTH, ber.LEAD_WIDTH)
+  hull = mesh.vertices[:8]
+  assert pose[0] + hull[:, 0].min() == pytest.approx(front + 30.0), 'the body starts exactly the printed gap ahead'
+  _, screens = renderer._cars(view, [pose], mesh, [(((1, 1, 1), 1),) * 3])
+  expected = bem.car_to_widget(mesh.vertices + (pose[0], pose[1], 0.0), stream, cfg, view)
+  assert screens[0] == pytest.approx(expected, abs=1e-3), 'the body is the mesh at its pose, through the camera'
+  lane = bem.car_to_widget(np.array([[pose[0], -1.85], [pose[0], 1.85]]), stream, cfg, view)[:, 0]
+  body = bem.car_to_widget(np.array([[pose[0], -0.95], [pose[0], 0.95]]), stream, cfg, view)[:, 0]
+  assert np.ptp(lane) / np.ptp(body) == pytest.approx(3.7 / 1.9, rel=1e-3), 'a lane is ~2 car widths'
+  # A 60 m lead's whole body and the whole ego fit on the stream frame.
+  far = bem.car_to_widget(np.array([[60.0 + front + ber.LEAD_LENGTH, 0.0, ber.ROOF_HEIGHT], [front - ber.EGO_LENGTH, 0.0, 0.0]]), stream, cfg, view)
   assert far[0, 1] > 0 and far[1, 1] < stream.height
 
 
@@ -464,7 +504,7 @@ def test_lead_heading_follows_the_lanes_not_the_planned_path():
   assert view._road_heading(view.scene, 30.0) == pytest.approx(math.atan(0.1), abs=1e-6), 'path only without lanes/edges'
 
 
-def test_zoom_follows_speed_and_keeps_the_view_true_to_scale():
+def test_zoom_follows_speed_and_keeps_the_view_anchored():
   cfg = bem.DEFAULT_CONFIG
   assert bem.zoom_x_max(0.0) == bem.zoom_x_max(10.0) == bem.ZOOM_NEAR_X_MAX
   assert bem.zoom_x_max(30.0) == bem.zoom_x_max(40.0) == cfg.x_max
@@ -472,13 +512,14 @@ def test_zoom_follows_speed_and_keeps_the_view_true_to_scale():
   assert bem.zoomed_config(cfg, cfg.x_max) is cfg
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
   near = bem.zoomed_config(cfg, bem.ZOOM_NEAR_X_MAX)
+  assert (near.x_min, near.pitch, near.fov) == (cfg.x_min, cfg.pitch, cfg.fov)
   far_view, near_view = bem.view_params(stream, cfg), bem.view_params(stream, near)
-  forward = [float(bem.depth_scale_at(10.0, v)) for v in (far_view, near_view)]
-  assert forward == pytest.approx([9.3, 19.4], abs=0.2)
-  assert [far_view.lateral_ppm, near_view.lateral_ppm] == pytest.approx([1.3 * f for f in forward]), 'one stretch at every zoom'
-  assert near.x_min == cfg.x_min and near.lateral_range / cfg.lateral_range == pytest.approx(35 / 73)
+  assert near_view.position[2] < far_view.position[2] and near_view.position[0] > far_view.position[0], 'zooming in lowers the camera and brings it closer'
+  assert float(bem.scale_at(0.0, near_view)) > 1.5 * float(bem.scale_at(0.0, far_view)), 'and the car is drawn larger'
   ego = np.array([[cfg.x_min, 0.0]])
-  assert bem.car_to_widget(ego, stream, near)[0] == pytest.approx(bem.car_to_widget(ego, stream, cfg)[0]), 'the view is anchored at x_min'
+  assert bem.car_to_widget(ego, stream, near)[0] == pytest.approx(bem.car_to_widget(ego, stream, cfg)[0], abs=1e-3), 'the view is anchored at x_min'
+  top = bem.car_to_widget(np.array([[bem.ZOOM_NEAR_X_MAX, 0.0]]), stream, near)[0]
+  assert top[1] == pytest.approx(0.0, abs=1e-3), 'x_max is the top edge at every zoom'
 
 
 def test_zoom_filter_is_smooth_and_quantized():
@@ -525,15 +566,16 @@ def test_zoom_widens_to_keep_a_radar_lead_on_screen():
   from openpilot.selfdrive.ui.onroad.birds_eye_renderer import EGO_FRONT, LEAD_LENGTH
   def front(d_rel):
     return d_rel + EGO_FRONT + LEAD_LENGTH
-  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max == 68.0, 'no lead: the speed preset'
+  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max == 80.0, 'no lead: the speed preset'
   assert bem.lead_zoom_x_max(30.0, front(20.0)) == cfg.x_max, 'a near lead never tightens the preset'
-  assert bem.lead_zoom_x_max(30.0, front(55.0)) == cfg.x_max, 'a lead that fits keeps the preset'
+  assert bem.lead_zoom_x_max(30.0, front(65.0)) == cfg.x_max, 'a lead that fits keeps the preset'
   assert bem.lead_zoom_x_max(30.0, front(80.0)) == pytest.approx(80.0 + EGO_FRONT + LEAD_LENGTH + bem.ZOOM_LEAD_BUFFER)
   assert bem.lead_zoom_x_max(30.0, front(200.0)) == bem.ZOOM_FAR_X_MAX == bem.far_x_max(cfg), 'capped at the widest zoom'
   assert bem.lead_zoom_x_max(5.0, front(10.0)) == bem.ZOOM_NEAR_X_MAX, 'never tighter than the city view'
-  assert bem.lead_zoom_x_max(5.0, front(20.0)) == pytest.approx(front(20.0) + bem.ZOOM_LEAD_BUFFER), 'widens the city view too'
+  assert bem.lead_zoom_x_max(5.0, front(30.0)) == pytest.approx(front(30.0) + bem.ZOOM_LEAD_BUFFER), 'widens the city view too'
   zoom = bem.ZoomFilter()
   assert zoom.update(30.0, 0.0, front(80.0)) == 92.0, 'quantized to ZOOM_STEP (92.1 m)'
+  assert zoom.value == pytest.approx(92.1), 'the camera follows the unquantized value'
   assert zoom.update(30.0, 0.0, None) == 92.0, 'the change is filtered, not a jump'
   for _ in range(300):
     zoom.update(30.0, 1 / 30, None)
@@ -556,14 +598,14 @@ def test_renderer_zoom_follows_the_radar_lead_one():
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
   view.scene.lead_one_d = 80.0
   wide = view.view_config()
-  assert wide.x_max == 92.0 and wide.lateral_range == pytest.approx(view.config.lateral_range * 97 / 73), 'same aspect'
+  assert wide.x_max == 92.0 and (wide.x_min, wide.pitch, wide.fov) == (view.config.x_min, view.config.pitch, view.config.fov)
   view = BirdsEyeRenderer(text=object())
   view.clock = lambda: 0.0
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
   assert view.view_config().x_max == view.config.x_max, 'no lead: the preset'
 
 
-def test_renderer_zoom_rebuilds_the_view_only_on_a_step():
+def test_the_camera_glides_with_the_zoom_and_is_reused_while_it_rests():
   from openpilot.selfdrive.ui.onroad.birds_eye_renderer import BirdsEyeRenderer
   view = BirdsEyeRenderer(text=object())
   now = [0.0]
@@ -572,9 +614,21 @@ def test_renderer_zoom_rebuilds_the_view_only_on_a_step():
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=3.0))
   first = view.view_config()
   assert first.x_max == bem.ZOOM_NEAR_X_MAX and first.x_min == view.config.x_min
+  camera, reference = view._views(RECT, first)
+  assert camera.x_max == bem.ZOOM_NEAR_X_MAX
   now[0] += 1 / 30
   assert view.view_config() == first
+  assert view._views(RECT, first)[0] is camera, 'a resting zoom reuses the camera'
   assert view.scene.grid[-1] == bem.ZOOM_FAR_X_MAX > view.config.x_max, 'the scene grid spans the widest zoom'
+  # Accelerating: the camera moves every frame, in steps far finer than ZOOM_STEP, on one width reference.
+  view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
+  seen = []
+  for _ in range(5):
+    now[0] += 1 / 30
+    seen.append(view._views(RECT, view.view_config()))
+  steps = np.diff([c.x_max for c, _ in seen])
+  assert (steps > 0).all() and steps.max() < bem.ZOOM_STEP
+  assert len({r.key for _, r in seen}) == 1 and seen[0][1].key == reference.key
 
 
 def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
@@ -588,15 +642,15 @@ def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
   assert view.view_config().x_max == view.config.x_max, 'no lead yet: the highway preset'
   view.ingest(None, radar, None)  # a lead appears 90 m ahead
   poses = []
-  monkeypatch.setattr(view, '_cars', lambda v, rect, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 8, 2))))
+  monkeypatch.setattr(view, '_cars', lambda v, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 32, 2))))
   monkeypatch.setattr(ber, '_run', lambda *a: None)
   monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
 
   def draw_leads():
     cfg = view.view_config()
-    view._leads(view.scene, RECT, bem.view_params(RECT, cfg))
+    view._leads(view.scene, RECT, view._views(RECT, cfg)[0])
     return cfg
-  assert draw_leads().x_max < 70.0
+  assert draw_leads().x_max < 82.0
   assert not poses, 'beyond the preset view until the zoom catches up'
   for _ in range(300):  # 10 s at 30 Hz
     now[0] += 1 / 30
@@ -604,11 +658,9 @@ def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
   assert cfg.x_max == 102.0, '90 + 1.5 + 4.6 + 6 = 102.1, quantized'
   assert poses and poses[-1][0] == pytest.approx(90.0 + ber.EGO_FRONT + ber.LEAD_LENGTH / 2)
   assert view.scene.grid[-1] >= cfg.x_max, 'the grid reaches the top edge'
-  pv = bem.view_params(RECT, cfg)
-  road = view._road_draw(view.scene, RECT, (float(RECT.x), float(RECT.y), float(RECT.width), float(RECT.height), cfg), pv)
+  road = view._road_draw(view.scene, view._reference(RECT.height, cfg.x_max))
   reach = min(cfg.x_max, view.scene.draw_distance)  # the camera's MAX_DRAW_DISTANCE (100 m) is below this top edge
-  top = bem.car_to_widget(np.array([[reach, 0.0]]), RECT, cfg, pv)[0, 1]
-  assert min(_op_points(op)[:, 1].min() for op in _draw_ops(road.lines)) <= top + 0.5, 'the lines are not cut at 68 m'
+  assert max(_op_points(op)[:, 0].max() for op in _draw_ops(road.lines)) >= reach - 0.5, 'the lines are not cut at the preset'
 
 
 def test_lines_stop_at_the_camera_draw_distance_and_the_path_at_the_camera_lead_cut():
@@ -631,19 +683,15 @@ def test_lines_stop_at_the_camera_draw_distance_and_the_path_at_the_camera_lead_
   captured = {}
   original = view._build_road
 
-  def spy(scene, rect, v, reach):
+  def spy(scene, reference, reach):
     captured.update(reach=reach)
-    return original(scene, rect, v, reach)
+    return original(scene, reference, reach)
   view._build_road = spy
-  _, path = _layers(view)
+  road, path = _layers(view)
   assert captured['reach'] <= 40.0 and captured['reach'] > 38.0
   assert path.end is not None and path.end[0] <= 40.0, 'the lead cut (50 m) is clipped to the draw distance'
-  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
-  pv = bem.view_params(stream, view.config)
-  road = original(view.scene, stream, pv, 40.0)
-  top = bem.car_to_widget(np.array([[40.0, 0.0]]), stream, view.config, pv)[0, 1]
   for op in _draw_ops(road.road + road.lines):
-    assert _op_points(op)[:, 1].min() >= top - 4.0, 'nothing beyond the draw distance'
+    assert _op_points(op)[:, 0].max() <= 40.0 + 0.2, 'nothing beyond the draw distance (ops are in meters)'
 
 
 def test_ego_lane_lines_are_at_least_three_pixels_zoomed_out():
@@ -677,14 +725,14 @@ def test_lead_smoothing_follows_a_lane_change():
   assert jumped[0].y == 4.9, 'a whole-lane jump is taken directly, not held back'
 
 
-def test_lead_glyph_is_drawn_at_its_own_lateral_position(monkeypatch):
+def test_lead_body_is_drawn_at_its_own_lateral_position(monkeypatch):
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   view, radar = _renderer_with_scene()
   poses = []
-  monkeypatch.setattr(view, '_cars', lambda v, rect, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 8, 2))))
+  monkeypatch.setattr(view, '_cars', lambda v, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 32, 2))))
   monkeypatch.setattr(ber, '_run', lambda *a: None)
   monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
-  for y_rel in (0.0, -3.0):  # the label filter follows the glyph; it never moves the glyph
+  for y_rel in (0.0, -3.0):  # the label filter follows the body; it never moves the body
     radar.leadOne.yRel = y_rel
     view.scene.leads = ber.scene_leads(radar, None)
     view._leads(view.scene, RECT, bem.view_params(RECT, view.config))
@@ -703,28 +751,21 @@ def test_label_position_is_filtered_and_whole_pixels():
   assert view._label_position(prev, 400.0, 200.0) == (400.0, 200.0), 'a side flip snaps'
 
 
-def test_a_turned_car_glyph_is_rotated_rigidly_not_sheared():
-  # 2026-11-09: on a curve the lead was drawn as a parallelogram. The view is 1.3x wider sideways than forward, so
-  # rotating the corners in meters and then mapping them sheared the rectangle. The glyph now turns on screen.
+def test_a_turned_car_body_is_rigid_on_the_road():
+  # 2026-11-09: on a curve the flat lead glyph was drawn as a parallelogram, because the old view was wider sideways
+  # than forward. The body is now turned in meters on the road and only then goes through the camera.
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
   view = bem.view_params(stream, bem.DEFAULT_CONFIG)
-  renderer = ber.BirdsEyeRenderer(text=object())
-  local = np.array([(2.3, -0.95), (2.3, 0.95), (-2.3, 0.95), (-2.3, -0.95)] * 2)
-  args = (local, (8,), 0, [[(1, 1, 1, 1)]], [(1, 1, 1, 1)])
-  straight = renderer._cars(view, stream, [(40.0, 1.0, 0.0)], *args)[1][0][:4]
+  mesh = ber._car_mesh(ber.LEAD_LENGTH, ber.LEAD_WIDTH)
   heading = math.radians(20.0)
-  turned = renderer._cars(view, stream, [(40.0, 1.0, heading)], *args)[1][0][:4]
-
-  def sides(quad):
-    return [float(np.linalg.norm(quad[i] - quad[(i + 1) % 4])) for i in range(4)]
-  assert sides(turned) == pytest.approx(sides(straight), rel=1e-6), 'same size as when it points straight ahead'
-  for i in range(4):
-    a, b = turned[(i + 1) % 4] - turned[i], turned[(i + 2) % 4] - turned[(i + 1) % 4]
-    assert float(a @ b) == pytest.approx(0.0, abs=1e-6), 'corners stay square'
-  assert turned.mean(axis=0) == pytest.approx(straight.mean(axis=0), abs=1e-6), 'turned about its centre'
-  # Its long side lies along the road as the view draws it: a road line through the same heading, mapped to pixels.
-  ends = bem.car_to_widget(np.array([(40.0, 1.0), (40.0 + math.cos(heading), 1.0 + math.sin(heading))]), stream, bem.DEFAULT_CONFIG, view)
-  road = (ends[1] - ends[0]) / np.linalg.norm(ends[1] - ends[0])
-  nose = turned[:2].mean(axis=0) - turned.mean(axis=0)
-  assert nose / np.linalg.norm(nose) == pytest.approx(road, abs=1e-4)
+  palette = [(((1, 1, 1), 1),) * 3]
+  turned = ber.BirdsEyeRenderer._cars(view, [(40.0, 1.0, heading)], mesh, palette)[1][0]
+  world = mesh.vertices.copy()
+  world[:, :2] = bem.rotate_offsets(mesh.vertices[:, :2], 40.0, 1.0, heading)
+  assert turned == pytest.approx(bem.car_to_widget(world, stream, view=view), abs=1e-3)
+  sides = lambda quad: [float(np.linalg.norm(quad[i] - quad[(i + 1) % 4])) for i in range(4)]  # noqa: E731
+  roof = [20, 21, 22, 23]
+  assert sides(world[roof]) == pytest.approx(sides(mesh.vertices[roof])), 'same size as when it points straight ahead'
+  nose = world[[0, 7], :2].mean(axis=0) - world[:8, :2].mean(axis=0)
+  assert nose == pytest.approx(2.3 * np.array([math.cos(heading), math.sin(heading)])), 'its nose points along the heading'

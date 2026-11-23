@@ -165,34 +165,29 @@ def _standstill_view():
   view.ingest(short, radar, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=0.0))
   view.scene.leads = []
   stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
-  cfg = bem.zoomed_config(view.config, bem.ZOOM_NEAR_X_MAX)
-  pv = bem.view_params(stream, cfg)
-  return view, stream, pv, (0.0, 0.0, 1280.0, 720.0, cfg)
+  return view, stream, view._reference(stream.height, bem.ZOOM_NEAR_X_MAX)
 
 
 def test_every_line_and_the_path_fade_out_before_the_draw_distance():
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
-  view, stream, pv, key = _standstill_view()
-  road = view._road_draw(view.scene, stream, key, pv)
-  y_of = lambda x: float(bem.car_to_widget(np.array([[x, 0.0]]), stream, key[4], pv)[0, 1])  # noqa: E731
+  view, stream, reference = _standstill_view()
+  road = view._road_draw(view.scene, reference)
   for ops in (road.road, road.lines):
-    strips = _draw_ops(ops)
-    tops = [_op_points(op)[:, 1].min() for op in strips]
-    assert min(tops) >= y_of(10.0) - 1.0, 'nothing beyond the 10 m draw distance'
+    assert max(_op_points(op)[:, 0].max() for op in _draw_ops(ops)) <= 10.0 + 0.1, 'nothing beyond the 10 m draw distance'
   lines = _draw_ops(road.lines)
   per_line = len(lines) // 6
   assert len(lines) % 6 == 0 and per_line >= 4, 'each of the 6 lines: a body strip plus a stepped soft end'
   first = lines[:per_line]
   alphas = [op[3].a for op in first]
   assert alphas == sorted(alphas, reverse=True) and alphas[-1] < 0.15 * alphas[0], 'fading to clear at its end'
-  fade_start = _op_points(first[1])[:, 1].max()
-  assert fade_start == pytest.approx(y_of(6.0), abs=1.5), 'over the last 4 m (the minimum) at standstill'
-  path = view._path_draw(view.scene, stream, key, pv)
+  fade_start = _op_points(first[1])[:, 0].min()
+  assert fade_start == pytest.approx(6.0, abs=0.3), 'over the last 4 m (the minimum) at standstill'
+  path = view._path_draw(view.scene, reference)
   strips = _draw_ops(path.strips)
   alphas = [op[3].a for op in strips]
   assert alphas[-1] < 0.3 * alphas[0], 'the path fades out over its last metres'
-  assert _op_points(strips[-1])[:, 1].min() >= y_of(10.0) - 2, 'and still ends at the draw distance'
-  assert not any(op[0] is not ber._raw.DrawRectangleGradientV for op in road.overlay)
+  assert _op_points(strips[-1])[:, 0].max() <= 10.0 + 0.1, 'and still ends by the draw distance'
+  assert not any(op[0] is not ber._raw.DrawRectangleGradientV for op in view._overlay(stream))
 
 
 def test_each_line_ends_at_its_own_uncertainty_distance():
@@ -207,41 +202,45 @@ def test_each_line_ends_at_its_own_uncertainty_distance():
   ends = [bem.std_end(grid, std) for std in view.scene.lane_ystds]
   assert ends[0] == ends[3] == math.inf, 'no yStd published: the global cutoff only'
   assert 33.0 <= ends[1] < 37.0 and 50.0 <= ends[2] < 55.0
-  stream = SimpleNamespace(x=0.0, y=0.0, width=1280.0, height=720.0)
-  pv = bem.view_params(stream, view.config)
-  road = view._build_road(view.scene, stream, pv, 100.0)
+  road = view._build_road(view.scene, view._reference(720.0, view.config.x_max), 100.0)
   styles = view._line_styles(view.scene)
   first_lane = len(view.scene.edges)
-  tops = []
+  reached = []
   ops = _draw_ops(road.lines)
   for i in (1, 2):
     rgb = styles[first_lane + i][3]
     mine = [op for op in ops if (op[3].r, op[3].g, op[3].b) == tuple(int(c) for c in rgb)]
-    tops.append(min(_op_points(op)[:, 1].min() for op in mine))
-  y35, y50 = bem.car_to_widget(np.array([[ends[1], 0.0], [ends[2], 0.0]]), stream, view.config, pv)[:, 1]
-  assert tops[0] == pytest.approx(y35, abs=2) and tops[1] == pytest.approx(y50, abs=2), 'two different ends'
+    reached.append(max(_op_points(op)[:, 0].max() for op in mine))
+  assert reached[0] == pytest.approx(ends[1], abs=0.3) and reached[1] == pytest.approx(ends[2], abs=0.3), 'two different ends'
   assert bem.std_end(grid, np.zeros(grid.size)) == math.inf, 'all-zero stds (not filled) fall back'
+
+
+def test_far_lines_are_widened_to_a_minimum_pixel_width():
+  from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  view, _ = _renderer_with_scene()
+  reference = view._reference(720.0, view.config.x_max)
+  road = view._road_draw(view.scene, reference)
+  body = [op for op in road.lines if op[0] is not ber._keep and op[3].a == max(o[3].a for o in road.lines[-6:] if o[0] is not ber._keep)][-1]
+  points = _op_points(body)  # the last lane line's body strip (its most opaque one): [L0, R0, L1, R1, ..]
+  xs, widths = points[0::2, 0], np.abs(points[0::2, 1] - points[1::2, 1])
+  near, far = np.argmin(np.abs(xs - 0.0)), np.argmax(xs)
+  assert widths[near] == pytest.approx(max(ber.LANE_WIDTH, ber.LANE_MIN_PX * float(bem.meters_per_pixel(xs[near], reference.view))), rel=1e-3)
+  assert widths[far] > 2 * ber.LANE_WIDTH, 'a painted line 100 m away would be under a pixel'
+  assert widths[far] * float(bem.scale_at(xs[far], reference.view)) == pytest.approx(ber.LANE_MIN_PX, rel=1e-3)
 
 
 def test_lane_change_ghost_sits_one_lane_over_and_turns_red_on_a_blind_spot(monkeypatch):
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   view, _ = _renderer_with_scene()
-  calls = []
   monkeypatch.setattr(ber, 'SHOW_LANE_CHANGE_GHOST', True)
-  monkeypatch.setattr(view, '_cars', lambda v, rect, poses, local, layout, hull_at, colors, outlines, **k:
-                      calls.append((poses[0], outlines[0])) or ([[]], np.zeros((1, 8, 2))))
-  pv = bem.view_params(RECT, view.config)
-  key = (RECT.x, RECT.y, RECT.width, RECT.height, view.config)
-  view._lane_change_ghost(view.scene, RECT, key, pv)
-  assert not calls, 'nothing without a lane change (blinkers alone are the HUD)'
+  assert view._lane_change_ghost(view.scene) == [], 'nothing without a lane change (blinkers alone are the HUD)'
   for state, blind, rgb in (('preLaneChange', False, ber.GHOST_PRE), ('laneChangeStarting', False, ber.GHOST_GO),
                             ('laneChangeStarting', True, ber.GHOST_BLOCKED)):
     view.ingest(_rich_model(state=state, direction='right'), None,
                 SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=True, leftBlindspot=False, rightBlindspot=blind))
-    view._lane_change_ghost(view.scene, RECT, key, pv)
-    pose, outline = calls[-1]
-    assert pose[1] == pytest.approx(3.6, abs=0.05), 'laneLines[3] - [2] at the ego'
-    assert outline[:3] == rgb
+    fill, outline = view._lane_change_ghost(view.scene)
+    assert _op_points(fill)[:, 1].mean() == pytest.approx(3.6, abs=0.05), 'laneLines[3] - [2] at the ego, on the ground in meters'
+    assert (outline[3].r, outline[3].g, outline[3].b) == rgb
 
 
 def _slc_sm(now_ns, *, limit=None, curve=None, stamp_ns=None):
@@ -305,33 +304,37 @@ def test_lead_labels_show_the_distance_only_and_pulse_on_hard_brake(monkeypatch)
   monkeypatch.setattr(ber, '_run', lambda ops: cars.append(ops))
   view.scene.leads = [*view.scene.leads, ber.BirdsEyeLead(48.0, 0.0, 0.0, radar=True)]
   drawn.clear()
-  view._leads(view.scene, RECT, bem.view_params(RECT, bem.zoomed_config(view.config, 68.0)))
+  view._leads(view.scene, RECT, pv)
   assert len(cars) == 2 and drawn == ['33 yd']
+  assert [pose[0] for _, pose in view._lead_poses(view.scene, pv)] == sorted((pose[0] for _, pose in view._lead_poses(view.scene, pv)), reverse=True), \
+    'far to near, so a nearer car covers a farther one'
+  shadows = view._shadows([pose for _, pose in view._lead_poses(view.scene, pv)])
+  assert len(shadows) == 2 and all(op[0] is ber._raw.DrawTriangleFan and op[3].a == ber.SHADOW_ALPHA for op in shadows)
 
 
 def test_curve_mark_is_hidden_but_still_ingested(monkeypatch):
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   assert ber.SHOW_CURVE_MARK is False
-  drawn, bars = [], []
+  drawn = []
   view, _ = _renderer_with_scene()
   view.text = SimpleNamespace(measure=lambda text, size: (0.5 * size * len(text), size), draw=lambda text, size, *a: drawn.append(text))
   view.ingest(curve=ber.CurveMark(18.0, 40.0, True, True))
   assert view.scene.curve == ber.CurveMark(18.0, 40.0, True, True)
-  monkeypatch.setattr(view, '_bar', lambda *a: bars.append(a))
   view.scene.should_stop = True
   path = SimpleNamespace(end=(20.0, 0.0, 0.0))
-  view._marks(view.scene, RECT, bem.view_params(RECT, view.config), path)
+  reference = view._reference(RECT.height, view.config.x_max)
+  bars = view._marks(view.scene, reference, path)
+  view._curve_label(view.scene, RECT, reference.view)
   assert len(bars) == 1 and drawn == [], 'only the shouldStop bar; no curve bar or tag'
+  stop = _op_points(bars[0])
+  assert stop[:, 0].mean() == pytest.approx(20.0) and np.ptp(stop[:, 1]) == pytest.approx(ber.PATH_WIDTH * 1.5), 'across the path end, in meters'
 
 
-def test_the_lane_change_ghost_is_off_by_default(monkeypatch):
+def test_the_lane_change_ghost_is_off_by_default():
   # 2026-11-09: the operator did not want the green outline one lane over; the feature is gated, not deleted.
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
   assert ber.SHOW_LANE_CHANGE_GHOST is False
   view, _ = _renderer_with_scene()
-  calls = []
-  monkeypatch.setattr(view, '_cars', lambda *a, **k: calls.append(a) or ([[]], np.zeros((1, 8, 2))))
   view.ingest(_rich_model(state='laneChangeStarting', direction='right'), None,
               SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=True, leftBlindspot=False, rightBlindspot=False))
-  view._lane_change_ghost(view.scene, RECT, (RECT.x, RECT.y, RECT.width, RECT.height, view.config), bem.view_params(RECT, view.config))
-  assert not calls
+  assert view._lane_change_ghost(view.scene) == []

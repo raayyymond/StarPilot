@@ -1,18 +1,18 @@
-"""Pure geometry for the birds-eye (top-down chase view) renderer. No GL, no messaging.
+"""Pure geometry for the birds-eye (3D chase view) renderer. No GL, no messaging.
 
-Car frame follows modelV2 (device frame): x forward, y right, z down, meters. radarState
+Car frame follows modelV2 (device frame): x forward, y right, meters; heights are z up from the road. radarState
 yRel is left-positive and must be negated before it is mapped here.
 
-The view is a ground-plane homography: with u = (x - x_min) / (x_max - x_min) and
-d = 1 + k*u, a point lands at
+The view is a pinhole camera above and behind the car, looking forward and down by `pitch`, with no roll or yaw.
+Its place follows from what the view must show: the ground at x_min lands on the bottom edge of the rect and the
+ground at x_max on the top edge, so with the two edge rays `pitch + fov / 2` and `pitch - fov / 2` below the horizon
 
-  px = cx + y * lateral_ppm / d
-  py = bottom - (1 + k) * u / d * depth_px
+  height = (x_max - x_min) / (cot(pitch - fov / 2) - cot(pitch + fov / 2))
+  x      = x_min - height * cot(pitch + fov / 2)
 
-k = 0 is a plain orthographic top-down view. With isotropic=True (the default) it is a linear map: one
-pixels-per-meter forward at every distance, so a 30 m gap is twice a 15 m one, and lateral_stretch times that
-sideways (1.0 = true to scale; the default 1.3 draws lanes, cars and the path 30 % wider). k > 0 is a mild chase-cam: straight
-lines stay straight, the ego region keeps its scale and distant geometry narrows by 1 / (1 + k).
+ViewParams.matrix maps (x, y, z, 1) to (X, Y, Z, W) with the pixel at (X / W, Y / W). The renderer hands the same
+matrix to raylib as its modelview, so road geometry stays in meters and the GPU projects it; car_to_widget is the
+CPU form for the few points that need pixels (car bodies, labels).
 """
 from dataclasses import dataclass, replace
 import math
@@ -22,54 +22,40 @@ import numpy as np
 
 @dataclass(frozen=True)
 class BirdsEyeConfig:
-  """View extent and scale.
+  """What the view shows and how steeply it looks down.
 
-  Defaults (chosen for the 1280x720 Android Auto stream, also fine for the overlay panel): a true-to-scale,
-  linear top-down map. perspective 0 + isotropic: one pixels-per-meter in both directions, the forward fit
-  (x_max - x_min over the rect height) sets it unless lateral_range would not fit the width.
-  - x_min -5 / x_max 68: 73 m over ~677 px = ~9.3 px/m at 720 p. The ego outline (front bumper at 1.5 m,
-    4.6 m long) fits above the bottom and a lead at 60 m (rear bumper 61.5 m, front 66.1 m) fits below the top.
-  - Trade-off: true scale makes the road small. A 3.7 m lane is ~34 px and a 4.6 x 1.9 m car
-    ~43 x 18 px at 720 p (half a lane wide);
-    a shorter x_max would enlarge it but cut leads off before 60 m. A 1280 px wide frame shows ~69 m either side,
-    so the neighbouring lanes always fit.
-  - lateral_stretch 1.3: those are the forward numbers. Sideways everything is drawn 30 % wider (a lane ~45 px,
-    a car ~25 px wide at 720 p) because the true-scale road read as too narrow on the display; distances ahead
-    and the zoom are unaffected.
-  - x_max is the highway speed preset, not a ceiling: the renderer zooms this config (zoomed_config) between
+  - x_min -7: the ground 7 m behind the camera is the bottom edge, so the whole ego car (rear bumper at -3.1 m)
+    and its shadow sit above it.
+  - x_max 80: the highway preset, not a ceiling. The renderer zooms this config (zoomed_config) between
     ZOOM_NEAR_X_MAX and far_x_max (ZOOM_FAR_X_MAX, 120 m) to keep a radar lead on screen, and its sample_grid
     spans that widest zoom.
-  - The old default (perspective 0.6) drew a 30 m radar gap as ~17.5 m of ego-car lengths at 1280x720, so the
-    printed distance looked 50-100 % too large for the picture.
+  - pitch 36, fov 42: the edge rays are 57 and 15 degrees below the horizon, so the horizon is never in view and
+    the far end of the road is drawn about a third as wide as the road beside the car. At the highway preset the
+    camera is 28 m up and 25 m behind; at the city preset 14 m up and 16 m behind.
   """
-  x_min: float = -5.0          # meters behind the camera shown below the ego origin
-  x_max: float = 68.0          # meters ahead at the top edge
-  lateral_range: float = 12.0  # meters either side that must fit the width (it lowers the scale if it does not)
-  perspective: float = 0.0     # 0 = orthographic (linear distance), 1 = isotropic at the ego (strong chase cam)
-  isotropic: bool = True       # with perspective 0: one forward scale at every distance, sideways = lateral_stretch x it
-  lateral_stretch: float = 1.3  # isotropic only: sideways px/m over forward px/m. 1.0 is true to scale; the default
-                               # draws cars, lanes and the path 30 % wider at the same forward zoom
-  max_ppm_fraction: float = 0.045  # non-isotropic only: lateral pixels-per-meter cap, as a fraction of the rect height
-  top_pad: float = 0.03        # fractions of the rect height kept clear at the top and bottom
-  bottom_pad: float = 0.03
+  x_min: float = -7.0          # meters of ground behind the device shown at the bottom edge
+  x_max: float = 80.0          # meters ahead at the top edge
+  pitch: float = 36.0          # degrees the camera looks below the horizon
+  fov: float = 42.0            # vertical field of view, degrees
   sample_step: float = 1.5     # meters between resampled line points near the car
 
 
 DEFAULT_CONFIG = BirdsEyeConfig()
 
-# Speed-based zoom. The view shows roughly the next 2.3-3 s of travel: 30 m ahead at city speed (<= 10 m/s,
-# ~20 px/m at 720 p, a 3.7 m lane ~75 px) widening linearly to the default 68 m at highway speed (>= 30 m/s,
-# ~9.3 px/m). 20 m/s (72 km/h) shows 49 m. A radar leadOne always stays on screen: when its front bumper plus
-# ZOOM_LEAD_BUFFER is beyond the speed preset the view widens to it (up to ZOOM_FAR_X_MAX, ~5 px/m at 720 p);
-# a nearer lead never tightens the view below the preset.
-ZOOM_NEAR_X_MAX = 30.0
+# Speed-based zoom. The view shows the next few seconds of travel: 36 m ahead at city speed (<= 10 m/s) widening
+# linearly to the default 80 m at highway speed (>= 30 m/s). A radar leadOne always stays on screen: when its front
+# bumper plus ZOOM_LEAD_BUFFER is beyond the speed preset the view widens to it (up to ZOOM_FAR_X_MAX); a nearer
+# lead never tightens the view below the preset.
+ZOOM_NEAR_X_MAX = 36.0
 ZOOM_FAR_X_MAX = 120.0  # m, the widest zoom: radar and model leads are reported out to ~100+ m
 ZOOM_SLOW_SPEED = 10.0
 ZOOM_FAST_SPEED = 30.0
 ZOOM_TAU = 1.0    # s, first-order filter time constant
 ZOOM_MAX_RATE = 12.0  # m/s, the most x_max may move per second: a lead appearing 20 m ahead on the highway takes ~3 s
-ZOOM_STEP = 0.5   # m, x_max quantum: the view (and every cached layer) only changes when the zoom moves a step
+ZOOM_STEP = 0.5   # m, x_max quantum of ZoomFilter.x_max (the camera itself follows the unquantized ZoomFilter.value)
 ZOOM_LEAD_BUFFER = 6.0  # m shown beyond a lead's front bumper
+MIN_FAR_RAY = math.radians(4.0)  # the top edge ray stays at least this far below the horizon
+NEAR_DEPTH = 0.5  # m: points nearer the camera plane than this (or behind it) are projected as if at it
 
 
 def zoom_x_max(v_ego: float, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> float:
@@ -98,19 +84,19 @@ def lead_zoom_x_max(v_ego: float, lead_front: float | None, cfg: BirdsEyeConfig 
 
 
 def zoomed_config(cfg: BirdsEyeConfig, x_max: float) -> BirdsEyeConfig:
-  """cfg showing x_max ahead: same x_min (the ego stays put), lateral_range scaled with the span (same aspect)."""
+  """cfg showing x_max ahead: same x_min, pitch and fov, so the camera rises and backs away as the view widens."""
   if x_max == cfg.x_max:
     return cfg
-  ratio = (x_max - cfg.x_min) / max(1e-3, cfg.x_max - cfg.x_min)
-  return replace(cfg, x_max=x_max, lateral_range=cfg.lateral_range * ratio)
+  return replace(cfg, x_max=x_max)
 
 
 class ZoomFilter:
-  """First-order filtered, rate-limited, quantized x_max for the speed-based (and lead-widened) zoom.
+  """First-order filtered, rate-limited x_max for the speed-based (and lead-widened) zoom.
 
   The filter never moves faster than max_rate (m/s) however far the target jumps (a lead appearing or vanishing),
-  so the view always glides. The quantized value only moves once the filter is more than 3/4 of a step away from it, so speed noise near a
-  step boundary does not toggle the view (and rebuild the cached layers) back and forth."""
+  so the view always glides. `value` is the filtered distance the camera follows; `x_max` is that distance
+  quantized to `step`, moving only once the filter is more than 3/4 of a step away from it, for callers that key
+  work on the zoom (speed noise near a step boundary does not toggle it back and forth)."""
   def __init__(self, cfg: BirdsEyeConfig = DEFAULT_CONFIG, tau: float = ZOOM_TAU, step: float = ZOOM_STEP,
                max_rate: float = ZOOM_MAX_RATE):
     self.cfg, self.tau, self.step, self.max_rate = cfg, tau, step, max_rate
@@ -133,64 +119,79 @@ class ZoomFilter:
     return self.x_max
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ViewParams:
-  cx: float
-  bottom: float
-  depth_px: float
-  lateral_ppm: float
-  k: float
+  """The camera for one rect and config. `matrix` is 4x4: (x, y, z, 1) -> (X, Y, Z, W), pixel = (X / W, Y / W)."""
+  matrix: np.ndarray
+  position: tuple[float, float, float]  # the camera in the car frame: (x, 0, height)
+  focal: float                          # pixels
+  cos_pitch: float
+  sin_pitch: float
   x_min: float
   x_max: float
 
 
 def view_params(rect, cfg: BirdsEyeConfig = DEFAULT_CONFIG) -> ViewParams:
-  """Metres-per-pixel and perspective strength derived from the widget rect."""
+  """The camera that puts the ground at cfg.x_min on the rect's bottom edge and at cfg.x_max on its top edge."""
   width, height = float(rect.width), float(rect.height)
-  depth_px = max(1.0, height * (1.0 - cfg.top_pad - cfg.bottom_pad))
+  half = math.radians(min(max(cfg.fov, 5.0), 120.0)) / 2.0
+  pitch = max(math.radians(cfg.pitch), half + MIN_FAR_RAY)
+  near, far = pitch + half, pitch - half
   span = max(1e-3, cfg.x_max - cfg.x_min)
-  if cfg.isotropic and cfg.perspective <= 0:
-    stretch = max(1e-3, cfg.lateral_stretch)
-    ppm = max(1e-3, min(depth_px / span, width / (2.0 * cfg.lateral_range * stretch)))
-    return ViewParams(cx=float(rect.x) + width / 2.0, bottom=float(rect.y) + height * (1.0 - cfg.bottom_pad),
-                      depth_px=ppm * span, lateral_ppm=ppm * stretch, k=0.0, x_min=cfg.x_min, x_max=cfg.x_max)
-  lateral_ppm = max(1e-3, min(width / (2.0 * cfg.lateral_range), height * cfg.max_ppm_fraction))
-  depth_ppm = depth_px / span
-  # k at which the ego region is isotropic (equal lateral and forward pixels per meter).
-  k_iso = min(max(lateral_ppm / depth_ppm - 1.0, 0.0), 4.0)
-  k = max(0.0, cfg.perspective) * k_iso
-  return ViewParams(cx=float(rect.x) + width / 2.0, bottom=float(rect.y) + height * (1.0 - cfg.bottom_pad),
-                    depth_px=depth_px, lateral_ppm=lateral_ppm, k=k, x_min=cfg.x_min, x_max=cfg.x_max)
+  cam_h = span / (1.0 / math.tan(far) - 1.0 / math.tan(near))
+  cam_x = cfg.x_min - cam_h / math.tan(near)
+  focal = max(1.0, height) / 2.0 / math.tan(half)
+  c, s = math.cos(pitch), math.sin(pitch)
+  depth = np.array([c, 0.0, -s, -cam_x * c + cam_h * s])  # distance along the optical axis
+  up = np.array([s, 0.0, c, -cam_x * s - cam_h * c])       # offset along the camera's up axis
+  px, py = float(rect.x) + width / 2.0, float(rect.y) + height / 2.0
+  matrix = np.stack((px * depth + focal * np.array([0.0, 1.0, 0.0, 0.0]), py * depth - focal * up, -0.5 * depth, depth))
+  return ViewParams(matrix, (cam_x, 0.0, cam_h), focal, c, s, cfg.x_min, cfg.x_max)
 
 
-def _u_and_d(x, view: ViewParams):
-  u = (np.asarray(x, dtype=np.float64) - view.x_min) / (view.x_max - view.x_min)
-  if view.k > 0:
-    u = np.maximum(u, -0.9 / view.k)  # keep the homography's denominator positive far behind the view
-  return u, 1.0 + view.k * u
+def ground_matrix(view: ViewParams, ground_z: float = -1.0) -> np.ndarray:
+  """view.matrix for vertices whose z is `ground_z` on the road: raylib's 2D shapes emit their vertices at its
+  batch depth (-1 at the start of a batch), so drawn through this matrix they lie on the ground plane."""
+  shift = np.eye(4)
+  shift[2, 3] = -ground_z
+  return view.matrix @ shift
+
+
+def depth_at(x, view: ViewParams):
+  """Distance along the optical axis (m) of the ground point at forward distance x."""
+  m = view.matrix[3]
+  return np.maximum(m[0] * np.asarray(x, dtype=np.float64) + m[3], NEAR_DEPTH)
 
 
 def car_to_widget(points, rect, cfg: BirdsEyeConfig = DEFAULT_CONFIG, view: ViewParams | None = None) -> np.ndarray:
-  """Map (N, 2+) car-frame points (x fwd, y right, meters) to (N, 2) widget pixels."""
+  """Map (N, 2) ground points (x fwd, y right) or (N, 3) points (z up, meters) to (N, 2) widget pixels."""
   view = view_params(rect, cfg) if view is None else view
-  pts = np.asarray(points, dtype=np.float64).reshape(-1, np.shape(points)[-1] if np.ndim(points) > 1 else 2)
-  u, d = _u_and_d(pts[:, 0], view)
+  columns = np.shape(points)[-1] if np.ndim(points) > 1 else 2
+  pts = np.asarray(points, dtype=np.float64).reshape(-1, columns)
+  m = view.matrix
+  homogeneous = pts[:, :2] @ m[(0, 1, 3), :2].T + m[(0, 1, 3), 3]
+  if columns > 2:
+    homogeneous += pts[:, 2:3] * m[(0, 1, 3), 2]
+  w = np.maximum(homogeneous[:, 2], NEAR_DEPTH)
   out = np.empty((pts.shape[0], 2), dtype=np.float32)
-  out[:, 0] = view.cx + pts[:, 1] * view.lateral_ppm / d
-  out[:, 1] = view.bottom - (1.0 + view.k) * u / d * view.depth_px
+  out[:, 0] = homogeneous[:, 0] / w
+  out[:, 1] = homogeneous[:, 1] / w
   return out
 
 
 def scale_at(x, view: ViewParams) -> np.ndarray:
-  """Lateral pixels per meter at forward distance x."""
-  _, d = _u_and_d(x, view)
-  return view.lateral_ppm / d
+  """Sideways pixels per meter on the ground at forward distance x."""
+  return view.focal / depth_at(x, view)
+
+
+def meters_per_pixel(x, view: ViewParams) -> np.ndarray:
+  """Sideways meters one pixel covers on the ground at forward distance x."""
+  return depth_at(x, view) / view.focal
 
 
 def depth_scale_at(x, view: ViewParams) -> np.ndarray:
-  """Forward pixels per meter at forward distance x (derivative of py)."""
-  _, d = _u_and_d(x, view)
-  return (1.0 + view.k) * view.depth_px / (view.x_max - view.x_min) / (d * d)
+  """Forward pixels per meter on the ground at forward distance x (derivative of the pixel row)."""
+  return view.focal * view.position[2] / depth_at(x, view) ** 2
 
 
 def slope_profile(grid: np.ndarray, ys: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
