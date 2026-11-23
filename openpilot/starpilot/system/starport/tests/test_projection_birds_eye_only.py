@@ -1,9 +1,11 @@
-"""stream_content 'birds_eye': the car screen draws only the birds-eye view while driving and builds nothing else."""
+"""stream_content 'birds_eye': the car screen draws only the birds-eye view, its HUD and the now-playing card while
+driving and builds nothing else."""
 import ast
 import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 from openpilot.starpilot.system.starport import identity as identity_store
 from openpilot.starpilot.system.starport import projection_onroad as projection
@@ -46,7 +48,8 @@ class TestBirdsEyeOnly(unittest.TestCase):
     graphics.draw_rectangle = lambda *_: events.append('rectangle')
     graphics.Vector2 = lambda *values: values
     graphics.draw_line_ex = lambda *_: events.append('exit_button')
-    # Only what the birds-eye-only screen may use: any camera/view/map/pip/feed access raises AttributeError.
+    # Only what the birds-eye-only screen needs: any camera/view/map/pip access raises AttributeError, and without
+    # the now-playing factories no card, feed or touch control is built.
     native = SimpleNamespace(rl=graphics, ui_state=ui, fonts=Fonts, font_role=SimpleNamespace(BRAND='brand', MEDIUM='medium'),
                              profile=SimpleNamespace(LARGE='large'), font_directory=lambda: Path('/unused'),
                              birds_eye=FakeBirdsEye, birds_eye_text=lambda fonts: ('text', fonts),
@@ -64,7 +67,7 @@ class TestBirdsEyeOnly(unittest.TestCase):
     native, events = self.native()
     view = self.view(native)
     for name in ('camera', 'onroad', 'monitor', 'pip', 'map', 'map_feed', 'adapter', 'favorites',
-                 'now_playing_feed', 'jetlink_feed', '_slc_input'):
+                 'now_playing', 'now_playing_feed', 'now_playing_touch', 'jetlink_feed', '_slc_input'):
       self.assertIsNone(getattr(view, name), name)
     self.assertIsInstance(view.birds_eye, FakeBirdsEye)
     self.assertEqual(view.birds_eye.source(), (native.ui_state.sm, 3))
@@ -189,14 +192,159 @@ class TestBirdsEyeOnly(unittest.TestCase):
   def test_dependencies_import_nothing_the_birds_eye_view_does_not_draw(self):
     tree = ast.parse((ROOT / 'projection_onroad.py').read_text())
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'birds_eye_dependencies')
-    modules = {node.module for node in ast.walk(function) if isinstance(node, ast.ImportFrom)}
+    lazy = {node.module for helper in function.body if isinstance(helper, ast.FunctionDef)
+            for node in ast.walk(helper) if isinstance(node, ast.ImportFrom)}
+    # Imported while the dependencies are built: the function's own statements, not its helpers' bodies.
+    modules = {node.module for statement in function.body if not isinstance(statement, ast.FunctionDef)
+               for node in ast.walk(statement) if isinstance(node, ast.ImportFrom)}
+    self.assertFalse(modules & lazy, 'a module is imported up front or only when its helper builds something')
+    for module in ('openpilot.starpilot.system.starport.projection_now_playing', 'openpilot.starpilot.ui.onroad_now_playing',
+                   'openpilot.starpilot.system.starport.media_audio', 'openpilot.starpilot.system.starport.birds_eye_hud'):
+      self.assertIn(module, lazy)
     for forbidden in ('openpilot.cereal.visionipc', 'openpilot.selfdrive.ui.onroad.cameraview',
                       'openpilot.selfdrive.ui.onroad.augmented_road_view', 'openpilot.selfdrive.ui.onroad.model_renderer',
                       'openpilot.starpilot.ui.onroad', 'openpilot.starpilot.ui.onroad_map', 'openpilot.starpilot.ui.pip_render',
                       'openpilot.starpilot.ui.onroad_dm', 'openpilot.starpilot.system.starport.projection_favorites',
                       'openpilot.starpilot.system.starport.projection_now_playing', 'openpilot.starpilot.models.jetlink_status'):
       self.assertNotIn(forbidden, modules)
+    for never in ('openpilot.cereal.visionipc', 'openpilot.selfdrive.ui.onroad.cameraview', 'openpilot.starpilot.ui.onroad',
+                  'openpilot.starpilot.ui.onroad_map', 'openpilot.starpilot.models.jetlink_status'):
+      self.assertNotIn(never, lazy)
     self.assertIn('openpilot.selfdrive.ui.onroad.birds_eye_renderer', modules)
+
+  # --- now-playing card ---
+  TRACK = {'status': 'playing', 'title': 'Song', 'artist': 'Band', 'source': 'spotify'}
+
+  def music(self, layout=None, *, with_hud=True):
+    """A birds-eye-only view with the now-playing factories; returns (view, native, widget, feed, order)."""
+    from openpilot.starpilot.system.starport import birds_eye_hud
+    from openpilot.starpilot.ui.onroad_now_playing import NowPlayingTouch
+    native, _ = self.native()
+    order = []
+    widget = SimpleNamespace(track=None, artwork=None, press=Mock(), release=Mock(), close=lambda: order.append('widget_closed'))
+    widget.showing = lambda: widget.track
+    widget.render = lambda state: order.append(('card', state))
+    feed = Mock(snapshot=Mock(return_value=self.TRACK), artwork=Mock(return_value=('url', None)))
+    feed.close = lambda: order.append('feed_closed')
+
+    class Hud:
+      view_rect = staticmethod(birds_eye_hud.view_rect)
+
+      def __init__(self, text, source):
+        pass
+
+      def render(self, width, height):
+        order.append('hud')
+
+      def close(self):
+        pass
+
+    if with_hud:
+      native.birds_eye_hud = Hud
+    native.now_playing_widget = lambda fonts: widget
+    native.now_playing_feed = lambda: feed
+    native.now_playing_control = Mock()
+    native.now_playing_touch = NowPlayingTouch
+    view = self.view(native, layout)
+    return view, native, widget, feed, order
+
+  def test_card_placement_is_moved_above_the_dock_and_right_of_the_strip(self):
+    from openpilot.starpilot.system.starport import birds_eye_hud
+    for viewport in (VIEWPORT, (1860, 1080), (1920, 1080), (1280, 720)):
+      width, height = viewport
+      rect = birds_eye_hud.view_rect(width, height)
+      margin = round(projection.BIRDS_EYE_CARD_MARGIN * height / 1080)
+      default = dict(default_layout_for_viewport(VIEWPORT)['widgets']['now_playing'], x=width - 30 - 520, y=height - 30 - 96)
+      if width >= 1860:  # the smallest canvas a layout document describes
+        self.assertEqual(default, default_layout_for_viewport(viewport)['widgets']['now_playing'])
+      self.assertGreater(default['y'] + 96, rect[3], 'the layout default lands on the torque dock')
+      saved = dict(default)
+      moved = projection.birds_eye_card_placement(default, width, height, rect)
+      self.assertEqual(default, saved, 'the layout document is not changed')
+      self.assertEqual((moved['x'], moved['y']), (default['x'], rect[3] - margin - 96))
+      self.assertEqual({key: moved[key] for key in moved if key not in 'xy'}, {key: default[key] for key in default if key not in 'xy'})
+      big = projection.birds_eye_card_placement({**default, 'size': 'big', 'x': 0, 'y': 0}, width, height, rect)
+      self.assertEqual((big['x'], big['y']), (rect[0] + margin, margin), 'right of the acceleration strip')
+      corner = projection.birds_eye_card_placement({**default, 'size': 'big', 'x': width, 'y': height}, width, height, rect)
+      self.assertEqual((corner['x'], corner['y']), (width - margin - 640, rect[3] - margin - 264))
+      inside = {**default, 'x': rect[0] + 200, 'y': 300}
+      self.assertEqual(projection.birds_eye_card_placement(inside, width, height, rect), inside, 'a card in the view stays put')
+
+  def test_card_is_fed_only_while_driving_and_placed_and_draws_after_the_hud(self):
+    view, native, widget, feed, order = self.music()
+    self.assertIs(view.now_playing, widget)
+    view.prepare()
+    feed.set_enabled.assert_called_with(False)
+    view.render()
+    self.assertNotIn('hud', order, 'standby draws neither the HUD nor the card')
+    native.ui_state.started = True
+    view.prepare()
+    feed.set_enabled.assert_called_with(True)
+    self.assertEqual((widget.track, widget.artwork), (self.TRACK, ('url', None)))
+    view.render()
+    self.assertEqual([entry if isinstance(entry, str) else entry[0] for entry in order], ['hud', 'card'])
+    state = order[-1][1]
+    placed = state.customization['layouts']['large']['now_playing']
+    saved = view.customization['widgets']['now_playing']
+    self.assertEqual((placed['x'], placed['y']), (saved['x'], 1080 - 140 - 12 - 96), 'above the torque dock')
+    self.assertEqual((state.alert.size, state.viewport_width), ('none', VIEWPORT[0]))
+    view.render()
+    self.assertIs(order[-1][1], state, 'the moved placement is built once per layout, not per frame')
+    # A layout with the card off stops the feed; a new layout is read again.
+    layout = default_layout_for_viewport(VIEWPORT)
+    layout['widgets']['now_playing'].update(enabled=False, x=600, y=300)
+    view.apply_layout(layout)
+    view.prepare()
+    feed.set_enabled.assert_called_with(False)
+    view.render()
+    self.assertEqual(order[-1][1].customization['layouts']['large']['now_playing'], layout['widgets']['now_playing'])
+    view.close()
+    self.assertEqual(order[-2:], ['feed_closed', 'widget_closed'])
+
+  def test_card_without_a_hud_keeps_the_layout_placement(self):
+    view, native, _, _, order = self.music(with_hud=False)
+    native.ui_state.started = True
+    view.prepare()
+    view.render()
+    self.assertIs(order[-1][1].customization['layouts']['large']['now_playing'], view.customization['widgets']['now_playing'])
+
+  def test_taps_on_the_card_while_driving_control_the_music_where_it_is_drawn(self):
+    from openpilot.starpilot.ui.onroad_now_playing import card_layout
+    focused = []
+    layout = default_layout_for_viewport(VIEWPORT)
+    view, native, widget, _, order = self.music(layout)
+    view.native_focus = lambda: focused.append(True)
+    control = native.now_playing_control
+    saved = layout['widgets']['now_playing']
+    # Standby: the card is not drawn and takes no taps; the exit button still works.
+    view.prepare()
+    widget.track = self.TRACK
+    self.tap(view, saved['x'] + 48, 880)
+    control.assert_not_called()
+    placed = layout['widgets'][CAR_EXIT]
+    self.tap(view, placed['x'] + 48, placed['y'] + 48)
+    self.assertEqual(focused, [True])
+    native.ui_state.started = True
+    view.prepare()
+    view.render()
+    drawn = order[-1][1].customization['layouts']['large']['now_playing']
+    button = card_layout(drawn, self.TRACK, VIEWPORT[0])[1]['play_pause']
+    self.tap(view, saved['x'] + 48, saved['y'] + 60)
+    control.assert_not_called()  # where the layout put the card: the torque dock, nothing is drawn there
+    self.tap(view, 1440, 400)
+    control.assert_not_called()  # the road
+    self.tap(view, button.x + button.width / 2, button.y + button.height / 2)
+    control.assert_called_once_with('play_pause', {})
+    widget.press.assert_called_once_with('play_pause')
+    widget.release.assert_called_with('play_pause')
+    self.tap(view, placed['x'] + 48, placed['y'] + 48)
+    self.assertEqual(focused, [True], 'the exit button still takes no taps while driving')
+    # A press is dropped when the session cancels touches.
+    control.reset_mock()
+    view.handle_touches([SimpleNamespace(kind='down', x=(button.x + 10) / VIEWPORT[0], y=(button.y + 10) / VIEWPORT[1])])
+    view.cancel_touch()
+    view.handle_touches([SimpleNamespace(kind='up', x=(button.x + 10) / VIEWPORT[0], y=(button.y + 10) / VIEWPORT[1])])
+    control.assert_not_called()
 
   def test_renderer_reads_the_mode_and_paces_birds_eye_by_the_encoder(self):
     source = (ROOT / 'current_car_ui.py').read_text()

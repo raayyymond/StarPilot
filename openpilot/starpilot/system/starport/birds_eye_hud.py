@@ -1,5 +1,6 @@
 """HUD over the birds-eye-only car screen: an acceleration bar on the left edge, a flat torque bar at the bottom, large
-blinking turn-signal arrows at the side edges and a speed / set-speed readout at the top left.
+blinking turn-signal arrows at the side edges, a speed / set-speed readout at the top left and a status cluster
+(steering wheel, drive mode, follow distance) at the bottom left.
 
 Acceleration bar: a vertical track hugging the left edge, zero at its middle, accelerating up, braking down. Only while
 carControl.longActive is it coloured: the fill is the planner's target (longitudinalPlan.aTarget; the 100 Hz
@@ -30,7 +31,19 @@ vCruiseCluster, else vCruise, valid in (0, SET_SPEED_NA); "--" otherwise and whe
 false, i.e. disengaged or lateral-only), mph or km/h by `metric`. The numbers are
 twice the birds-eye lead label's size (birds_eye_math.label_font_size over the view rect), with small unit captions.
 
-Per frame this is a handful of rectangles, a few cached-text draws and at most two texture quads; nothing allocates.
+Status cluster: bottom left of the view, right of the acceleration strip, above the torque dock and below the left
+turn arrow, each widget on a dark rounded pill (the birds-eye lead label's background).
+- Steering wheel: the comma's chffr_wheel art on a round badge, turned by carState.steeringAngleDeg (left-positive, so
+  counter-clockwise on screen), green while carControl.latActive and grey otherwise, the whole degrees under it; a
+  drawn ring with three spokes when the texture cannot be loaded.
+- Drive mode: EXPERIMENTAL (the comma's orange) or CHILL from selfdriveState.experimentalMode, dimmed while
+  selfdriveState.enabled is false.
+- Follow distance: selfdriveState.personality as one to three gap bars (hudControl.leadDistanceBars) with its name,
+  TRAFFIC in its own colour while starpilotCarState.trafficModeEnabled, and the measured time gap to
+  radarState.leadOne (dRel / vEgo) while a lead is present and the car moves.
+A widget whose service has not been seen is not drawn.
+
+Per frame this is a handful of rectangles, a few cached-text draws and at most three texture quads; nothing allocates.
 """
 from dataclasses import dataclass
 import math
@@ -62,6 +75,25 @@ MPH_PER_MPS, KPH_PER_MPS = 2.2369362921, 3.6
 TURN_SIGNAL_BLINK_PERIOD = 1 / (80 / 60)       # the comma screen's period (mici alert_renderer)
 TURN_SIGNAL_RC = 0.3                           # its pulse filter: jumps bright each period, then decays to 20 %
 TURN_SIGNAL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons_mici/onroad/turn_signal_left.png'
+WHEEL_ICON = Path(__file__).parents[3] / 'selfdrive/assets/icons/chffr_wheel.png'
+
+STATUS_BOTTOM = 20                             # status cluster: gap above the torque dock, logical px at 1080 rows
+STATUS_GAP = 12                                # between its pills
+WHEEL_BADGE = 130                              # steering-wheel badge diameter
+WHEEL_PAD = 8                                  # pill padding around the badge
+WHEEL_ART = 0.78                               # wheel art over the badge diameter (the comma's 144 in a 192 button)
+ANGLE_SIZE = 38                                # the degrees under the badge
+ANGLE_ROW = 52                                 # pill rows under the badge for the degrees
+CHIP_SIZE = 34                                 # drive-mode and follow-distance text
+CHIP_HEIGHT = 68
+CHIP_PAD = 24                                  # text inset from the chip's ends
+MODE_WIDTH = 320
+FOLLOW_WIDTH = 440
+GAP_BARS = ((38, 9), (30, 9), (22, 9))         # the gap icon's bars, nearest first (bottom up): (width, height)
+GAP_BAR_STEP = 14                              # bar pitch
+MIN_GAP_SPEED = 1.0                            # m/s; below this the time gap is not shown
+MAX_TIME_GAP = 9.95                            # seconds; a longer gap is not shown
+PERSONALITIES = ('AGGRESSIVE', 'STANDARD', 'RELAXED')   # log.LongitudinalPersonality by raw value
 
 BACKGROUND_TOP, BACKGROUND_BOTTOM = (26, 31, 44), (8, 9, 13)   # birds_eye_renderer's full-frame gradient
 TRACK = (255, 255, 255, 26)
@@ -75,6 +107,11 @@ RED = (255, 72, 72)
 ACTUAL = (245, 247, 250)
 SHADOW = (0, 0, 0)
 DOT = (182, 182, 182)                                        # the arc's centre dot
+PILL = (10, 12, 18, 217)                                     # birds_eye_renderer's LABEL_BG at 85 %
+WHEEL_IDLE = (84, 90, 104)                                   # the badge while lateral is not active
+EXPERIMENTAL = (255, 155, 63)                                # the comma's experimental-mode orange
+TRAFFIC = (96, 190, 255)
+DIMMED = 110                                                 # alpha of the mode chip's text while not enabled
 
 
 def _finite(value, default=None):
@@ -276,6 +313,132 @@ def read_speeds(sm, metric: bool) -> tuple[str, str] | None:
   return speed, '--' if cruise is None else f"{round(cruise if metric else cruise / KPH_PER_MPS * MPH_PER_MPS):d}"
 
 
+@dataclass(frozen=True)
+class SteeringReading:
+  angle: float       # carState.steeringAngleDeg, left-positive
+  lat_active: bool
+
+
+@dataclass(frozen=True)
+class DriveMode:
+  experimental: bool
+  enabled: bool
+
+  @property
+  def label(self) -> str:
+    return 'EXPERIMENTAL' if self.experimental else 'CHILL'
+
+
+@dataclass(frozen=True)
+class FollowReading:
+  bars: int                # 1..3, hudControl.leadDistanceBars
+  label: str               # the personality's name, or TRAFFIC
+  traffic: bool
+  time_gap: float | None   # seconds to leadOne; None without a lead, near standstill or beyond MAX_TIME_GAP
+
+
+def _message(sm, name: str):
+  """sm[name] once seen; None when unseen or the SubMaster does not carry the service."""
+  try:
+    return sm[name] if sm.seen[name] else None
+  except (AttributeError, KeyError, TypeError):
+    return None
+
+
+def read_steering(sm) -> SteeringReading | None:
+  """The steering angle and whether openpilot steers; None before carState with a finite angle."""
+  try:
+    car_state = _message(sm, 'carState')
+    angle = _finite(getattr(car_state, 'steeringAngleDeg', None))
+    if angle is None:
+      return None
+    return SteeringReading(angle, bool(getattr(_message(sm, 'carControl'), 'latActive', False)))
+  except (AttributeError, KeyError, TypeError):
+    return None
+
+
+def read_drive_mode(sm) -> DriveMode | None:
+  """Experimental or chill, and whether openpilot is enabled; None before selfdriveState."""
+  try:
+    state = _message(sm, 'selfdriveState')
+    if state is None:
+      return None
+    return DriveMode(bool(getattr(state, 'experimentalMode', False)), bool(getattr(state, 'enabled', False)))
+  except (AttributeError, KeyError, TypeError):
+    return None
+
+
+def personality_index(personality) -> int | None:
+  """0 aggressive / 1 standard / 2 relaxed from the capnp enum, its raw value or its name; None when unreadable."""
+  raw = getattr(personality, 'raw', personality)
+  if isinstance(raw, str):
+    name = raw.upper()
+    return PERSONALITIES.index(name) if name in PERSONALITIES else None
+  try:
+    raw = int(raw)
+  except (TypeError, ValueError):
+    return None
+  return raw if 0 <= raw < len(PERSONALITIES) else None
+
+
+def time_gap(sm) -> float | None:
+  """Seconds to radarState.leadOne at the current speed; None without a lead or below MIN_GAP_SPEED."""
+  try:
+    lead = getattr(_message(sm, 'radarState'), 'leadOne', None)
+    if lead is None or not getattr(lead, 'present', False):
+      return None
+    distance = _finite(getattr(lead, 'dRel', None))
+    v_ego = _finite(getattr(_message(sm, 'carState'), 'vEgo', None))
+  except (AttributeError, KeyError, TypeError):
+    return None
+  if distance is None or distance <= 0 or v_ego is None or v_ego <= MIN_GAP_SPEED:
+    return None
+  gap = distance / v_ego
+  return gap if gap < MAX_TIME_GAP else None
+
+
+def read_follow(sm) -> FollowReading | None:
+  """The driving personality as gap bars, traffic mode and the measured time gap; None before selfdriveState."""
+  try:
+    state = _message(sm, 'selfdriveState')
+    index = personality_index(getattr(state, 'personality', None)) if state is not None else None
+    if index is None:
+      return None
+    traffic = bool(getattr(_message(sm, 'starpilotCarState'), 'trafficModeEnabled', False))
+  except (AttributeError, KeyError, TypeError):
+    return None
+  return FollowReading(index + 1, 'TRAFFIC' if traffic else PERSONALITIES[index], traffic, time_gap(sm))
+
+
+@dataclass(frozen=True)
+class StatusGeometry:
+  """The status cluster's pills as (x, y, width, height), and the wheel badge inside the first."""
+  wheel: tuple[float, float, float, float]
+  badge: tuple[float, float, float]   # centre x, centre y, radius
+  mode: tuple[float, float, float, float]
+  follow: tuple[float, float, float, float]
+
+  @property
+  def pills(self):
+    return self.wheel, self.mode, self.follow
+
+
+def status_geometry(width: float, height: float) -> StatusGeometry:
+  """Bottom left of the view: the wheel pill, and right of it the mode chip over the follow-distance chip."""
+  k = height / 1080
+  vx, _, _, vh = view_rect(width, height)
+  bottom = vh - STATUS_BOTTOM * k
+  x = vx + SIGNAL_MARGIN * k
+  side = (WHEEL_BADGE + 2 * WHEEL_PAD) * k
+  wheel_h = side + ANGLE_ROW * k
+  wheel = (x, bottom - wheel_h, side, wheel_h)
+  chips = x + side + STATUS_GAP * k
+  chip_h = CHIP_HEIGHT * k
+  follow = (chips, bottom - chip_h, FOLLOW_WIDTH * k, chip_h)
+  mode = (chips, follow[1] - STATUS_GAP * k - chip_h, MODE_WIDTH * k, chip_h)
+  return StatusGeometry(wheel, (x + side / 2, wheel[1] + side / 2, WHEEL_BADGE * k / 2), mode, follow)
+
+
 def clock_text(now: float | None = None) -> str:
   """The comma's local time as the car would show it: 12-hour, no leading zero, e.g. 4:07 PM."""
   t = time.localtime(now)
@@ -336,7 +499,7 @@ def torque_feedback(sm, car_params):
 
 class BirdsEyeHud:
   def __init__(self, rl, text, source, *, feedback=torque_feedback, clock=time.monotonic, icon_path=TURN_SIGNAL_ICON,
-               wall_clock=time.time):
+               wall_clock=time.time, wheel_path=WHEEL_ICON):
     """source() -> (SubMaster, CarParams or None). clock() -> seconds, for the turn-signal pulse."""
     self.rl, self.text, self.source = rl, text, source
     self._feedback = feedback
@@ -364,6 +527,17 @@ class BirdsEyeHud:
     self.metric = False   # km/h when set (the owner copies ui_state.is_metric); mph by default
     self._readout_key = None
     self._readout = None
+    self._wheel_path = wheel_path
+    self._wheel = None
+    self._wheel_failed = False
+    self._status_key = None
+    self._status = None
+    self._angle_key = None
+    self._angle = None
+    self._mode_key = None
+    self._mode = None
+    self._follow_key = None
+    self._follow = None
 
   @staticmethod
   def view_rect(width: float, height: float) -> tuple[float, float, float, float]:
@@ -383,6 +557,7 @@ class BirdsEyeHud:
     self._draw_torque(sm, car_params, width, height)
     self._draw_signals(sm, width, height, geometry.strip)
     self._draw_readout(sm, width, height, geometry.strip)
+    self._draw_status(sm, width, height)
     self._draw_clock(width, height)
 
   def _draw_dock(self, width, height, strip) -> None:
@@ -493,29 +668,43 @@ class BirdsEyeHud:
                                 rl.Color(*DOT, 230))
 
   # --- turn signals ---
+  def _load_texture(self, path, height):
+    """An icon file as a bilinear texture, shrunk on the CPU to `height` rows; raises when it cannot be loaded."""
+    rl = self.rl
+    image = rl.load_image(str(path))
+    try:
+      if not rl.is_image_valid(image):
+        raise ValueError(f'{path} unreadable')
+      if image.height > height:
+        rl.image_resize(image, round(image.width * height / image.height), round(height))
+      texture = rl.load_texture_from_image(image)
+    finally:
+      if rl.is_image_valid(image):
+        rl.unload_image(image)
+    if texture.id == 0:
+      raise ValueError(f'{path}: texture not created')
+    rl.set_texture_filter(texture, rl.TextureFilter.TEXTURE_FILTER_BILINEAR)
+    return texture
+
   def _load_icon(self, height):
-    """The comma's turn-signal icon as a texture, shrunk once on the CPU; None (and never retried) on failure."""
+    """The comma's turn-signal icon as a texture, loaded once; None (and never retried) on failure."""
     if self._icon is not None or self._icon_failed:
       return self._icon
-    rl = self.rl
     try:
-      image = rl.load_image(str(self._icon_path))
-      try:
-        if not rl.is_image_valid(image):
-          raise ValueError('turn signal icon unreadable')
-        if image.height > height:
-          rl.image_resize(image, round(image.width * height / image.height), round(height))
-        texture = rl.load_texture_from_image(image)
-      finally:
-        if rl.is_image_valid(image):
-          rl.unload_image(image)
-      if texture.id == 0:
-        raise ValueError('turn signal texture not created')
-      rl.set_texture_filter(texture, rl.TextureFilter.TEXTURE_FILTER_BILINEAR)
-      self._icon = texture
+      self._icon = self._load_texture(self._icon_path, height)
     except Exception:
       self._icon_failed = True
     return self._icon
+
+  def _load_wheel(self, height):
+    """The comma's steering-wheel art as a texture, loaded once; None (and never retried) on failure."""
+    if self._wheel is not None or self._wheel_failed:
+      return self._wheel
+    try:
+      self._wheel = self._load_texture(self._wheel_path, height)
+    except Exception:
+      self._wheel_failed = True
+    return self._wheel
 
   def _draw_signals(self, sm, width, height, strip) -> None:
     left, right = read_blinkers(sm)
@@ -562,6 +751,121 @@ class BirdsEyeHud:
       self.text.draw(value, size, x, y, rl.Color(*rgb, 255))
       self.text.draw(unit, caption, cx, cy, rl.Color(*TICK, 230))
 
+  # --- status cluster ---
+  def _draw_status(self, sm, width, height) -> None:
+    key = (width, height)
+    if key != self._status_key:
+      self._status, self._status_key = status_geometry(width, height), key
+    g, k = self._status, height / 1080
+    steering = read_steering(sm)
+    if steering is not None:
+      self._draw_wheel(steering, g, k)
+    mode = read_drive_mode(sm)
+    if mode is not None:
+      self._draw_mode(mode, g.mode, k)
+    follow = read_follow(sm)
+    if follow is not None:
+      self._draw_follow(follow, g.follow, k)
+
+  def _pill(self, rect, roundness) -> None:
+    rl = self.rl
+    rl.draw_rectangle_rounded(rl.Rectangle(*rect), roundness, 8, rl.Color(*PILL))
+
+  def _fitted(self, text, size, room):
+    """(size, width, height) of `text` at `size`, shrunk to fit `room`."""
+    w, h = self.text.measure(text, size)
+    if w > room > 0:
+      size *= room / w
+      w, h = self.text.measure(text, size)
+    return size, w, h
+
+  def _draw_wheel(self, reading: SteeringReading, g: StatusGeometry, k: float) -> None:
+    rl = self.rl
+    self._pill(g.wheel, 0.3)
+    cx, cy, r = g.badge
+    fill = (*GREEN, 235) if reading.lat_active else (*WHEEL_IDLE, 235)
+    rl.draw_circle_v(rl.Vector2(cx, cy), r, rl.Color(*fill))
+    rotation = -reading.angle   # raylib turns clockwise; a left (positive) angle turns the wheel counter-clockwise
+    side = 2 * r * WHEEL_ART
+    icon = self._load_wheel(side)
+    if icon is not None:
+      rl.draw_texture_pro(icon, rl.Rectangle(0, 0, icon.width, icon.height), rl.Rectangle(cx, cy, side, side),
+                          rl.Vector2(side / 2, side / 2), rotation, rl.Color(255, 255, 255, 255))
+    else:
+      # Fallback: a rim with spokes to the left, right and bottom, turned with the wheel.
+      color = rl.Color(*ACTUAL, 255)
+      rim = side / 2
+      thick = max(2.0, 0.16 * rim)
+      rl.draw_ring(rl.Vector2(cx, cy), rim - thick, rim, 0, 360, 36, color)
+      centre = rl.Vector2(cx, cy)
+      for spoke in (0.0, 90.0, 180.0):
+        a = math.radians(spoke + rotation)
+        rl.draw_line_ex(centre, rl.Vector2(cx + (rim - thick / 2) * math.cos(a), cy + (rim - thick / 2) * math.sin(a)),
+                        thick, color)
+      rl.draw_circle_v(centre, 0.22 * rim, color)
+    if self.text is None:
+      return
+    degrees = round(reading.angle) + 0   # + 0: no "-0"
+    key = (degrees, g.wheel)
+    if key != self._angle_key:
+      text = f"{degrees:d}"
+      x, y, w, h = g.wheel
+      ring = 0.11 * ANGLE_SIZE * k   # the degree sign is drawn: the bitmap atlases hold ASCII only
+      size, tw, th = self._fitted(text, ANGLE_SIZE * k, w - 2 * WHEEL_PAD * k - 3 * ring)
+      row = y + w   # the rows under the square badge area
+      tx = x + (w - tw - 3 * ring) / 2
+      ty = row + (h - w - th) / 2 - WHEEL_PAD * k / 2
+      self._angle = (text, size, round(tx), round(ty), tx + tw + 2 * ring, ty + 0.2 * th + ring, ring)
+      self._angle_key = key
+    text, size, tx, ty, ring_x, ring_y, ring = self._angle
+    color = rl.Color(*ACTUAL, 255)
+    self.text.draw(text, size, tx, ty, color)
+    rl.draw_ring(rl.Vector2(ring_x, ring_y), 0.55 * ring, ring, 0, 360, 16, color)
+
+  def _draw_mode(self, mode: DriveMode, rect, k: float) -> None:
+    self._pill(rect, 1.0)
+    if self.text is None:
+      return
+    key = (mode.experimental, rect)
+    if key != self._mode_key:
+      x, y, w, h = rect
+      size, tw, th = self._fitted(mode.label, CHIP_SIZE * k, w - 2 * CHIP_PAD * k)
+      self._mode, self._mode_key = (mode.label, size, round(x + (w - tw) / 2), round(y + (h - th) / 2)), key
+    rgb = EXPERIMENTAL if mode.experimental else ACTUAL
+    self.text.draw(*self._mode, self.rl.Color(*rgb, 255 if mode.enabled else DIMMED))
+
+  def _draw_follow(self, follow: FollowReading, rect, k: float) -> None:
+    rl = self.rl
+    self._pill(rect, 1.0)
+    x, y, w, h = rect
+    rgb = TRAFFIC if follow.traffic else ACTUAL
+    # The gap icon: bars widening toward the car, the nearest `bars` of them lit.
+    icon_w = GAP_BARS[0][0] * k
+    centre = x + CHIP_PAD * k + icon_w / 2
+    base = y + h / 2 + (len(GAP_BARS) * GAP_BAR_STEP - (GAP_BAR_STEP - GAP_BARS[0][1])) * k / 2
+    for index, (bar_w, bar_h) in enumerate(GAP_BARS):
+      top = base - (index * GAP_BAR_STEP + bar_h) * k
+      color = rl.Color(*rgb, 255) if index < follow.bars else rl.Color(*TICK, 70)
+      rl.draw_rectangle_rounded(rl.Rectangle(centre - bar_w * k / 2, top, bar_w * k, bar_h * k), 1.0, 4, color)
+    if self.text is None:
+      return
+    gap = None if follow.time_gap is None else round(follow.time_gap, 1)
+    key = (follow.label, gap, rect)
+    if key != self._follow_key:
+      left = x + CHIP_PAD * k + icon_w + 16 * k
+      right = x + w - CHIP_PAD * k
+      gap_text, gap_draw = ('' if gap is None else f"{gap:.1f} s"), None
+      if gap_text:
+        size, tw, th = self._fitted(gap_text, CHIP_SIZE * k, (right - left) * 0.4)
+        gap_draw = (gap_text, size, round(right - tw), round(y + (h - th) / 2))
+        right -= tw + 16 * k
+      size, tw, th = self._fitted(follow.label, CHIP_SIZE * k, right - left)
+      self._follow, self._follow_key = ((follow.label, size, round(left), round(y + (h - th) / 2)), gap_draw), key
+    label, gap_draw = self._follow
+    self.text.draw(*label, rl.Color(*rgb, 255))
+    if gap_draw is not None:
+      self.text.draw(*gap_draw, rl.Color(*TICK, 255))
+
   def _draw_clock(self, width, height) -> None:
     """The time of day at the top right of the view, on the readout's top margin."""
     if self.text is None:
@@ -604,3 +908,6 @@ class BirdsEyeHud:
     if self._icon is not None:
       self.rl.unload_texture(self._icon)
       self._icon = None
+    if self._wheel is not None:
+      self.rl.unload_texture(self._wheel)
+      self._wheel = None

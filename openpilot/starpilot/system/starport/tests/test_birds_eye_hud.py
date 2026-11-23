@@ -1,5 +1,5 @@
-"""Birds-eye stream HUD: acceleration bar colours, limits and geometry, flat torque bar, turn-signal arrows, and per-frame
-cost with fakes."""
+"""Birds-eye stream HUD: acceleration bar colours, limits and geometry, flat torque bar, turn-signal arrows, the status
+cluster (steering wheel, drive mode, follow distance), and per-frame cost with fakes."""
 from types import SimpleNamespace
 import time
 
@@ -50,7 +50,7 @@ class FakeText:
 
 
 SERVICES = ('carState', 'carControl', 'longitudinalPlan', 'starpilotLongitudinalPlan', 'controlsState', 'carOutput',
-            'vehicleParameters')
+            'vehicleParameters', 'selfdriveState', 'starpilotCarState', 'radarState')
 
 
 class FakeSM:
@@ -529,3 +529,309 @@ def test_the_clock_sits_at_the_top_right_in_twelve_hour_time():
   now[0] += 60
   view.render(width, height)
   assert text.drawn[-1][0] == '4:08 PM'
+
+
+# --- status cluster ---
+def status_sm(*, angle=12.4, lat_active=True, experimental=False, enabled=True, personality=1, traffic=None,
+              lead=None, v_ego=20.0):
+  """lead: dRel in metres of a present leadOne, or None for no lead. traffic=None: starpilotCarState unseen."""
+  car_state = SimpleNamespace(aEgo=0.0, brakePressed=False, leftBlinker=False, rightBlinker=False, vCruise=255.0,
+                              vCruiseCluster=255.0, cruiseState=SimpleNamespace(enabled=False), vEgo=v_ego,
+                              steeringAngleDeg=angle)
+  messages = {'carState': car_state,
+              'carControl': SimpleNamespace(longActive=False, latActive=lat_active, actuators=SimpleNamespace(accel=0.0)),
+              'selfdriveState': SimpleNamespace(experimentalMode=experimental, enabled=enabled,
+                                                personality=SimpleNamespace(raw=personality)),
+              'radarState': SimpleNamespace(leadOne=SimpleNamespace(present=lead is not None, dRel=lead or 0.0))}
+  if traffic is not None:
+    messages['starpilotCarState'] = SimpleNamespace(trafficModeEnabled=traffic)
+  return FakeSM(**messages)
+
+
+def test_steering_reader():
+  from openpilot.starpilot.system.starport.birds_eye_hud import SteeringReading, read_steering
+  assert read_steering(status_sm(angle=12.4)) == SteeringReading(12.4, True)
+  assert read_steering(status_sm(angle=-90.0, lat_active=False)) == SteeringReading(-90.0, False)
+  assert read_steering(FakeSM()) is None, 'no carState yet'
+  assert read_steering(sm()) is None, 'a carState without a steering angle'
+  assert read_steering(status_sm(angle=float('nan'))) is None
+  only_car = FakeSM(carState=SimpleNamespace(steeringAngleDeg=3.0))
+  assert read_steering(only_car) == SteeringReading(3.0, False), 'carControl unseen: not steering'
+  assert read_steering(SimpleNamespace(seen={})) is None, 'a SubMaster without the service'
+
+
+def test_drive_mode_reader():
+  from openpilot.starpilot.system.starport.birds_eye_hud import DriveMode, read_drive_mode
+  assert read_drive_mode(status_sm(experimental=True)) == DriveMode(True, True)
+  assert read_drive_mode(status_sm(experimental=True)).label == 'EXPERIMENTAL'
+  chill = read_drive_mode(status_sm(enabled=False))
+  assert chill == DriveMode(False, False) and chill.label == 'CHILL'
+  assert read_drive_mode(sm()) is None, 'selfdriveState unseen'
+  assert read_drive_mode(SimpleNamespace(seen={})) is None
+
+
+def test_follow_reader():
+  from openpilot.starpilot.system.starport.birds_eye_hud import FollowReading, personality_index, read_follow, time_gap
+  for raw, name in enumerate(('AGGRESSIVE', 'STANDARD', 'RELAXED')):
+    assert read_follow(status_sm(personality=raw)) == FollowReading(raw + 1, name, False, None), 'bars = raw + 1'
+  assert personality_index(2) == 2 and personality_index('relaxed') == 2 and personality_index(SimpleNamespace(raw=0)) == 0
+  assert personality_index(7) is None and personality_index(None) is None and personality_index('sport') is None
+  traffic = read_follow(status_sm(personality=0, traffic=True))
+  assert (traffic.bars, traffic.label, traffic.traffic) == (1, 'TRAFFIC', True)
+  assert read_follow(status_sm(traffic=False)).label == 'STANDARD'
+  assert read_follow(status_sm(lead=36.0, v_ego=20.0)).time_gap == pytest.approx(1.8)
+  assert time_gap(status_sm(lead=36.0, v_ego=0.9)) is None, 'near standstill'
+  assert time_gap(status_sm(lead=None)) is None, 'no lead'
+  assert time_gap(status_sm(lead=150.0, v_ego=5.0)) is None, 'too long a gap to be worth a number'
+  assert time_gap(status_sm(lead=float('nan'))) is None
+  assert read_follow(sm()) is None, 'selfdriveState unseen'
+  unreadable = status_sm()
+  unreadable.messages['selfdriveState'].personality = SimpleNamespace(raw=9)
+  assert read_follow(unreadable) is None
+
+
+def overlap(a, b):
+  return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+@pytest.mark.parametrize('width, height', [(1920, 1080), LOGICAL_720P, (1280, 720), (2880, 1080)])
+def test_status_cluster_overlaps_nothing(width, height):
+  from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
+  from openpilot.starpilot.system.starport.projection_onroad import birds_eye_card_placement
+  k = height / 1080
+  g = status_geometry(width, height)
+  strip = accel_geometry(height).strip
+  vx, vy, vw, vh = view_rect(width, height)
+  pills = g.pills
+  for index, pill in enumerate(pills):
+    assert pill[0] >= strip and pill[0] + pill[2] <= vx + vw / 2, 'in the left half of the view, right of the accel strip'
+    assert pill[1] + pill[3] <= vh, 'above the torque dock'
+    for other in pills[index + 1:]:
+      assert not overlap(pill, other)
+  cx, cy, r = g.badge
+  assert g.wheel[0] <= cx - r and cx + r <= g.wheel[0] + g.wheel[2] and g.wheel[1] <= cy - r
+  assert cy + r < g.wheel[1] + g.wheel[3], 'rows left under the badge for the degrees'
+  # The left turn arrow at mid height, the speed readout at the top and the torque bar in the dock.
+  arrow_h = hud_module.SIGNAL_HEIGHT * k
+  arrow = (strip + hud_module.SIGNAL_MARGIN * k, height / 2 - arrow_h / 2, arrow_h * 208 / 192, arrow_h)
+  readout = (strip, 0, vw, hud_module.SIGNAL_MARGIN * k + 1.4 * readout_size(width, height))
+  t = torque_geometry(width, height)
+  torque = (t.left, t.bottom - t.thick, t.right - t.left, t.thick)
+  # The now-playing card where the birds-eye screen draws it, small and big.
+  cards = []
+  for size in ('small', 'big'):
+    placed = {'x': width - 30 - 520, 'y': height - 30 - 96, 'enabled': True, 'size': size}   # the layout's default
+    placed = birds_eye_card_placement(placed, width, height, (vx, vy, vw, vh))
+    cards.append((placed['x'], placed['y'], *((520, 96) if size == 'small' else (640, 264))))
+  for pill in pills:
+    for other in (arrow, readout, torque, *cards):
+      assert not overlap(pill, other), (pill, other)
+  for card in cards:
+    assert card[0] >= strip and card[1] + card[3] <= vh and not overlap(card, torque) and not overlap(card, readout)
+
+
+def test_status_sizes_read_on_a_1280x720_car_screen():
+  from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
+  g = status_geometry(*LOGICAL_720P)
+  assert 2 * g.badge[2] == pytest.approx(130)
+  assert hud_module.CHIP_SIZE == 34 and g.mode[3] == g.follow[3] == pytest.approx(68)
+
+
+class CountingText(FakeText):
+  """Records (text, size, x, y, color) draws and every measured text."""
+  def __init__(self):
+    super().__init__()
+    self.measured = []
+
+  def measure(self, text, size):
+    self.measured.append(text)
+    return super().measure(text, size)
+
+  def draw(self, text, size, x, y, color):
+    self.drawn.append((text, size, x, y, color))
+
+
+def status_hud(source, rl=None):
+  rl, text = rl or FakeRl(), CountingText()
+  return BirdsEyeHud(rl, text, source, feedback=lambda sm, cp: TorqueFeedback(), clock=lambda: 0.0), rl, text
+
+
+def test_wheel_badge_follows_lateral_and_falls_back_to_a_drawn_wheel():
+  from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
+  g = status_geometry(*LOGICAL_720P)
+  state = {'angle': 12.4, 'lat_active': True}
+  view, rl, text = status_hud(lambda: (status_sm(angle=state['angle'], lat_active=state['lat_active']), None))
+  view.render(*LOGICAL_720P)
+  assert view._wheel_failed, 'the fake rl has no image loader'
+  (badge,) = [call for call in rl.calls if call[0] == 'draw_circle_v' and call[2] == pytest.approx(g.badge[2])]
+  assert badge[1] == pytest.approx(g.badge[:2]) and badge[-1][:3] == hud_module.GREEN
+  spokes = [call for call in rl.calls if call[0] == 'draw_line_ex']
+  assert len(spokes) == 3 and any(call[0] == 'draw_ring' and call[1] == pytest.approx(g.badge[:2]) for call in rl.calls)
+  # The right-hand spoke: a left (positive) angle lifts it, counter-clockwise on screen.
+  right = spokes[0]
+  assert right[2][0] > g.badge[0] and right[2][1] < g.badge[1]
+  pill = next(call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1] == pytest.approx(g.wheel))
+  assert pill[-1] == hud_module.PILL == (10, 12, 18, 217)
+  angle = next(entry for entry in text.drawn if entry[0] == '12')
+  assert angle[1] == pytest.approx(hud_module.ANGLE_SIZE) and g.badge[1] + g.badge[2] <= angle[3] < g.wheel[1] + g.wheel[3]
+  assert g.wheel[0] < angle[2] < g.wheel[0] + g.wheel[2]
+
+  state.update(angle=-0.3, lat_active=False)
+  rl.calls.clear()
+  text.drawn.clear()
+  view.render(*LOGICAL_720P)
+  (badge,) = [call for call in rl.calls if call[0] == 'draw_circle_v' and call[2] == pytest.approx(g.badge[2])]
+  assert badge[-1][:3] == hud_module.WHEEL_IDLE
+  assert any(entry[0] == '0' for entry in text.drawn) and not any(entry[0] == '-0' for entry in text.drawn)
+
+
+def test_angle_text_is_measured_only_when_the_whole_degrees_change():
+  state = {'angle': 12.1}
+  view, _, text = status_hud(lambda: (status_sm(angle=state['angle']), None))
+  view.render(*LOGICAL_720P)
+  for angle in (12.2, 12.4, 11.6):
+    state['angle'] = angle
+    view.render(*LOGICAL_720P)
+  assert text.measured.count('12') == 1
+  state['angle'] = -47.8
+  view.render(*LOGICAL_720P)
+  assert text.measured.count('-48') == 1
+  count = len(text.measured)
+  view.render(*LOGICAL_720P)
+  assert len(text.measured) == count, 'a steady frame measures nothing'
+
+
+class WheelRl(FakeRl):
+  def __init__(self):
+    super().__init__()
+    self.TextureFilter = SimpleNamespace(TEXTURE_FILTER_BILINEAR=1)
+    self.paths, self.unloaded = [], []
+
+  def load_image(self, path):
+    self.paths.append(path)
+    return SimpleNamespace(data=b'x', width=266, height=266)
+
+  def is_image_valid(self, image):
+    return bool(image.data) and image.width > 0 and image.height > 0
+
+  def image_resize(self, image, w, h):
+    image.width, image.height = w, h
+
+  def load_texture_from_image(self, image):
+    return SimpleNamespace(id=len(self.paths), width=image.width, height=image.height)
+
+  def unload_image(self, image):
+    pass
+
+  def set_texture_filter(self, texture, mode):
+    pass
+
+  def unload_texture(self, texture):
+    self.unloaded.append(texture.id)
+
+
+def test_wheel_texture_is_loaded_once_turned_by_the_angle_and_unloaded():
+  from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
+  g = status_geometry(*LOGICAL_720P)
+  state = {'angle': 30.0}
+  view, rl, _ = status_hud(lambda: (status_sm(angle=state['angle']), None), rl=WheelRl())
+  view.render(*LOGICAL_720P)
+  state['angle'] = -75.5
+  view.render(*LOGICAL_720P)
+  assert len(rl.paths) == 1 and rl.paths[0].endswith('selfdrive/assets/icons/chffr_wheel.png')
+  first, second = [call for call in rl.calls if call[0] == 'draw_texture_pro']
+  side = 2 * g.badge[2] * hud_module.WHEEL_ART
+  assert first[3] == pytest.approx((g.badge[0], g.badge[1], side, side)), 'centred on the badge'
+  assert first[4] == pytest.approx((side / 2, side / 2)), 'turned about its centre'
+  assert first[5] == pytest.approx(-30.0) and second[5] == pytest.approx(75.5), 'left-positive angle, clockwise raylib'
+  assert first[1].width == round(side), 'shrunk once on the CPU'
+  assert not [call for call in rl.calls if call[0] == 'draw_line_ex']
+  view.close()
+  assert rl.unloaded == [1]
+
+
+def test_drive_mode_chip_is_orange_in_experimental_and_dims_while_not_enabled():
+  from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
+  g = status_geometry(*LOGICAL_720P)
+  state = {'experimental': True, 'enabled': True}
+  view, rl, text = status_hud(lambda: (status_sm(experimental=state['experimental'], enabled=state['enabled']), None))
+
+  def chip():
+    text.drawn.clear()
+    view.render(*LOGICAL_720P)
+    return next(entry for entry in text.drawn if entry[0] in ('EXPERIMENTAL', 'CHILL'))
+
+  value, size, x, y, color = chip()
+  assert value == 'EXPERIMENTAL' and color == (*hud_module.EXPERIMENTAL, 255) == (255, 155, 63, 255)
+  assert size <= hud_module.CHIP_SIZE and g.mode[0] < x and g.mode[1] < y < g.mode[1] + g.mode[3]
+  assert x + len(value) * size * 0.5 <= g.mode[0] + g.mode[2], 'fits the chip'
+  assert any(call[0] == 'draw_rectangle_rounded' and call[1] == pytest.approx(g.mode) and call[-1] == hud_module.PILL
+             for call in rl.calls)
+  state.update(experimental=False)
+  value, size, _, _, color = chip()
+  assert value == 'CHILL' and size == pytest.approx(hud_module.CHIP_SIZE) and color == (*hud_module.ACTUAL, 255)
+  state.update(enabled=False)
+  assert chip()[4] == (*hud_module.ACTUAL, hud_module.DIMMED)
+  state.update(experimental=True)
+  assert chip()[4] == (*hud_module.EXPERIMENTAL, hud_module.DIMMED)
+  assert text.measured.count('CHILL') == 1, 'measured when the mode changes, not when it dims'
+
+
+def test_follow_chip_draws_gap_bars_the_name_and_the_time_gap():
+  from openpilot.starpilot.system.starport.birds_eye_hud import status_geometry
+  g = status_geometry(*LOGICAL_720P)
+  state = {'personality': 0, 'traffic': False, 'lead': None}
+  view, rl, text = status_hud(lambda: (status_sm(personality=state['personality'], traffic=state['traffic'],
+                                                 lead=state['lead'], v_ego=20.0), None))
+
+  def inside(x, y):
+    return g.follow[0] <= x < g.follow[0] + g.follow[2] and g.follow[1] <= y < g.follow[1] + g.follow[3]
+
+  def frame():
+    rl.calls.clear()
+    text.drawn.clear()
+    view.render(*LOGICAL_720P)
+    bars = [call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1] != pytest.approx(g.follow)
+            and inside(call[1][0], call[1][1])]
+    return bars, [entry for entry in text.drawn if inside(entry[2], entry[3])]
+
+  for raw, name in enumerate(('AGGRESSIVE', 'STANDARD', 'RELAXED')):
+    state['personality'] = raw
+    bars, texts = frame()
+    assert len(bars) == 3 and [bar[-1][3] == 255 for bar in bars] == [index <= raw for index in range(3)]
+    assert bars[0][1][1] > bars[1][1][1] > bars[2][1][1] and bars[0][1][2] > bars[2][1][2], 'nearest bar lowest and widest'
+    assert [entry[0] for entry in texts] == [name] and texts[0][4] == (*hud_module.ACTUAL, 255)
+    assert texts[0][2] > bars[0][1][0] + bars[0][1][2], 'the name sits right of the icon'
+  state.update(traffic=True)
+  bars, texts = frame()
+  assert texts[0][0] == 'TRAFFIC' and texts[0][4] == (*hud_module.TRAFFIC, 255) and bars[0][-1][:3] == hud_module.TRAFFIC
+  assert hud_module.TRAFFIC not in (hud_module.ACTUAL, hud_module.EXPERIMENTAL, hud_module.GREEN)
+  state.update(traffic=False, personality=0, lead=36.0)
+  bars, texts = frame()
+  name, gap = texts
+  assert (name[0], gap[0]) == ('AGGRESSIVE', '1.8 s')
+  assert name[2] + len(name[0]) * name[1] * 0.5 <= gap[2], 'the name stops before the time gap'
+  assert gap[2] + len(gap[0]) * gap[1] * 0.5 <= g.follow[0] + g.follow[2]
+  measured = len(text.measured)
+  state['lead'] = 36.4   # still 1.8 s
+  frame()
+  assert len(text.measured) == measured, 'measured only when the displayed value changes'
+  state['lead'] = 44.0
+  assert frame()[1][1][0] == '2.2 s'
+
+
+def test_status_widgets_wait_for_their_services():
+  view, rl, text = status_hud(lambda: (sm(long_active=False), None))
+  view.render(*LOGICAL_720P)
+  assert not [call for call in rl.calls if call[0] in ('draw_circle_v', 'draw_ring', 'draw_line_ex')]
+  assert [entry[0] for entry in text.drawn if not entry[0].endswith(('AM', 'PM'))] == []
+
+
+def test_cpu_cost_per_frame_with_the_status_cluster_is_small():
+  messages = status_sm(experimental=True, traffic=False, lead=36.0)
+  view, _, _ = status_hud(lambda: (messages, None))
+  view.render(*LOGICAL_720P)
+  start = time.perf_counter()
+  for _ in range(300):
+    view.render(*LOGICAL_720P)
+  assert (time.perf_counter() - start) / 300 < 0.001
