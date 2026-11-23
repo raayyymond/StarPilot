@@ -43,18 +43,6 @@ def test_ring_strip_is_a_closed_stroke_of_the_given_width():
   assert spans == pytest.approx([8.0, 12.0])
 
 
-def test_overlay_bands_reproduce_the_far_fade_and_cover_beyond_the_cut():
-  bands = bem.overlay_bands(0.0, 1000.0)
-  assert bands == [pytest.approx((400.0, 1000.0, 0.2, 0.0)), pytest.approx((50.0, 400.0, 1.0, 0.2)), pytest.approx((0.0, 50.0, 1.0, 1.0))]
-  # A cut at y = 600 (draw distance) with its soft start at 700: nothing of the far fade above the cut.
-  cut = bem.overlay_bands(0.0, 1000.0, cut_y=600.0, soft_y=700.0)
-  assert all(b[0] >= 600.0 for b in cut[:-2])
-  assert cut[0] == pytest.approx((600.0, 1000.0, 2 / 15, 0.0)), 'the far band is clipped with its alpha interpolated'
-  assert cut[-2] == pytest.approx((600.0, 700.0, 1.0, 0.0)), 'the soft end fades in up to the cut'
-  assert cut[-1] == pytest.approx((0.0, 600.0, 1.0, 1.0)), 'and covers everything beyond it'
-  assert bem.overlay_bands(0.0, 1000.0, cut_y=-5.0) == bands, 'a cut above the view changes nothing'
-
-
 def test_soft_end_length_and_taper():
   assert bem.end_fade_length(-5.0, 10.0) == pytest.approx(4.0), 'standstill: 25 % of 15 m is under the 4 m minimum'
   assert bem.end_fade_length(-5.0, 35.0) == pytest.approx(10.0), '25 % of the drawn length'
@@ -168,26 +156,19 @@ def _standstill_view():
   return view, stream, view._reference(stream.height, bem.ZOOM_NEAR_X_MAX)
 
 
-def test_every_line_and_the_path_fade_out_before_the_draw_distance():
+def test_every_line_and_the_path_end_with_a_hard_cut_at_the_draw_distance():
   from openpilot.selfdrive.ui.onroad import birds_eye_renderer as ber
+  assert ber.SOFT_ENDS is False, 'no fades in the design'
   view, stream, reference = _standstill_view()
   road = view._road_draw(view.scene, reference)
   for ops in (road.road, road.lines):
-    assert max(_op_points(op)[:, 0].max() for op in _draw_ops(ops)) <= 10.0 + 0.1, 'nothing beyond the 10 m draw distance'
+    assert max(_op_points(op)[:, 0].max() for op in _draw_ops(ops)) == pytest.approx(10.0, abs=0.1), 'cut at the 10 m draw distance'
   lines = _draw_ops(road.lines)
-  per_line = len(lines) // 6
-  assert len(lines) % 6 == 0 and per_line >= 4, 'each of the 6 lines: a body strip plus a stepped soft end'
-  first = lines[:per_line]
-  alphas = [op[3].a for op in first]
-  assert alphas == sorted(alphas, reverse=True) and alphas[-1] < 0.15 * alphas[0], 'fading to clear at its end'
-  fade_start = _op_points(first[1])[:, 0].min()
-  assert fade_start == pytest.approx(6.0, abs=0.3), 'over the last 4 m (the minimum) at standstill'
+  assert len(lines) == 6 and len(_draw_ops(road.road)) == 1, 'one strip per line and for the road: no stepped fade'
   path = view._path_draw(view.scene, reference)
   strips = _draw_ops(path.strips)
-  alphas = [op[3].a for op in strips]
-  assert alphas[-1] < 0.3 * alphas[0], 'the path fades out over its last metres'
+  assert len(strips) == 1, 'the path is one strip of one alpha'
   assert _op_points(strips[-1])[:, 0].max() <= 10.0 + 0.1, 'and still ends by the draw distance'
-  assert not any(op[0] is not ber._raw.DrawRectangleGradientV for op in view._overlay(stream))
 
 
 def test_each_line_ends_at_its_own_uncertainty_distance():
@@ -294,11 +275,12 @@ def test_lead_labels_show_the_distance_only_and_pulse_on_hard_brake(monkeypatch)
   monkeypatch.setattr(ber.rl, 'draw_circle_v', lambda *a: pytest.fail('no prediction dots ahead of a lead'))
   pv = bem.view_params(RECT, view.config)
   view._leads(view.scene, RECT, pv)
-  assert drawn == ['33 yd'] and not pills, 'no closing-speed line under the distance'
+  assert drawn == ['33 yd'] and len(pills) == 1, 'no closing-speed line under the distance; the one outline is the glass rim'
   view.scene.hard_brake = True
   drawn.clear()
+  pills.clear()
   view._leads(view.scene, RECT, pv)
-  assert drawn == ['33 yd'] and len(pills) == 1, 'the pill border pulses'
+  assert drawn == ['33 yd'] and len(pills) == 2, 'the pill border pulses over the rim'
   # A second car ahead of the lead is drawn, but only the closest lead carries a distance.
   cars = []
   monkeypatch.setattr(ber, '_run', lambda ops: cars.append(ops))

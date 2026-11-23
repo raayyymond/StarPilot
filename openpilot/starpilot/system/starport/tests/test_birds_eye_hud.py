@@ -671,7 +671,9 @@ def test_wheel_badge_follows_lateral_and_falls_back_to_a_drawn_wheel():
   right = spokes[0]
   assert right[2][0] > g.badge[0] and right[2][1] < g.badge[1]
   pill = next(call for call in rl.calls if call[0] == 'draw_rectangle_rounded' and call[1] == pytest.approx(g.wheel))
-  assert pill[-1] == hud_module.PILL == (10, 12, 18, 217)
+  assert pill[-1] == hud_module.PILL == hud_module.GLASS_FILL
+  assert any(call[0] == 'draw_rectangle_rounded_lines_ex' and call[1] == pytest.approx(g.wheel) and call[-1] == hud_module.GLASS_RIM
+             for call in rl.calls), 'glass: a rim over the fill'
   angle = next(entry for entry in text.drawn if entry[0] == '12')
   assert angle[1] == pytest.approx(hud_module.ANGLE_SIZE) and g.badge[1] + g.badge[2] <= angle[3] < g.wheel[1] + g.wheel[3]
   assert g.wheel[0] < angle[2] < g.wheel[0] + g.wheel[2]

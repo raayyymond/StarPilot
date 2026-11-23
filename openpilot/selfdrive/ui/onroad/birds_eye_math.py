@@ -433,31 +433,11 @@ def ring_strip(poly: np.ndarray, thickness: float) -> np.ndarray:
   return np.concatenate((out, out[:2]))
 
 
-def overlay_bands(top: float, height: float, cut_y: float | None = None, soft_y: float | None = None,
-                  hold: float = 0.6, end: float = 0.95, hold_alpha: float = 0.8) -> list[tuple[float, float, float, float]]:
-  """Background-coloured gradient bands (y_top, y_bottom, alpha_top, alpha_bottom) drawn over the road to fade it.
-
-  The far fade is 1 - the old per-row fade profile (alpha 1 at the bottom, hold_alpha at `hold`, 0 at `end`, as
-  height fractions). With cut_y, everything above cut_y is covered and the band from soft_y up to cut_y fades in,
-  so lines end softly at the draw distance. Overlays of one colour compose multiplicatively, so the two stack."""
-  bottom = top + height
-
-  def y(t):
-    return bottom - t * height
-  bands = [(y(hold), bottom, 1.0 - hold_alpha, 0.0), (y(end), y(hold), 1.0, 1.0 - hold_alpha), (top, y(end), 1.0, 1.0)]
-  if cut_y is not None and cut_y > top:
-    cut_y = min(cut_y, bottom)
-    soft_y = cut_y if soft_y is None else min(max(soft_y, cut_y), bottom)
-    clipped = []
-    for y0, y1, a0, a1 in bands:
-      if y1 <= cut_y:
-        continue
-      if y0 < cut_y:
-        a0 = a0 + (a1 - a0) * (cut_y - y0) / (y1 - y0)
-        y0 = cut_y
-      clipped.append((y0, y1, a0, a1))
-    bands = clipped + [(cut_y, soft_y, 1.0, 0.0), (top, cut_y, 1.0, 1.0)]
-  return [b for b in bands if b[1] - b[0] >= 0.5 and max(b[2], b[3]) > 0.0]
+# Glass panels (the lead label, the HUD's pills and bar tracks, the overlay card's rim): a faint light fill under a
+# bright hairline rim, both flat colours.
+GLASS_FILL = (255, 255, 255, 34)
+GLASS_RIM = (255, 255, 255, 112)
+GLASS_RIM_PX = 1.5
 
 
 def end_fade_length(start: float, end: float, fraction: float = 0.25, low: float = 4.0, high: float = 12.0) -> float:

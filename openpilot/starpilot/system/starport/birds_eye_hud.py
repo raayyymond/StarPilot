@@ -32,7 +32,7 @@ false, i.e. disengaged or lateral-only), mph or km/h by `metric`. The numbers ar
 twice the birds-eye lead label's size (birds_eye_math.label_font_size over the view rect), with small unit captions.
 
 Status cluster: bottom left of the view, right of the acceleration strip, above the torque dock and below the left
-turn arrow, each widget on a dark rounded pill (the birds-eye lead label's background).
+turn arrow, each widget on a glass pill (a faint light fill under a bright rim, like the birds-eye lead label).
 - Steering wheel: the comma's chffr_wheel art on a round badge, turned by carState.steeringAngleDeg (left-positive, so
   counter-clockwise on screen), green while carControl.latActive and grey otherwise, the whole degrees under it; a
   drawn ring with three spokes when the texture cannot be loaded.
@@ -95,7 +95,8 @@ MIN_GAP_SPEED = 1.0                            # m/s; below this the time gap is
 MAX_TIME_GAP = 9.95                            # seconds; a longer gap is not shown
 PERSONALITIES = ('AGGRESSIVE', 'STANDARD', 'RELAXED')   # log.LongitudinalPersonality by raw value
 
-BACKGROUND_TOP, BACKGROUND_BOTTOM = (26, 31, 44), (8, 9, 13)   # birds_eye_renderer's full-frame gradient
+BACKGROUND = (0, 0, 0)                                       # birds_eye_renderer's solid background
+GLASS_FILL, GLASS_RIM, GLASS_RIM_PX = (255, 255, 255, 34), (255, 255, 255, 112), 1.5   # birds_eye_math's glass panel
 TRACK = (255, 255, 255, 26)
 IDLE = (220, 224, 232)                                       # disengaged fill / track
 TICK = (170, 180, 198)                                       # birds_eye_renderer's rung-label grey
@@ -107,7 +108,7 @@ RED = (255, 72, 72)
 ACTUAL = (245, 247, 250)
 SHADOW = (0, 0, 0)
 DOT = (182, 182, 182)                                        # the arc's centre dot
-PILL = (10, 12, 18, 217)                                     # birds_eye_renderer's LABEL_BG at 85 %
+PILL = GLASS_FILL                                            # the status pills are glass panels
 WHEEL_IDLE = (84, 90, 104)                                   # the badge while lateral is not active
 EXPERIMENTAL = (255, 155, 63)                                # the comma's experimental-mode orange
 TRAFFIC = (96, 190, 255)
@@ -561,14 +562,15 @@ class BirdsEyeHud:
     self._draw_clock(width, height)
 
   def _draw_dock(self, width, height, strip) -> None:
-    """The torque dock continues the view's own background; the view's last rows fade into it."""
+    """The torque dock continues the view's own solid background."""
     rl = self.rl
-    dock = dock_height(height)
-    fade = round(24 * height / 1080)
-    top = int(height - dock)
-    x, w = int(strip), int(width - strip)
-    rl.draw_rectangle_gradient_v(x, top - fade, w, fade, rl.Color(*BACKGROUND_BOTTOM, 0), rl.Color(*BACKGROUND_BOTTOM, 255))
-    rl.draw_rectangle(x, top, w, int(height) - top, rl.Color(*BACKGROUND_BOTTOM, 255))
+    top = int(height - dock_height(height))
+    rl.draw_rectangle(int(strip), top, int(width - strip), int(height) - top, rl.Color(*BACKGROUND, 255))
+
+  def _glass_rim(self, rect, roundness, segments=8) -> None:
+    """The bright hairline rim that makes a filled rounded rectangle read as glass."""
+    rl = self.rl
+    rl.draw_rectangle_rounded_lines_ex(rl.Rectangle(*rect), roundness, segments, GLASS_RIM_PX, rl.Color(*GLASS_RIM))
 
   # --- acceleration bar ---
   def _held_limits(self, limits: AccelLimits | None, long_active: bool) -> AccelLimits | None:
@@ -586,12 +588,13 @@ class BirdsEyeHud:
     rl = self.rl
     strip = int(g.strip)
     k = height / 1080
-    rl.draw_rectangle_gradient_v(0, 0, strip, int(height), rl.Color(*BACKGROUND_TOP, 255), rl.Color(*BACKGROUND_BOTTOM, 255))
+    rl.draw_rectangle(0, 0, strip, int(height), rl.Color(*BACKGROUND, 255))
     rl.draw_rectangle(strip - 1, 0, 1, int(height), rl.Color(255, 255, 255, 14))
     long_active = reading is not None and reading.long_active
     limits = self._held_limits(limits, long_active)
     track = TRACK if long_active else (*IDLE, 46)
     rl.draw_rectangle_rounded(rl.Rectangle(g.x, g.top, g.width, g.bottom - g.top), 1.0, 8, rl.Color(*track))
+    self._glass_rim((g.x, g.top, g.width, g.bottom - g.top), 1.0)
     tick = 8 * k
     # The zero line is the only fixed mark.
     rl.draw_rectangle_rec(rl.Rectangle(g.x - 2 * tick, g.zero - k, g.width + 4 * tick, 2 * k), rl.Color(*TICK, 150))
@@ -657,6 +660,7 @@ class BirdsEyeHud:
     track_alpha = round(255 * (0.25 + 0.25 * strength)) if active else 60
     track = (255, 255, 255, track_alpha) if active else (*IDLE, track_alpha)
     rl.draw_rectangle_rounded(rl.Rectangle(g.left, top, g.right - g.left, thickness), 1.0, 12, rl.Color(*track))
+    self._glass_rim((g.left, top, g.right - g.left, thickness), 1.0, 12)
     reach = torque * (g.right - g.left) / 2
     if alpha > 0.01 and abs(reach) >= 1.0:
       x = min(g.cx, g.cx + reach)
@@ -770,6 +774,7 @@ class BirdsEyeHud:
   def _pill(self, rect, roundness) -> None:
     rl = self.rl
     rl.draw_rectangle_rounded(rl.Rectangle(*rect), roundness, 8, rl.Color(*PILL))
+    self._glass_rim(rect, roundness)
 
   def _fitted(self, text, size, room):
     """(size, width, height) of `text` at `size`, shrunk to fit `room`."""

@@ -263,9 +263,7 @@ def test_scene_geometry_is_cached_until_an_input_changes():
   lines = _draw_ops(road.lines)
   assert all(op[0] is ber._raw.DrawTriangleStrip for op in lines) and len(lines) == 2 + 4, 'one strip per edge and lane line'
   assert len(_draw_ops(road.road)) == 1, 'the road fill is one strip'
-  overlay = view._overlay(RECT)
-  assert overlay and all(op[0] is ber._raw.DrawRectangleGradientV for op in overlay)
-  assert view._overlay(RECT) is overlay, 'the far fade is built once per rect'
+  assert not hasattr(view, '_overlay') and not hasattr(bem, 'overlay_bands'), 'no gradient is laid over the road'
   assert _layers(view)[0] is first[0] and _layers(view)[1] is first[1], 'an unchanged scene replays the cached ops'
   view.ingest(None, radar, None)
   assert _layers(view)[0] is first[0], 'leads and car state alone keep the road'
@@ -645,6 +643,7 @@ def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
   monkeypatch.setattr(view, '_cars', lambda v, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 32, 2))))
   monkeypatch.setattr(ber, '_run', lambda *a: None)
   monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
+  monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded_lines_ex', lambda *a: None)
 
   def draw_leads():
     cfg = view.view_config()
@@ -732,6 +731,7 @@ def test_lead_body_is_drawn_at_its_own_lateral_position(monkeypatch):
   monkeypatch.setattr(view, '_cars', lambda v, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 32, 2))))
   monkeypatch.setattr(ber, '_run', lambda *a: None)
   monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded', lambda *a: None)
+  monkeypatch.setattr(ber.rl, 'draw_rectangle_rounded_lines_ex', lambda *a: None)
   for y_rel in (0.0, -3.0):  # the label filter follows the body; it never moves the body
     radar.leadOne.yRel = y_rel
     view.scene.leads = ber.scene_leads(radar, None)

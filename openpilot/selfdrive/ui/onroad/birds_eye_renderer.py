@@ -6,12 +6,14 @@ shapes in meters (x forward, y right) that the GPU projects onto the ground plan
 onto one forward-distance grid, built once per model frame and replayed from cache; the camera moving (the
 speed zoom gliding) changes one matrix and rebuilds nothing. Cars are low-poly bodies whose few dozen vertices
 go through the same matrix on the CPU, drawn as flat-shaded fans in painter's order, so no depth buffer is used.
-Labels, the far fade and the speed-limit sign are ordinary 2D drawing in pixels.
+Labels and the speed-limit sign are ordinary 2D drawing in pixels.
+
+The look is flat: a solid black background, no gradients, and panels (the lead label, the overlay card) drawn as
+glass: a faint light fill under a bright hairline rim (bem.GLASS_FILL / GLASS_RIM).
 
 Drawing cost: a frame issues O(ribbons) C calls, not O(vertices). Each road edge, lane line and the road fill is
 one single-coloured DrawTriangleStrip per valid run plus a few constant-alpha strips for its soft end (each line
-ends at its own distance, bem.line_rows); the far-end fade is a few background-coloured gradient rectangles laid
-over the finished road (bem.overlay_bands). The path is a handful of constant-alpha strips that step through its
+ends at its own distance, bem.line_rows). The path is a handful of constant-alpha strips that step through its
 soft end; only the per-row colour modes (experimental accel tint, rainbow, colour gradient) replay per-vertex
 quads, for the path alone. A car is one DrawTriangleFan per face that looks toward the camera (about ten).
 """
@@ -60,7 +62,6 @@ class _Raw:
     integer, color = ctypes.c_int, _CColor
     self.DrawTriangleStrip = bind("DrawTriangleStrip", ctypes.c_void_p, integer, color)
     self.DrawTriangleFan = bind("DrawTriangleFan", ctypes.c_void_p, integer, color)
-    self.DrawRectangleGradientV = bind("DrawRectangleGradientV", integer, integer, integer, integer, color, color)
     self.rlColor4ub = bind("rlColor4ub", *[ctypes.c_ubyte] * 4)
     self.rlVertex2f = bind("rlVertex2f", ctypes.c_float, ctypes.c_float)
     self.rlBegin = bind("rlBegin", integer)
@@ -99,12 +100,11 @@ EDGE_MIN_PX = 3.5
 PATH_MIN_PX = 3.0
 WIDTH_REFERENCE_STEP = 8.0  # m of zoom per width reference: the minimum widths are sized for the zoom rounded up to it
 TAIL_STEP = 0.5             # m between rows in a ribbon's soft end
+SOFT_ENDS = False           # lines and the path end with a hard cut: the design has no fades
 # model_renderer.MIN/MAX_DRAW_DISTANCE (not imported: that module needs Params and the UI state at import).
 MIN_DRAW_DISTANCE = 10.0
 MAX_DRAW_DISTANCE = 100.0
 LABEL_PAD = 6.0
-LABEL_BG = (10, 12, 18)
-LABEL_BG_ALPHA = 0.85
 LABEL_SMOOTHING = 0.5   # per frame, toward the glyph-attached label position
 LABEL_SNAP_PX = 80.0    # a jump larger than this (side flip, a new lead) is taken directly
 SUBLABEL_SCALE = 0.62   # curve tag, relative to the distance label
@@ -118,11 +118,9 @@ LANE_CENTERING_LANE = (0, 176, 220)  # = lane_feedback.BLUE, while the lane-cent
 THROTTLE = ((13, 248, 122), (114, 255, 92))
 NO_THROTTLE = ((242, 242, 242), (242, 242, 242))
 
-BACKGROUND_TOP, BACKGROUND_BOTTOM = (26, 31, 44), (8, 9, 13)  # the full-frame gradient (birds_eye_hud copies it)
-PANEL_BG = (10, 12, 18)
-PANEL_ALPHA = 235
+BACKGROUND = (0, 0, 0)                # the full-frame view's background: solid black
+PANEL_FILL = (0, 0, 0, 170)           # the overlay card over the camera: smoked glass, under the glass rim
 PANEL_RADIUS = 28                     # px, the overlay panel's corner radius
-FADE_HOLD, FADE_END = 0.6, 0.95       # the lane lines' far fade (height fractions), now drawn as an overlay
 LINE_ALPHA_STEP = 0.1                 # each line's soft end: strips within +/-5 % of a linear fade
 PATH_ALPHA_STEP = 0.04                # the path's stepped fade: each strip within +/-2 % of the smooth alpha
 LEAD_LATERAL_GATE = 1.6               # a lead within this of the path (m) ends it 1 m short of its rear bumper
@@ -783,7 +781,6 @@ class BirdsEyeRenderer(Widget):
       finally:
         _end_ground(saved)
       if scene.valid:
-        _run(self._overlay(rect))
         self._curve_label(scene, rect, view)
       self._leads(scene, rect, view, leads)
       self._ego(scene, view)
@@ -796,24 +793,23 @@ class BirdsEyeRenderer(Widget):
       else:
         clip.end_scissor_mode()
     if self.panel:
-      rl.draw_rectangle_rounded_lines_ex(rect, self._roundness(rect), 12, 2, rl.Color(255, 255, 255, int(40 * self.opacity)))
+      rl.draw_rectangle_rounded_lines_ex(rect, self._roundness(rect), 12, bem.GLASS_RIM_PX,
+                                         rl.Color(*bem.GLASS_RIM[:3], int(bem.GLASS_RIM[3] * self.opacity)))
 
   def _roundness(self, rect) -> float:
     return min(1.0, 2 * PANEL_RADIUS / max(1.0, min(rect.width, rect.height)))
 
   def _background(self, rect) -> None:
     if self.panel:
-      rl.draw_rectangle_rounded(rect, self._roundness(rect), 12, rl.Color(*PANEL_BG, int(PANEL_ALPHA * self.opacity)))
+      rl.draw_rectangle_rounded(rect, self._roundness(rect), 12, rl.Color(*PANEL_FILL[:3], int(PANEL_FILL[3] * self.opacity)))
     else:
-      rl.draw_rectangle_gradient_v(int(rect.x), int(rect.y), int(rect.width), int(rect.height),
-                                   rl.Color(*BACKGROUND_TOP, 255), rl.Color(*BACKGROUND_BOTTOM, 255))
+      rl.draw_rectangle(int(rect.x), int(rect.y), int(rect.width), int(rect.height), rl.Color(*BACKGROUND, 255))
 
-  def _background_at(self, y: float, rect, alpha: float) -> tuple[float, float, float, float]:
-    """The background's colour at screen row y, with an overlay alpha 0..1."""
-    if self.panel:
-      return (*PANEL_BG, 255 * alpha * PANEL_ALPHA / 255 * self.opacity)
-    t = (y - rect.y) / max(1.0, rect.height)
-    return (*(a + (b - a) * t for a, b in zip(BACKGROUND_TOP, BACKGROUND_BOTTOM, strict=True)), 255 * alpha)
+  def _glass(self, rect, roundness: float, segments: int = 8) -> None:
+    """A glass panel: a faint light fill under a bright hairline rim."""
+    a = self.opacity
+    rl.draw_rectangle_rounded(rect, roundness, segments, rl.Color(*bem.GLASS_FILL[:3], int(bem.GLASS_FILL[3] * a)))
+    rl.draw_rectangle_rounded_lines_ex(rect, roundness, segments, bem.GLASS_RIM_PX, rl.Color(*bem.GLASS_RIM[:3], int(bem.GLASS_RIM[3] * a)))
 
   @staticmethod
   def _rows(rgb, alpha, n: int) -> np.ndarray:
@@ -903,14 +899,14 @@ class BirdsEyeRenderer(Widget):
     return lines
 
   def _build_road(self, scene, reference: Reference, reach=MAX_DRAW_DISTANCE) -> RoadDraw:
-    """The road fill, edges and lane lines as ground-plane strips in meters, each ending at its own distance.
+    """The road fill, edges and lane lines as ground-plane strips in meters, each ending at its own distance
+    (with SOFT_ENDS off, a hard cut there: one strip per unbroken line).
 
     Each line stops at min(reach, where its own yStd passes bem.LINE_STD_LIMIT, its data end) and fades out over its
     last bem.end_fade_length metres as a few constant-alpha strips (LINE_ALPHA_STEP), unless that soft end starts
-    beyond the reference zoom's top edge, where it could not be seen. The far end of the view fades through the
-    overlay (one set of gradient rectangles over the finished road)."""
+    beyond the reference zoom's top edge, where it could not be seen."""
     grid = scene.grid
-    start, top = self.config.x_min, reference.view.x_max
+    start, top = self.config.x_min, reference.view.x_max if SOFT_ENDS else -math.inf
     road_ops: list = []
     pair = self._road_pair(scene)
     if pair:
@@ -962,24 +958,6 @@ class BirdsEyeRenderer(Widget):
           runs.append((lo, hi))
           colors.append((*rgb, f * alpha))
     return _strips(bem.strip_points(left, right), runs, colors)
-
-  def _overlay(self, rect) -> list:
-    """Gradient-rectangle ops in pixels that fade the far end of the road toward the background (bem.overlay_bands),
-    drawn over the finished ground pass. In the panel they stay clear of its rounded corners."""
-    def build():
-      inset = PANEL_RADIUS if self.panel else 0
-      x0, x1 = int(rect.x + inset), int(rect.x + rect.width - inset)
-      ops = []
-      if x1 <= x0:
-        return ops
-      for y0, y1, a0, a1 in bem.overlay_bands(rect.y, rect.height, None, None, FADE_HOLD, FADE_END):
-        top, bot = int(round(y0)), int(round(y1))
-        if bot > top:
-          ops.append((_raw.DrawRectangleGradientV, x0, top, x1 - x0, bot - top,
-                      _ccolor(self._background_at(top, rect, a0)), _ccolor(self._background_at(bot, rect, a1))))
-      return ops
-    key = (float(rect.x), float(rect.y), float(rect.width), float(rect.height), self.opacity, self.panel)
-    return self._cached('overlay', key, build)
 
   # ---- path -------------------------------------------------------------------------------------
 
@@ -1047,7 +1025,7 @@ class BirdsEyeRenderer(Widget):
       gy = np.append(gy, np.interp(end, grid[hi - 1:hi + 1], ys_all[hi - 1:hi + 1]))
     if gx.size < 2:
       return NO_PATH
-    fade = bem.end_fade_length(gx[0], gx[-1])
+    fade = bem.end_fade_length(gx[0], gx[-1]) if SOFT_ENDS else 0.0
     body = gx[gx < gx[-1] - fade - 1e-6]
     xs = np.concatenate((body, np.arange(gx[-1] - fade, gx[-1] - 1e-6, TAIL_STEP), [gx[-1]]))
     ys = np.interp(xs, gx, gy)
@@ -1208,8 +1186,7 @@ class BirdsEyeRenderer(Widget):
     if tx - LABEL_PAD < rect.x + 4:
       tx = float(pts[:, 0].max()) + 8 + LABEL_PAD
     ty = float(pts[:, 1].mean()) - h / 2
-    rl.draw_rectangle_rounded(rl.Rectangle(round(tx) - LABEL_PAD, round(ty) - LABEL_PAD / 2, w + 2 * LABEL_PAD, h + LABEL_PAD),
-                              1.0, 8, _color(LABEL_BG, 255 * LABEL_BG_ALPHA * a))
+    self._glass(rl.Rectangle(round(tx) - LABEL_PAD, round(ty) - LABEL_PAD / 2, w + 2 * LABEL_PAD, h + LABEL_PAD), 1.0)
     self.text.draw(text, size, round(tx), round(ty), _color(rgb, 255 * a))
 
   # ---- cars -------------------------------------------------------------------------------------
@@ -1264,11 +1241,8 @@ class BirdsEyeRenderer(Widget):
             for x, y, heading in poses]
 
   def _ego_ground(self) -> None:
-    """The ego's shadow and the glow around it, drawn on the road during the ground pass (meters)."""
-    a = self.opacity
-    cx = EGO_FRONT - EGO_LENGTH / 2
-    rl.draw_circle_gradient(rl.Vector2(cx, 0.0), EGO_LENGTH * 0.95, rl.Color(120, 170, 255, int(70 * a)), rl.Color(120, 170, 255, 0))
-    _run(self._shadows([(cx, 0.0, 0.0)]))
+    """The ego's shadow, drawn on the road during the ground pass (meters)."""
+    _run(self._shadows([(EGO_FRONT - EGO_LENGTH / 2, 0.0, 0.0)]))
 
   def _lane_change_ghost(self, scene) -> list:
     """Ground ops. While the model's lane change is pending or under way, an outline of the ego car one lane over
@@ -1325,11 +1299,9 @@ class BirdsEyeRenderer(Widget):
       x = float(screen[:, 0].min()) - 10 - pad - box_w
     y = min(max(float(screen[:, 1].mean()) - box_h / 2, rect.y + 4 + pad), rect.y + rect.height - box_h - 4 - pad)
     x, y = self._label_position(previous, x, y)
-    # An opaque pill instead of a drop shadow: the stream encoder smears thin text over a changing background,
-    # and the pill keeps the digits on one steady colour so a changed number leaves no residue around it.
     pill = rl.Rectangle(x - pad, y - pad, box_w + 2 * pad, box_h + 2 * pad)
     roundness = 1.0
-    rl.draw_rectangle_rounded(pill, roundness, 8, _color(LABEL_BG, 255 * LABEL_BG_ALPHA * self.opacity))
+    self._glass(pill, roundness)
     if hard_brake:  # modelV2.meta.hardBrakePredicted: the nearest lead's pill border pulses red
       pulse = 0.5 + 0.5 * math.sin(2 * math.pi * HARD_BRAKE_HZ * self.clock())
       rl.draw_rectangle_rounded_lines_ex(pill, roundness, 8, 3.0, _color(STOP_RED, (110 + 145 * pulse) * self.opacity))
