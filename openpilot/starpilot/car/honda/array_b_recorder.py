@@ -2,8 +2,12 @@
 is that the kinematic read offsets are module values, set here per firmware).
 
 The logger reads the radar's internal track list at 20 Hz and only records it (rlog event xcp_array_b_20hz).
-Nothing here reaches control. This module decides whether it runs at all, and with which layout:
+This module decides whether it runs at all, and with which layout:
 
+  - only when the master toggle (AlphaHondaXcpRadarAssist) is on. That one switch gates both the polling here and the
+    fusion into long control in radard, so XCP is read and used together or not at all; off, the radar is sent nothing.
+    The radar must also have XCP enabled on its own side first (a bench UDS write, kept in the firmware kit), or it
+    never answers;
   - only on a verified Bosch-A car (the logger itself would start on every Bosch Honda with a radar);
   - only for a radar firmware with an Array B address to read. The address and the record layout move between
     builds (A150 0x400371A4, A160 0x400371C4, the Accord's TVA-A170 0x40034F94 with an 8-byte header), so a firmware
@@ -85,6 +89,17 @@ def supported(CP) -> bool:
   from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS
   return (getattr(CP, "brand", None) == "honda" and CP.carFingerprint in VERIFIED_BOSCH_A_CARS
           and not bool(CP.radarUnavailable) and not bool(CP.passive))
+
+
+def _xcp_enabled(CP, params) -> bool:
+  """The master toggle. It gates the polling here and, in radard, the fusion into control: XCP reads and is used
+  together, or not at all. Off means we send the radar nothing. Fail-closed, and never raises."""
+  try:
+    from openpilot.starpilot.car.honda.xcp_radar_assist import enabled as xcp_assist_enabled
+    return bool(xcp_assist_enabled(params, CP))
+  except Exception:
+    cloudlog.exception("array_b_recorder: toggle read failed")
+    return False
 
 
 def _age_ms(now_ns: int, stamp_ns: int) -> int:
@@ -307,10 +322,14 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
       return None
     firmware = radar_firmware(CP)
     bases = ARRAY_B_BASES_BY_FIRMWARE.get(firmware, ()) if firmware is not None else ()
+    xcp_on = _xcp_enabled(CP, params)
     cloudlog.event("array_b_recorder", firmware=None if firmware is None else firmware.decode(errors="replace"),
-                   bases=[b.address if isinstance(b, RawWindow) else b for b in bases], polling=bool(bases))
+                   bases=[b.address if isinstance(b, RawWindow) else b for b in bases],
+                   polling=bool(bases) and xcp_on, xcp_enabled=xcp_on)
     if not bases:
       return None
+    if not xcp_on:
+      return None                 # master toggle off: we ask the radar for nothing
 
     from openpilot.starpilot.car.honda import xcp_radar_logger
 

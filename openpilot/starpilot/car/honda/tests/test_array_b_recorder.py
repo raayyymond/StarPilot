@@ -18,7 +18,14 @@ def _fw(version: bytes, *, ecu="fwdRadar", address=recorder.RADAR_ADDRESS, loggi
 
 def _cp(firmware=(), *, fingerprint=CAR.HONDA_ACCORD, radar_unavailable=False, passive=False):
   return SimpleNamespace(brand="honda", carFingerprint=fingerprint, flags=int(HondaFlags.BOSCH),
-                         radarUnavailable=radar_unavailable, passive=passive, carFw=list(firmware))
+                         radarUnavailable=radar_unavailable, passive=passive, carFw=list(firmware),
+                         notCar=False, dashcamOnly=False, alternativeExperience=0,
+                         openpilotLongitudinalControl=True, pcmCruise=False)
+
+
+def _toggle_on(monkeypatch, on=True):
+  """Pretend the master toggle is on/off. The real param -> enabled() path is covered by test_xcp_radar_assist."""
+  monkeypatch.setattr(recorder, "_xcp_enabled", lambda CP, params: on)
 
 
 @pytest.fixture(autouse=True)
@@ -34,10 +41,26 @@ def test_radar_firmware_takes_the_non_logging_radar_entry():
   assert recorder.radar_firmware(_cp([])) is None
 
 
-def test_unlisted_firmware_is_not_polled():
+def test_unlisted_firmware_is_not_polled(monkeypatch):
+  _toggle_on(monkeypatch)                                            # no base, so no poll even with the toggle on
   assert b"36802-ZZZ-Z999" not in recorder.ARRAY_B_BASES_BY_FIRMWARE
   assert recorder.build(_cp([_fw(b"36802-ZZZ-Z999\x00\x00")]), send_lock=None, pm=None, params=None) is None
   assert recorder.build(_cp([]), send_lock=None, pm=None, params=None) is None
+
+
+def test_the_master_toggle_controls_whether_we_poll_at_all(monkeypatch):
+  monkeypatch.delenv("REPLAY", raising=False)
+  cp = _cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD)
+  assert recorder._xcp_enabled(cp, None) is False                    # fail-closed: no params, no poll
+  _toggle_on(monkeypatch, on=False)
+  assert recorder.build(cp, send_lock=None, pm=None, params=None) is None            # off: dormant
+  _toggle_on(monkeypatch, on=True)
+  built = recorder.build(cp, send_lock=None, pm=None, params=None)
+  try:
+    assert built is not None and built.logger.enabled                                # on: polling
+  finally:
+    if built is not None:
+      built.close()
 
 
 @pytest.mark.parametrize("cp", [
@@ -56,6 +79,7 @@ def test_unsupported_cars_get_no_recorder(cp):
 ])
 def test_listed_firmware_starts_on_its_layout(monkeypatch, firmware, fingerprint, base, header, kin, lat, probe):
   monkeypatch.delenv("REPLAY", raising=False)
+  _toggle_on(monkeypatch)
   built = recorder.build(_cp([_fw(firmware + b"\x00\x00")], fingerprint=fingerprint), send_lock=None, pm=None, params=None)
   try:
     assert built is not None and built.logger.enabled
@@ -70,6 +94,7 @@ def test_listed_firmware_starts_on_its_layout(monkeypatch, firmware, fingerprint
 
 
 def test_a_failing_logger_never_stops_card(monkeypatch):
+  _toggle_on(monkeypatch)
   def boom(*args, **kwargs):
     raise RuntimeError("logger broke")
   monkeypatch.setattr(xcp_mod, "XcpRadarLogger", boom)
@@ -160,6 +185,7 @@ def test_candidates_are_recorded_in_turn_and_a_change_is_not_a_lost_session():
 
 def test_the_accord_firmware_pins_its_verified_base(monkeypatch):
   monkeypatch.delenv("REPLAY", raising=False)
+  _toggle_on(monkeypatch)
   assert recorder.ARRAY_B_BASES_BY_FIRMWARE[b"36802-TVA-A170"] == (0x40034F94,)
   assert recorder.ARRAY_B_LAYOUTS_BY_FIRMWARE[b"36802-TVA-A170"] == (0x08, 18, 24)
   built = recorder.build(_cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD), send_lock=None, pm=None, params=None)
@@ -239,7 +265,9 @@ def _slot_events(monkeypatch):
 
 def _accord_recorder(monkeypatch):
   monkeypatch.delenv("REPLAY", raising=False)
-  built = recorder.build(_cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD), send_lock=None, pm=None, params=None)
+  _toggle_on(monkeypatch)
+  built = recorder.build(_cp([_fw(b"36802-TVA-A170\x00\x00")], fingerprint=CAR.HONDA_ACCORD), send_lock=None, pm=None,
+                         params=None)
   assert built is not None and built.slot_table is not None
   return built
 
