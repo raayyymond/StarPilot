@@ -1188,6 +1188,18 @@ class SelfdriveD:
                   if alert.event_type in self.state_machine.current_alert_types)
     now_ns = time.monotonic_ns()
     drive = int(self.sm['deviceState'].startedMonoTime) if self.sm['deviceState'].started else 0
+    # Presentation only: a one-frame source gap is handled above and announced here only if it lasts.
+    from openpilot.starpilot.aol.source_gap_alert import SourceGapAlert, source_gap_alert
+    if not hasattr(self, 'source_gap_alert'):
+      from openpilot.starpilot.car.honda.aol import source_gap_alert_grace
+      self.source_gap_alert = SourceGapAlert() if source_gap_alert_grace(self.CP) else None
+    source_gap_held = bool(self.source_gap_alert is not None and self.source_gap_alert.hold(bool(
+      getattr(self, 'aol_fault_reason', 'none') == 'availabilityPause' and getattr(self, 'logged_comm_issue', None) is None and
+      availability_only(self.events.to_msg())), now_ns))
+    if source_gap_held:
+      alerts = [alert for alert in alerts if not source_gap_alert(alert.alert_type)]
+    elif self.source_gap_alert is not None and self.source_gap_alert.healed_ns:
+      cloudlog.event('aol_source_gap_unannounced', gap_ms=self.source_gap_alert.healed_ns / 1e6)
     from openpilot.starpilot.audio.blindspot_alert import ALERT_TYPE as BSM_ALERT, blindspot_alert
     loud, without_lateral = getattr(self, 'blindspot_alert_settings', (False, False))
     blindspot = blindspot_alert(CS, self.sm, loud=loud, without_lateral=without_lateral,
@@ -1274,7 +1286,7 @@ class SelfdriveD:
     # A cold/unarmed fault classification is not a pause of expected steering.
     # Qualified availability retention already carries both fields even while
     # ordinary cruise is disabled; this only selects its presentation.
-    availability_warning = bool(getattr(self, 'aol_fault_reason', 'none') == 'availabilityPause' and
+    availability_warning = bool(getattr(self, 'aol_fault_reason', 'none') == 'availabilityPause' and not source_gap_held and
       self.aol_axis_decision.desired_lateral and self.aol_axis_decision.native_acknowledged)
     if availability_warning:
       warning = Alert("Steering Paused", "Communication Issue", log.SelfdriveState.AlertStatus.normal,

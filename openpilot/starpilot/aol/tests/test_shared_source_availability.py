@@ -62,7 +62,8 @@ def test_shared_ordinary_unarmed_combined_source_loss_has_no_stale_output(family
                                 intent_message=intent(BASE, 3, latched=False))
     assert state.state == log.SelfdriveState.OpenpilotState.softDisabling
     assert state.enabled and state.active and sd.state_machine.soft_disable_timer == 300
-    assert state.alertType == 'commIssue/softDisable'
+    # The stock-AOL classic Bosch owner announces a source gap only once it has lasted (aol/source_gap_alert.py).
+    assert state.alertType == ('' if family == 'honda_classic_bosch_long' else 'commIssue/softDisable')
     assert log.OnroadEvent.EventName.controlsMismatch not in sd.events.names
     assert not axis.lateralActive and not axis.longitudinalActive
     assert not command.latActive and not command.longActive

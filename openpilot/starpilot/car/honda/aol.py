@@ -134,6 +134,16 @@ def held_brake_renews_lateral(CP) -> bool:
   return bool(qualified_stock(CP, marked_only=True) and classic_bosch_long_cancel_owner(CP))
 
 
+def source_gap_alert_grace(CP) -> bool:
+  """A carState gap of a few frames is handled as before but announced only if it lasts 100 ms.
+
+  2026-11-23 route 00000074: a 32 ms gap at t=359.97 (stopped, engaged) and a 29 ms gap at t=866.93 (lateral only)
+  each sounded a Communication Issue alert; commands were back the next frame. The same on 2026-11-09 routes 0000002b
+  and 0000002c. See aol/source_gap_alert.py.
+  """
+  return bool(qualified_stock(CP, marked_only=True) and classic_bosch_long_cancel_owner(CP))
+
+
 def physical_cancel_lateral_allowed(cp, cs, intent, native, *, settings, previous,
                                     source_ns, now_ns, axis_session_id, cancel_samples=()) -> bool:
   """CANCEL withdraws longitudinal only while a granted classic-Bosch alpha-long LAT axis remains.
