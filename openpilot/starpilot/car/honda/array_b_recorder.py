@@ -23,8 +23,8 @@ This module decides whether it runs at all, and with which layout:
     on the first Accord drives (2026-11-22) the lead had no track for 10-40 s at a time while the car's own object
     list held it. The table shows each slot's raw words, how old each read is, whether the logger counts it active,
     and how often it was dropped and with which flags;
-  - the reading order follows the vision lead (array_b_vision_lead.py), and the table event carries what vision gave
-    and which slot was chosen for it;
+  - what is read when is array_b_read_order.py's: the slots that answer to radard's lead first, the rest of the list by
+    what each slot is to long control. The table event carries the vision lead and the slots chosen for it;
   - the radar's CONNECT reply is logged once (array_b_recorder_connect): its resource byte says whether this firmware
     offers XCP DAQ, which the panda does not let through today.
 """
@@ -141,11 +141,12 @@ class SlotTable:
                   init_queue=len(logger._init_queue), priority=list(logger._select_priority_slots_locked()),
                   op_matched=list(logger._op_matched_slots), slots=slots)
 
-  def log(self, now_ns: int, **more) -> None:
+  def log(self, now_ns: int, more=dict) -> None:
+    """`more` gives extra fields, asked for after the rows (reading the priority list settles the read order)."""
     if self.logger.state != "READY" or now_ns - self.last_ns < SLOT_TABLE_NS:
       return
     self.last_ns = int(now_ns)
-    cloudlog.event("xcp_array_b_slots", **self.rows(now_ns), **more)
+    cloudlog.event("xcp_array_b_slots", **self.rows(now_ns), **more())
 
 
 def slot_table(logger) -> SlotTable | None:
@@ -175,16 +176,19 @@ class ModelLead:
     lead = leads[0]
     return (float(lead.x[0]), -float(lead.y[0]), float(lead.v[0]), float(lead.prob))
 
+  def close(self) -> None:
+    self.sock = None
 
-def vision_lead(logger):
-  """The vision-led reading order for a logger that keeps a slot table, or None."""
+
+def read_order(logger):
+  """The reading order for a logger that keeps a slot table, or None (the logger then reads in its own order)."""
   try:
     if not hasattr(logger, "slot_cache"):
       return None
-    from openpilot.starpilot.car.honda import array_b_vision_lead, xcp_radar_logger
-    return array_b_vision_lead.VisionLead(logger, xcp_radar_logger)
+    from openpilot.starpilot.car.honda import array_b_read_order, xcp_radar_logger
+    return array_b_read_order.ReadOrder(logger, xcp_radar_logger)
   except Exception:
-    cloudlog.exception("array_b_recorder: no vision lead")
+    cloudlog.exception("array_b_recorder: no read order")
     return None
 
 
@@ -225,24 +229,24 @@ class ArrayBRecorder:
 
   def _dress(self) -> None:
     self.slot_table = slot_table(self.logger)
-    self.vision = vision_lead(self.logger) if self.lead_source is not None else None
+    self.order = read_order(self.logger)
     try:
       log_connect_reply(self.logger)
     except Exception:
       cloudlog.exception("array_b_recorder: no connect log")
 
   def _see_lead(self, now_ns: int) -> None:
-    if self.vision is None:
+    if self.order is None:
       return
-    try:
-      lead = self.lead_source()
-      with self.logger._lock:
-        self.vision.observe(lead, now_ns)
-    except Exception:
-      cloudlog.exception("array_b_recorder: vision lead failed")
-      with self.logger._lock:
-        self.vision.release()
-      self.vision = None
+    lead = None
+    if self.lead_source is not None:
+      try:
+        lead = self.lead_source()
+      except Exception:
+        cloudlog.exception("array_b_recorder: vision lead failed")       # the order goes on from the CAN tracks alone
+        self.lead_source = None
+    with self.logger._lock:
+      self.order.observe(lead, now_ns)
 
   def _stop(self, reason: str) -> None:
     self.stopped = True
@@ -289,7 +293,7 @@ class ArrayBRecorder:
     self.logger.observe_can(can_list, now_ns, v_ego=v_ego)
     if self.slot_table is not None:
       try:
-        self.slot_table.log(now_ns, **(self.vision.state() if self.vision is not None else {}))
+        self.slot_table.log(now_ns, self.order.state if self.order is not None else dict)
       except Exception:
         cloudlog.exception("array_b_recorder: slot table failed")
         self.slot_table = None
@@ -308,6 +312,8 @@ class ArrayBRecorder:
 
   def close(self) -> None:
     self.logger.close()
+    if hasattr(self.lead_source, "close"):
+      self.lead_source.close()
 
 
 def log_layout(layout: int | RawWindow, now_ns: int) -> None:

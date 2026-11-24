@@ -5,8 +5,8 @@ from openpilot.starpilot.saved_source import read_saved
 KEY = "AlphaHondaXcpRadarAssist"
 LABEL = "Alpha: XCP Radar Lag Removal (Bosch-A)"
 REASON = (
-  "Fuses live 20 Hz Bosch Array B XCP Doppler velocity and acceleration into verified radar tracks to reduce lead lag. "
-  "Off keeps XCP strictly read-only for logging."
+  "Reads the Bosch radar's Array B track list over XCP and fuses its 20 Hz Doppler velocity and acceleration into "
+  "verified radar tracks to reduce lead lag. Off sends the radar nothing."
 )
 
 

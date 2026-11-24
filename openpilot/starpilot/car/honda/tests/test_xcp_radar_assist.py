@@ -111,7 +111,7 @@ def test_alpha_toggle_gate_and_galaxy_integration(tmp_path):
     idx = next(i for i, r in enumerate(page["rows"]) if r["label"] == LABEL)
     intent = gateway.preview(page["view"], idx, 1, "sess", b"gen")
     assert intent["proposed"] == "On"
-    assert "Alpha XCP" in intent["question"] and "read-only for logging" in intent["question"]
+    assert "Alpha XCP" in intent["question"] and "sends the radar nothing" in intent["question"]
     assert gateway.confirm(intent["intent"], "sess", b"gen")
     assert enabled(params, cp) is True
 
