@@ -8,6 +8,7 @@ import pytest
 
 from opendbc.car.honda.values import CAR, HondaFlags
 from openpilot.starpilot.car.honda import array_b_recorder as recorder
+from openpilot.starpilot.car.honda import array_b_vision_lead
 import openpilot.starpilot.car.honda.xcp_radar_logger as xcp_mod
 
 
@@ -290,3 +291,158 @@ def test_a_failing_slot_table_never_stops_the_recorder(monkeypatch):
   rec.next_can_sends(1)
   rec.observe_can([], 2)
   assert rec.slot_table is None and not rec.stopped
+
+
+def _kin(logger, slot, now, *, x_m, v_rel=0.0):
+  words = int(x_m * 128).to_bytes(2, "big", signed=True) + int(v_rel * 256).to_bytes(2, "big", signed=True) + bytes(2)
+  logger._handle_f4_reply_locked(slot, xcp_mod.KIN_OFFSET, 6, b"\xff" + words, now, now)
+
+
+def _lat(logger, slot, now, *, y_m):
+  logger._handle_f4_reply_locked(slot, xcp_mod.LAT_OFFSET, 6, b"\xff" + int(y_m * 128).to_bytes(2, "big", signed=True) + bytes(4), now, now)
+
+
+def _led_recorder(monkeypatch, lead):
+  """An Accord recorder at 20 m/s whose vision lead is whatever `lead` holds: (d, y, v, prob) or None."""
+  built = _accord_recorder(monkeypatch)
+  built.lead_source = lambda: lead[0]
+  assert built.vision is not None
+  return built
+
+
+NOW = 10_000_000_000
+
+
+def test_the_slot_where_vision_sees_the_lead_is_read_first(monkeypatch):
+  lead = [None]
+  built = _led_recorder(monkeypatch, lead)
+  try:
+    logger = built.logger
+    built.observe_can([], NOW, v_ego=20.0)
+    for slot, x_m, y_m in ((3, 20.0, 0.0), (9, 60.0, 0.2)):
+      _kin(logger, slot, NOW, x_m=x_m, v_rel=-1.0)
+      _lat(logger, slot, NOW, y_m=y_m)
+    assert logger._select_priority_slots_locked() == [3, 9]        # the logger's own choice: nearest moving in path
+    lead[0] = (61.5, 0.0, 19.0, 0.95)
+    built.observe_can([], NOW, v_ego=20.0)
+    assert logger._select_priority_slots_locked() == [9, 3]
+    assert built.vision.state()["vision_slot"] == 9
+    lead[0] = (61.5, 0.0, 19.0, 0.2)                               # vision no longer sure: the logger's choice again
+    built.observe_can([], NOW, v_ego=20.0)
+    assert logger._select_priority_slots_locked() == [3, 9]
+    lead[0] = None                                                 # and a lead that stopped arriving runs out
+    built.vision.lead = (61.5, 0.0, 19.0, 0.95)
+    built.observe_can([], NOW + array_b_vision_lead.VISION_MAX_AGE_NS + 1, v_ego=20.0)
+    assert logger._select_priority_slots_locked() == [3, 9]
+  finally:
+    built.close()
+
+
+def test_with_a_vision_lead_and_no_slot_for_it_a_car_beside_the_lane_or_beyond_the_lead_loses_priority(monkeypatch):
+  lead = [(80.0, 0.0, 19.0, 0.95)]
+  built = _led_recorder(monkeypatch, lead)
+  try:
+    logger = built.logger
+    built.observe_can([], NOW, v_ego=20.0)
+    _kin(logger, 8, NOW, x_m=20.0, v_rel=-9.0)       # the car that left the lane, far too slow to be the lead
+    _lat(logger, 8, NOW, y_m=3.4)
+    _kin(logger, 4, NOW, x_m=138.0, v_rel=-9.0)      # a car well beyond the lead
+    _lat(logger, 4, NOW, y_m=0.0)
+    assert logger._select_priority_slots_locked() == []
+    _kin(logger, 6, NOW, x_m=40.0, v_rel=-9.0)       # in lane and nearer than the lead: stays
+    _lat(logger, 6, NOW, y_m=0.5)
+    assert logger._select_priority_slots_locked() == [6]
+  finally:
+    built.close()
+
+
+def test_of_two_tracks_on_the_lead_the_nearer_takes_the_choice_once_read(monkeypatch):
+  slots = {}
+
+  def rec(x_m, kin_ns=NOW, y_m=0.0, flags_ns=0, flags=0):
+    return dict(X_raw=int(x_m * 128), Vx_raw=0, Y_raw=int(y_m * 128), kin_updated_ns=kin_ns, lat_updated_ns=kin_ns,
+                flags_updated_ns=flags_ns, flags=flags)
+  lead = (30.0, 0.0, 0.0)
+  slots[5] = rec(35.0)                                # the second track, 6.5 m beyond the usual one
+  assert array_b_vision_lead.pick(slots.items(), lead, NOW) == 5
+  slots[2] = rec(28.5)
+  assert array_b_vision_lead.pick(slots.items(), lead, NOW, held=5) == 2
+  slots[7] = rec(28.6)                                # an equal one does not take it from the held slot
+  assert array_b_vision_lead.pick(slots.items(), lead, NOW, held=2) == 2
+  slots[2] = rec(28.5, flags_ns=NOW, flags=0xE020)    # a ghost never answers
+  assert array_b_vision_lead.pick(slots.items(), lead, NOW, held=2) == 7
+  slots[7] = rec(28.6, kin_ns=NOW - 4_000_000_000)    # nor a read too old to say where the car is
+  assert array_b_vision_lead.pick(slots.items(), lead, NOW, held=7) == 5
+  assert array_b_vision_lead.pick({1: rec(28.5, y_m=2.6)}.items(), lead, NOW) is None
+
+
+def test_every_third_read_goes_to_the_slot_read_longest_ago_and_every_second_while_the_lead_has_no_slot(monkeypatch):
+  lead = [None]
+  built = _led_recorder(monkeypatch, lead)
+  try:
+    logger = built.logger
+    built.observe_can([], NOW, v_ego=20.0)
+    _kin(logger, 0, NOW, x_m=30.0, v_rel=-1.0)       # slot 0 was just read, so slot 1 is the oldest
+    tasks = [logger._next_read_task_locked(NOW + i) for i in range(6)]
+    assert tasks[2] == (1, xcp_mod.KIN_OFFSET, 6) and tasks[5] == (1, xcp_mod.KIN_OFFSET, 6)
+    assert built.vision.sweeps == 2
+    lead[0] = (90.0, 0.0, 19.0, 0.95)                # vision has a lead and no slot answers to it
+    built.observe_can([], NOW + 10, v_ego=20.0)
+    before = built.vision.sweeps
+    for i in range(6):
+      logger._next_read_task_locked(NOW + 10 + i)
+    assert built.vision.sweeps - before == 3
+    for slot in range(xcp_mod.NUM_SLOTS):             # everything read within the last second: no sweep is spent
+      logger.slot_cache[slot]["kin_updated_ns"] = NOW + 20
+    before = built.vision.sweeps
+    for i in range(6):
+      logger._next_read_task_locked(NOW + 20 + i)
+    assert built.vision.sweeps == before
+  finally:
+    built.close()
+
+
+def test_a_failing_vision_lead_hands_the_reading_order_back_to_the_logger(monkeypatch):
+  lead = [(61.5, 0.0, 19.0, 0.95)]
+  built = _led_recorder(monkeypatch, lead)
+  try:
+    logger, vision = built.logger, built.vision
+    built.observe_can([], NOW, v_ego=20.0)
+    monkeypatch.setattr(array_b_vision_lead, "pick", lambda *a, **k: 1 / 0)
+    assert logger._select_priority_slots_locked() == []            # the logger's own answer, not an exception
+    assert vision.failed and logger._select_priority_slots_locked == vision.own_priority
+    assert logger._next_read_task_locked == vision.own_task
+    built.observe_can([], NOW + 1, v_ego=20.0)
+    assert not built.stopped
+  finally:
+    built.close()
+
+  built = _led_recorder(monkeypatch, lead)
+  try:
+    built.lead_source = lambda: 1 / 0                              # the model socket itself failing
+    vision = built.vision
+    built.observe_can([], NOW, v_ego=20.0)
+    assert built.vision is None and vision.failed and not built.stopped
+  finally:
+    built.close()
+
+
+def test_the_table_carries_the_vision_lead_and_the_connect_reply_is_logged_once(monkeypatch):
+  lead = [(61.5, 0.25, 19.0, 0.95)]
+  built = _led_recorder(monkeypatch, lead)
+  try:
+    seen = _slot_events(monkeypatch)
+    logger = built.logger
+    logger.in_flight = ("CONNECT", -1, 0, 0, NOW)
+    logger._process_dto_locked(b"\xff\x05\x80\x08\x08\x00\x01\x01", NOW)
+    assert logger.state == "NEED_STATUS"                            # the logger still got its reply
+    logger.in_flight = ("CONNECT", -1, 0, 0, NOW)
+    logger._process_dto_locked(b"\xff\x01\x80\x08\x08\x00\x01\x01", NOW)
+    connects = [kw for name, kw in seen if name == "array_b_recorder_connect"]
+    assert connects == [dict(reply="ff05800808000101", daq=True)]
+    logger.state = "READY"
+    built.observe_can([], NOW, v_ego=20.0)
+    table = [kw for name, kw in seen if name == "xcp_array_b_slots"][0]
+    assert table["vision"] == [61.5, 0.25, 19.0, 0.95] and table["vision_slot"] is None and table["vision_age_ms"] == 0
+  finally:
+    built.close()

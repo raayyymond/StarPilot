@@ -18,7 +18,11 @@ Nothing here reaches control. This module decides whether it runs at all, and wi
     event only carries slots that passed the logger's validity rules, so it cannot show why a car is missing from it:
     on the first Accord drives (2026-11-22) the lead had no track for 10-40 s at a time while the car's own object
     list held it. The table shows each slot's raw words, how old each read is, whether the logger counts it active,
-    and how often it was dropped and with which flags.
+    and how often it was dropped and with which flags;
+  - the reading order follows the vision lead (array_b_vision_lead.py), and the table event carries what vision gave
+    and which slot was chosen for it;
+  - the radar's CONNECT reply is logged once (array_b_recorder_connect): its resource byte says whether this firmware
+    offers XCP DAQ, which the panda does not let through today.
 """
 from __future__ import annotations
 
@@ -122,11 +126,11 @@ class SlotTable:
                   init_queue=len(logger._init_queue), priority=list(logger._select_priority_slots_locked()),
                   op_matched=list(logger._op_matched_slots), slots=slots)
 
-  def log(self, now_ns: int) -> None:
+  def log(self, now_ns: int, **more) -> None:
     if self.logger.state != "READY" or now_ns - self.last_ns < SLOT_TABLE_NS:
       return
     self.last_ns = int(now_ns)
-    cloudlog.event("xcp_array_b_slots", **self.rows(now_ns))
+    cloudlog.event("xcp_array_b_slots", **self.rows(now_ns), **more)
 
 
 def slot_table(logger) -> SlotTable | None:
@@ -138,21 +142,92 @@ def slot_table(logger) -> SlotTable | None:
     return None
 
 
+class ModelLead:
+  """The model's first lead as (d, y, v, prob), y left positive like the radar's; None when no new frame came."""
+
+  def __init__(self):
+    import openpilot.cereal.messaging as messaging
+    self.recv = messaging.recv_one_or_none
+    self.sock = messaging.sub_sock("modelV2", conflate=True)
+
+  def __call__(self) -> tuple[float, float, float, float] | None:
+    msg = self.recv(self.sock)
+    if msg is None:
+      return None
+    leads = msg.modelV2.leadsV3
+    if len(leads) == 0:
+      return (0.0, 0.0, 0.0, 0.0)
+    lead = leads[0]
+    return (float(lead.x[0]), -float(lead.y[0]), float(lead.v[0]), float(lead.prob))
+
+
+def vision_lead(logger):
+  """The vision-led reading order for a logger that keeps a slot table, or None."""
+  try:
+    if not hasattr(logger, "slot_cache"):
+      return None
+    from openpilot.starpilot.car.honda import array_b_vision_lead, xcp_radar_logger
+    return array_b_vision_lead.VisionLead(logger, xcp_radar_logger)
+  except Exception:
+    cloudlog.exception("array_b_recorder: no vision lead")
+    return None
+
+
+def log_connect_reply(logger) -> None:
+  """Log the radar's first CONNECT reply. Reads what already arrives; sends nothing."""
+  if not hasattr(logger, "_process_dto_locked"):
+    return
+  inner = logger._process_dto_locked
+  seen = []
+
+  def process(data: bytes, now_ns: int) -> None:
+    try:
+      if not seen and data and data[0] == 0xFF and logger.in_flight is not None and logger.in_flight[0] == "CONNECT":
+        seen.append(True)
+        cloudlog.event("array_b_recorder_connect", reply=bytes(data).hex(), daq=bool(len(data) > 1 and data[1] & 0x04))
+    except Exception:
+      seen.append(True)
+    inner(data, now_ns)
+  logger._process_dto_locked = process
+
+
 class ArrayBRecorder:
   """The logger's card-facing surface, plus the candidate rotation and the give-up rule."""
 
-  def __init__(self, make_logger, bases: tuple[int, ...]):
+  def __init__(self, make_logger, bases: tuple[int, ...], lead_source=None):
     self.make_logger = make_logger   # base -> a started logger
     self.bases = bases
+    self.lead_source = lead_source   # () -> (d, y, v, prob) of the vision lead, or None when nothing new
     self.index = 0
     self.logger = make_logger(bases[0])
-    self.slot_table = slot_table(self.logger)
+    self._dress()
     self.slice_start_ns = 0
     self.armed_ns = 0
     self.was_ready = False
     self.ever_ready = False
     self.session_losses = 0
     self.stopped = False
+
+  def _dress(self) -> None:
+    self.slot_table = slot_table(self.logger)
+    self.vision = vision_lead(self.logger) if self.lead_source is not None else None
+    try:
+      log_connect_reply(self.logger)
+    except Exception:
+      cloudlog.exception("array_b_recorder: no connect log")
+
+  def _see_lead(self, now_ns: int) -> None:
+    if self.vision is None:
+      return
+    try:
+      lead = self.lead_source()
+      with self.logger._lock:
+        self.vision.observe(lead, now_ns)
+    except Exception:
+      cloudlog.exception("array_b_recorder: vision lead failed")
+      with self.logger._lock:
+        self.vision.release()
+      self.vision = None
 
   def _stop(self, reason: str) -> None:
     self.stopped = True
@@ -166,7 +241,7 @@ class ArrayBRecorder:
     self.logger.close()
     self.index = (self.index + 1) % len(self.bases)
     self.logger = self.make_logger(self.bases[self.index])
-    self.slot_table = slot_table(self.logger)
+    self._dress()
     self.slice_start_ns = int(now_ns)
     self.was_ready = False
     log_layout(self.bases[self.index], now_ns)
@@ -195,10 +270,11 @@ class ArrayBRecorder:
   def observe_can(self, can_list, now_ns: int, v_ego: float = 0.0) -> None:
     if self.stopped:
       return
+    self._see_lead(now_ns)
     self.logger.observe_can(can_list, now_ns, v_ego=v_ego)
     if self.slot_table is not None:
       try:
-        self.slot_table.log(now_ns)
+        self.slot_table.log(now_ns, **(self.vision.state() if self.vision is not None else {}))
       except Exception:
         cloudlog.exception("array_b_recorder: slot table failed")
         self.slot_table = None
@@ -250,7 +326,12 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
       return xcp_radar_logger.XcpRadarLogger(CP, send_lock=send_lock, pm=pm, params=params,
                                              probe_wayb=firmware in INTERNAL_FUSION_PROBE_FIRMWARE)
 
-    recorder = ArrayBRecorder(make_logger, bases)
+    try:
+      lead_source = ModelLead()
+    except Exception:
+      cloudlog.exception("array_b_recorder: no model lead")
+      lead_source = None
+    recorder = ArrayBRecorder(make_logger, bases, lead_source)
     if not recorder.logger.enabled:
       recorder.close()
       return None
