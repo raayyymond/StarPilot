@@ -26,13 +26,14 @@ class Peers:
     return getattr(self.messages[name], name)
 
 
-def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False, health_long=None):
+def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False, health_long=None,
+           panda_asked=True, long_active=None):
   """The panda sample of t=790.873: longitudinal dropped, the host still asking for it, lateral granted."""
   cp, _, _, _, _ = stock_proof()
   config = cp.safetyConfigs[0]
   slots = (PandaSlot(0, 'accord-panda', config.safetyModel.raw, STOCK_CLASSIC_LONG, 32, False),)
   native = SafetyState(1, True, NOW - 1_000_000, NOW + 199_000_000, config.safetyModel.raw, STOCK_CLASSIC_LONG,
-                       True, panda_long, True, True, 'accord-panda', 'axis-session',
+                       True, panda_long, True, panda_asked, 'accord-panda', 'axis-session',
                        sourcePandaStatesMonoTime=NOW + 9_000_000_000, pandaInventory=slots)
   safety = messaging.new_message('aolSafetyWire', 0, valid=True, logMonoTime=native.observedMonoTime)
   safety.aolSafetyWire = encode_safety(native)
@@ -47,7 +48,8 @@ def sample(*, pressed=True, button=Cancel, combined=False, panda_long=False, hea
   a.observedMonoTime, a.validUntilMonoTime = axis.logMonoTime, axis.logMonoTime + 30_000_000
   a.sourceCarStateMonoTime = axis.logMonoTime - 1000
   a.desiredLateral = a.lateralActive = a.nativeAcknowledged = True
-  a.desiredLongitudinal = a.longitudinalActive = combined
+  a.desiredLongitudinal = combined
+  a.longitudinalActive = combined if long_active is None else long_active
   events = messaging.new_message('onroadEvents', 1, valid=True, logMonoTime=NOW - 1_000_000)
   events.onroadEvents[0].name = 'buttonCancel'
   events.onroadEvents[0].userDisable = events.onroadEvents[0].noEntry = True
@@ -154,6 +156,28 @@ def test_the_wait_does_not_need_the_10_hz_panda_health_to_have_caught_up():
   cs.brakePressed = True
   assert not feedback.observe(sm, cp, cs, NOW + 5_000_000, latched=True, brake_source_ns=NOW + 4_000_000), 'the pedal explains it'
   assert feedback.honda_brake_ns == NOW and not feedback.honda_cause_wait_ns
+
+
+def test_engaging_does_not_spend_the_wait_the_next_brake_needs():
+  """2026-11-23 route 00000074. t=400.619: the host asks for longitudinal and the 10 Hz panda status shows neither
+  request nor grant for another 58 ms, which opened and spent the one wait. t=428.782: the status with longitudinal
+  dropped landed 14 ms before the brake pedal, no wait was left, and card cleared the latch at 15.7 m/s.
+  """
+  cp, cs, sm, feedback = sample(combined=True, panda_asked=False, long_active=False)
+  cs.buttonEvents = []
+  assert not feedback.observe(sm, cp, cs, NOW, latched=True), 'engaging is healthy'
+  assert feedback.honda_cause_wait_ns == NOW, 'though it opens the wait: the status is not a drop yet'
+  _, _, granted, _ = sample(combined=True, panda_long=True)
+  assert feedback._honda_cause_wait_lateral_current(granted, cp, cs, granted['aolAxisState'], NOW + 1_000_000, latched=True) is None
+  assert not feedback.honda_cause_wait_ns, 'the grant ends the wait that engaging opened'
+  _, _, dropped, _ = sample(combined=True)
+  axis = dropped['aolAxisState']
+  assert feedback._honda_cause_wait_lateral_current(dropped, cp, cs, axis, NOW + 2_000_000, latched=True) is not None
+  assert feedback.honda_cause_wait_ns == NOW + 2_000_000, 'the drop waits for its cause'
+  cs.brakePressed = True
+  assert feedback._honda_brake_lateral_current(dropped, cp, cs, axis, NOW + 16_000_000, latched=True,
+                                               brake_source_ns=NOW + 15_000_000) is not None, 'the pedal explains it'
+  assert feedback.honda_brake_ns == NOW + 2_000_000 and not feedback.honda_cause_wait_ns
 
 
 def test_the_accord_mask_is_the_proof_only_for_the_stock_owned_alpha_long_car():

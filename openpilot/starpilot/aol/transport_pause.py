@@ -738,14 +738,19 @@ class TransportPauseFeedback:
     panda's status can reach card before the CAN batch that carries the press or the pedal (2026-11-10 Accord
     route 00000034 t=539.38: 17 ms). Wait one axis age for the cause, once; the brake or CANCEL hold that
     follows keeps this first deadline. Without a cause the fault stands, one axis age late.
+
+    Each drop gets one wait, and a longitudinal grant ends the episode. While engaging, the host asks before the
+    10 Hz status shows the grant, which reads like a drop and used to spend the only wait of the engagement
+    (2026-11-23 route 00000074: opened at t=400.619, missing at the brake of t=428.782).
     """
     from openpilot.starpilot.car.honda.aol import classic_bosch_long_cancel_owner, long_mask_proves_controls_denied
     if self.honda_brake_ns or self.honda_cancel_ns:
       return None
     source_ns = self._honda_cause_wait_origin(now_ns)
-    if not source_ns:
-      if self.honda_cause_wait_ns or self.failed or not axis.desiredLongitudinal:
-        return None  # an expired wait never starts again; the host is not asking for longitudinal
+    opening = not source_ns
+    if opening:
+      if self.failed or not axis.desiredLongitudinal:
+        return None  # the host is not asking for longitudinal
       try:
         # pandaStates is 10 Hz and can trail the panda's own mask by 100 ms; where the mask is proof, use it.
         if not (classic_bosch_long_cancel_owner(cp) and
@@ -757,8 +762,13 @@ class TransportPauseFeedback:
     # CANCEL also clears the panda's longitudinal request bit; a brake leaves it. The cause is not known yet.
     native = self._honda_long_withdrawal_lateral_current(sm, cp, cs, axis, now_ns,
       latched=latched, source_ns=source_ns, started=False, require_long_request=False)
-    if native is None or native.longitudinalAllowed:
+    if native is None:
       return None
+    if native.longitudinalAllowed:
+      self.honda_cause_wait_ns = 0
+      return None
+    if opening and self.honda_cause_wait_ns:
+      return None  # this drop's wait ran out; it never starts again
     self.honda_cause_wait_ns = source_ns
     return native
 
