@@ -24,29 +24,32 @@ import numpy as np
 class BirdsEyeConfig:
   """What the view shows and how steeply it looks down.
 
-  - x_min -7: the ground 7 m behind the camera is the bottom edge, so the whole ego car (rear bumper at -3.1 m)
-    and its shadow sit above it.
-  - x_max 80: the highway preset, not a ceiling. The renderer zooms this config (zoomed_config) between
+  - x_min -6.9: the ground 6.9 m behind the camera is the bottom edge, so the whole ego car (rear bumper at
+    -3.1 m) and its shadow sit above it.
+  - x_max 102: the highway preset, not a ceiling. The renderer zooms this config (zoomed_config) between
     ZOOM_NEAR_X_MAX and far_x_max (ZOOM_FAR_X_MAX, 120 m) to keep a radar lead on screen, and its sample_grid
     spans that widest zoom.
-  - pitch 36, fov 42: the edge rays are 57 and 15 degrees below the horizon, so the horizon is never in view and
-    the far end of the road is drawn about a third as wide as the road beside the car. At the highway preset the
-    camera is 28 m up and 25 m behind; at the city preset 14 m up and 16 m behind.
+  - pitch 32, fov 42: the edge rays are 53 and 11 degrees below the horizon, so the horizon is never in view and
+    the far end of the road is drawn about a quarter as wide as the road beside the car. At the highway preset the
+    camera is 25 m up and 26 m behind; at the city preset 12 m up and 16 m behind.
+  - These replace pitch 36 with x_min -7 and presets of 36 / 80 m: the camera tilted up 4 degrees and lowered so
+    that the ego car keeps its size and place on screen (within 0.1 % of the view height) at every speed while the
+    top edge reaches 27 % further.
   """
-  x_min: float = -7.0          # meters of ground behind the device shown at the bottom edge
-  x_max: float = 80.0          # meters ahead at the top edge
-  pitch: float = 36.0          # degrees the camera looks below the horizon
+  x_min: float = -6.9          # meters of ground behind the device shown at the bottom edge
+  x_max: float = 102.0         # meters ahead at the top edge
+  pitch: float = 32.0          # degrees the camera looks below the horizon
   fov: float = 42.0            # vertical field of view, degrees
   sample_step: float = 1.5     # meters between resampled line points near the car
 
 
 DEFAULT_CONFIG = BirdsEyeConfig()
 
-# Speed-based zoom. The view shows the next few seconds of travel: 36 m ahead at city speed (<= 10 m/s) widening
-# linearly to the default 80 m at highway speed (>= 30 m/s). A radar leadOne always stays on screen: when its front
+# Speed-based zoom. The view shows the next few seconds of travel: 45 m ahead at city speed (<= 10 m/s) widening
+# linearly to the default 102 m at highway speed (>= 30 m/s). A radar leadOne always stays on screen: when its front
 # bumper plus ZOOM_LEAD_BUFFER is beyond the speed preset the view widens to it (up to ZOOM_FAR_X_MAX); a nearer
 # lead never tightens the view below the preset.
-ZOOM_NEAR_X_MAX = 36.0
+ZOOM_NEAR_X_MAX = 45.0
 ZOOM_FAR_X_MAX = 120.0  # m, the widest zoom: radar and model leads are reported out to ~100+ m
 ZOOM_SLOW_SPEED = 10.0
 ZOOM_FAST_SPEED = 30.0

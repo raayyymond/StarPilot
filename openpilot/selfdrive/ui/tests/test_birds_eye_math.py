@@ -30,10 +30,10 @@ def test_the_camera_is_above_and_behind_the_car_looking_down_the_road():
   assert x == pytest.approx(cfg.x_min - height / math.tan(near))
   assert far > 0, 'the horizon is never in view'
   assert view.focal == pytest.approx(360 / math.tan(math.radians(cfg.fov / 2)))
-  # Sideways scale falls with the distance from the camera: the far end is drawn about a third as wide.
+  # Sideways scale falls with the distance from the camera: the far end is drawn about a quarter as wide.
   near_ppm, far_ppm = bem.scale_at(np.array([cfg.x_min, cfg.x_max]), view)
   assert far_ppm / near_ppm == pytest.approx(math.sin(far) / math.sin(near), rel=1e-6)
-  assert 0.25 < far_ppm / near_ppm < 0.4
+  assert 0.2 < far_ppm / near_ppm < 0.3
   assert float(bem.meters_per_pixel(30.0, view)) == pytest.approx(1 / float(bem.scale_at(30.0, view)))
   # scale_at and depth_scale_at are the pixel derivatives of the projection.
   step = 1e-3
@@ -526,7 +526,7 @@ def test_zoom_filter_is_smooth_and_quantized():
   assert zoom.update(5.0, 0.0) == bem.ZOOM_NEAR_X_MAX, 'the first speed is taken directly'
   values = [zoom.update(30.0, 1 / 30) for _ in range(30)]
   assert values[0] < bem.ZOOM_NEAR_X_MAX + 2.0, 'a speed step does not jump the view'
-  assert 40.0 < values[-1] <= bem.ZOOM_NEAR_X_MAX + bem.ZOOM_MAX_RATE, 'a 38 m step glides at the rate limit: ~12 m after 1 s'
+  assert 40.0 < values[-1] <= bem.ZOOM_NEAR_X_MAX + bem.ZOOM_MAX_RATE, 'a 57 m step glides at the rate limit: ~12 m after 1 s'
   assert all(v % bem.ZOOM_STEP == 0 for v in values) and values == sorted(values)
   # A real acceleration (1.5 m/s^2 from 10 to 30 m/s) changes the view on a minority of frames.
   zoom = bem.ZoomFilter()
@@ -564,17 +564,17 @@ def test_zoom_widens_to_keep_a_radar_lead_on_screen():
   from openpilot.selfdrive.ui.onroad.birds_eye_renderer import EGO_FRONT, LEAD_LENGTH
   def front(d_rel):
     return d_rel + EGO_FRONT + LEAD_LENGTH
-  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max == 80.0, 'no lead: the speed preset'
+  assert bem.lead_zoom_x_max(30.0, None) == cfg.x_max == 102.0, 'no lead: the speed preset'
   assert bem.lead_zoom_x_max(30.0, front(20.0)) == cfg.x_max, 'a near lead never tightens the preset'
   assert bem.lead_zoom_x_max(30.0, front(65.0)) == cfg.x_max, 'a lead that fits keeps the preset'
-  assert bem.lead_zoom_x_max(30.0, front(80.0)) == pytest.approx(80.0 + EGO_FRONT + LEAD_LENGTH + bem.ZOOM_LEAD_BUFFER)
+  assert bem.lead_zoom_x_max(30.0, front(100.0)) == pytest.approx(100.0 + EGO_FRONT + LEAD_LENGTH + bem.ZOOM_LEAD_BUFFER)
   assert bem.lead_zoom_x_max(30.0, front(200.0)) == bem.ZOOM_FAR_X_MAX == bem.far_x_max(cfg), 'capped at the widest zoom'
   assert bem.lead_zoom_x_max(5.0, front(10.0)) == bem.ZOOM_NEAR_X_MAX, 'never tighter than the city view'
-  assert bem.lead_zoom_x_max(5.0, front(30.0)) == pytest.approx(front(30.0) + bem.ZOOM_LEAD_BUFFER), 'widens the city view too'
+  assert bem.lead_zoom_x_max(5.0, front(40.0)) == pytest.approx(front(40.0) + bem.ZOOM_LEAD_BUFFER), 'widens the city view too'
   zoom = bem.ZoomFilter()
-  assert zoom.update(30.0, 0.0, front(80.0)) == 92.0, 'quantized to ZOOM_STEP (92.1 m)'
-  assert zoom.value == pytest.approx(92.1), 'the camera follows the unquantized value'
-  assert zoom.update(30.0, 0.0, None) == 92.0, 'the change is filtered, not a jump'
+  assert zoom.update(30.0, 0.0, front(100.0)) == 112.0, 'quantized to ZOOM_STEP (112.1 m)'
+  assert zoom.value == pytest.approx(112.1), 'the camera follows the unquantized value'
+  assert zoom.update(30.0, 0.0, None) == 112.0, 'the change is filtered, not a jump'
   for _ in range(300):
     zoom.update(30.0, 1 / 30, None)
   assert zoom.x_max == cfg.x_max, 'the lead gone: back to the preset'
@@ -594,9 +594,9 @@ def test_renderer_zoom_follows_the_radar_lead_one():
   view = BirdsEyeRenderer(text=object())
   view.clock = lambda: 0.0
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
-  view.scene.lead_one_d = 80.0
+  view.scene.lead_one_d = 100.0
   wide = view.view_config()
-  assert wide.x_max == 92.0 and (wide.x_min, wide.pitch, wide.fov) == (view.config.x_min, view.config.pitch, view.config.fov)
+  assert wide.x_max == 112.0 and (wide.x_min, wide.pitch, wide.fov) == (view.config.x_min, view.config.pitch, view.config.fov)
   view = BirdsEyeRenderer(text=object())
   view.clock = lambda: 0.0
   view.ingest(None, None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
@@ -634,11 +634,11 @@ def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
   view = ber.BirdsEyeRenderer(text=SimpleNamespace(measure=lambda text, size: (10.0, 10.0), draw=lambda *args: None))
   now = [0.0]
   view.clock = lambda: now[0]
-  radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=90.0, yRel=0.0, vRel=0.0),
+  radar = SimpleNamespace(leadOne=SimpleNamespace(present=True, dRel=105.0, yRel=0.0, vRel=0.0),
                           leadTwo=SimpleNamespace(present=False, dRel=0.0, yRel=0.0, vRel=0.0))
   view.ingest(_model(), None, SimpleNamespace(steeringAngleDeg=0.0, leftBlinker=False, rightBlinker=False, vEgo=30.0))
   assert view.view_config().x_max == view.config.x_max, 'no lead yet: the highway preset'
-  view.ingest(None, radar, None)  # a lead appears 90 m ahead
+  view.ingest(None, radar, None)  # a lead appears 105 m ahead
   poses = []
   monkeypatch.setattr(view, '_cars', lambda v, p, *a: poses.extend(p) or ([[]] * len(p), np.zeros((len(p), 32, 2))))
   monkeypatch.setattr(ber, '_run', lambda *a: None)
@@ -649,13 +649,13 @@ def test_far_highway_lead_is_drawn_once_the_zoom_settles(monkeypatch):
     cfg = view.view_config()
     view._leads(view.scene, RECT, view._views(RECT, cfg)[0])
     return cfg
-  assert draw_leads().x_max < 82.0
+  assert draw_leads().x_max < 104.0
   assert not poses, 'beyond the preset view until the zoom catches up'
   for _ in range(300):  # 10 s at 30 Hz
     now[0] += 1 / 30
     cfg = draw_leads()
-  assert cfg.x_max == 102.0, '90 + 1.5 + 4.6 + 6 = 102.1, quantized'
-  assert poses and poses[-1][0] == pytest.approx(90.0 + ber.EGO_FRONT + ber.LEAD_LENGTH / 2)
+  assert cfg.x_max == 117.0, '105 + 1.5 + 4.6 + 6 = 117.1, quantized'
+  assert poses and poses[-1][0] == pytest.approx(105.0 + ber.EGO_FRONT + ber.LEAD_LENGTH / 2)
   assert view.scene.grid[-1] >= cfg.x_max, 'the grid reaches the top edge'
   road = view._road_draw(view.scene, view._reference(RECT.height, cfg.x_max))
   reach = min(cfg.x_max, view.scene.draw_distance)  # the camera's MAX_DRAW_DISTANCE (100 m) is below this top edge
