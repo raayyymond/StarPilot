@@ -6,6 +6,23 @@ from pathlib import Path
 TABLES_FILE = Path("honda") / "bosch_long_tables.json"
 
 
+def force_stop_distance_qualified(cp) -> bool:
+  """The Accord on Bosch alpha long brakes a Force Stop to its distance, like the Ioniq 6 and 5 PE.
+
+  2026-11-23 routes 00000073/74: the default law hands over to the native stop 6.2 m before the model's stop
+  point, whatever the speed, and only ever shortens its distance. The car was still at 2.3-3.9 m/s there, so
+  it came to rest 1-5 m short (t=425.8: 4 m, the driver crept 4.0 m), and 5-10 m short where the model moved
+  its stop point out while the car slowed (t=524.3, crept 6.6 m). Distance braking follows the model's point
+  until the last metres and closes the loop on what is left.
+  """
+  try:
+    from opendbc.car.honda.values import CAR
+    return bool(cp.brand == 'honda' and cp.carFingerprint == CAR.HONDA_ACCORD and
+                cp.openpilotLongitudinalControl and not cp.pcmCruise)
+  except (AttributeError, ImportError, TypeError, ValueError):
+    return False
+
+
 def tables_path() -> Path:
   from openpilot.starpilot.storage import starpilot_storage_root
   return starpilot_storage_root() / TABLES_FILE
