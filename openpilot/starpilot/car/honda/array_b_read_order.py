@@ -19,8 +19,14 @@ What radard may take as its lead: the CAN track that answers to the vision lead,
 of it, and the vision lead itself while no CAN track answers to it. A slot is matched to a CAN track as tightly as
 radard pairs them, to vision loosely. With neither, the logger's own first choice is the lead.
 
-The radar often holds two tracks on one car, the second 4-9 m further on with the same speed; the nearer one costs less
-and takes the match. Array B ranges read about 1.5 m longer than the CAN track of the same car (1.3-1.7 m on 71/72).
+Array B ranges read about 1.5 m longer than the CAN track of the same car (1.3-1.7 m on 71/72). On the Accord's radar
+some object classes give their range from a point 5.8 m further on (array_b_object_class.py); a slot is matched by the
+range its class stands for, so such a lead is read as often as any. What looked like a second track on the same car
+4-9 m further on (71/72) was this: one track, changing class. Against vision the nearer slot still costs less.
+
+A slot's flags are read five times less often than its range. When a range steps further than its speed allows, the
+slot holds another object or the object changed class, and its flags are asked for at once: until they are read the
+range is on the wrong reference and neither this order nor radard takes the slot for the lead.
 
 The logger file stays as it came from bob-unify-car: the order is wrapped on the instance and handed back for good on
 any failure.
@@ -34,6 +40,7 @@ measured 58% / 58%. About 11% / 3% is lost to the radar's own flags whatever is 
 from __future__ import annotations
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.starpilot.car.honda.array_b_object_class import gate_flags, range_ahead_m
 
 KIN, LAT, AGE, FLAGS, QUAL = range(5)
 STAMP = ("kin_updated_ns", "lat_updated_ns", "age_updated_ns", "flags_updated_ns", "qual_updated_ns")
@@ -65,6 +72,8 @@ GHOST = 0x0020
 TIGHT = (4.0, 0.10, 3.0, 1.5)       # against a CAN track
 LOOSE = (5.0, 0.20, 5.0, 2.0)       # against vision
 IN_PATH_DY_M = 1.5
+RANGE_STEP_M = 3.0            # a range this far from where its speed put it: another object, or another class
+RANGE_STEP_MAX_S = 1.0        # between two reads no further apart than this
 
 
 def can_track(tracks, lead: tuple[float, float, float]) -> tuple[float, float, float] | None:
@@ -91,8 +100,18 @@ def references(tracks, lead: tuple[float, float, float] | None) -> list[tuple[fl
   return nearer[:LEAD_COUNT - 1] + [(*can, True) if can is not None else (*lead, False)]
 
 
-def match(slots, ref: tuple[float, float, float, bool], now_ns: int, held=(), taken=()) -> int | None:
-  """The slot that answers to one reference."""
+def stepped(seen: tuple[int, int, int], rec) -> bool:
+  """This read's range is not where the last read's range and the two speeds put it."""
+  then_ns, x_then, v_then = seen
+  elapsed = (rec["kin_updated_ns"] - then_ns) / 1e9
+  if then_ns <= 0 or x_then <= 0 or rec["X_raw"] <= 0 or not 0.0 < elapsed <= RANGE_STEP_MAX_S:
+    return False
+  expected = x_then / 128.0 + 0.5 * (v_then + rec["Vx_raw"]) / 256.0 * elapsed
+  return abs(rec["X_raw"] / 128.0 - expected) > RANGE_STEP_M
+
+
+def match(slots, ref: tuple[float, float, float, bool], now_ns: int, held=(), taken=(), how=None) -> int | None:
+  """The slot that answers to one reference. `how` is the firmware's reading of the class bits, if it has one."""
   d, y, v_rel, tight = ref
   gate_m, gate_share, max_dv, max_dy = TIGHT if tight else LOOSE
   best = None
@@ -104,7 +123,7 @@ def match(slots, ref: tuple[float, float, float, bool], now_ns: int, held=(), ta
     if age > MAX_KIN_AGE_S or (flags is not None and flags & GHOST):
       continue
     v = rec["Vx_raw"] / 256.0
-    x = rec["X_raw"] / 128.0 + v * age
+    x = rec["X_raw"] / 128.0 + v * age - range_ahead_m(how, flags)
     lat = rec["lat_updated_ns"] > 0
     dy = abs(rec["Y_raw"] / 128.0 - y) if lat else UNREAD_DY_M
     gate = max(gate_m, gate_share * d) + 0.5 * age
@@ -116,7 +135,7 @@ def match(slots, ref: tuple[float, float, float, bool], now_ns: int, held=(), ta
       near, far = -gate, max(SECOND_TRACK_M + 0.5 * age, gate)
     if not near <= ahead <= far or abs(v - v_rel) > max_dv or (lat and dy > max_dy):
       continue
-    fit = flags is None or (flags & 0xF020) == 0xE000
+    fit = flags is None or (gate_flags(how, flags) & 0xF020) == 0xE000
     cost = abs(ahead) + 2.0 * dy + abs(v - v_rel) - (HELD_BONUS if slot in held else 0.0) + (0.0 if fit else UNFIT_COST)
     if best is None or cost < best[0]:
       best = (cost, slot)
@@ -126,9 +145,11 @@ def match(slots, ref: tuple[float, float, float, bool], now_ns: int, held=(), ta
 class ReadOrder:
   """Wraps one logger's read order and priority choice. Every method the logger calls runs under its lock."""
 
-  def __init__(self, logger, layout):
+  def __init__(self, logger, layout, how=None):
     self.logger = logger
     self.layout = layout          # the module that carries KIN_OFFSET / LAT_OFFSET / NUM_SLOTS
+    self.how = how                # array_b_object_class.Reading for this firmware, or None
+    self.kin = [(0, 0, 0)] * layout.NUM_SLOTS                   # each slot's last range read: when, X, Vx
     self.reads = (layout.KIN_OFFSET, 6), (layout.LAT_OFFSET, 6), (2, 6), (106, 2), (127, 2)
     self.asked = [[0] * 5 for _ in range(layout.NUM_SLOTS)]     # when each field was last asked for
     self.vision: tuple[float, float, float, float] | None = None   # d, y, v, prob as vision gave them
@@ -185,7 +206,7 @@ class ReadOrder:
     slots = [(s, cache[s]) for s in range(self.layout.NUM_SLOTS)]
     leads: list[int] = []
     for ref in refs:
-      slot = match(slots, ref, self.now_ns, self.leads, leads)
+      slot = match(slots, ref, self.now_ns, self.leads, leads, self.how)
       if slot is not None:
         leads.append(slot)
     self.leads, self.unanswered = leads, len(refs) - len(leads)
@@ -226,6 +247,10 @@ class ReadOrder:
       rec = logger.slot_cache[slot]
       periods = self.periods(slot, rec, reach)
       asked = self.asked[slot]
+      if rec["kin_updated_ns"] != self.kin[slot][0]:
+        if stepped(self.kin[slot], rec):
+          asked[FLAGS] = 0                    # as if never asked: read next, after a lead's range and speed
+        self.kin[slot] = (rec["kin_updated_ns"], rec["X_raw"], rec["Vx_raw"])
       for field, period in enumerate(periods):
         if not period:
           continue

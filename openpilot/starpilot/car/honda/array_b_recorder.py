@@ -25,6 +25,9 @@ This module decides whether it runs at all, and with which layout:
     and how often it was dropped and with which flags;
   - what is read when is array_b_read_order.py's: the slots that answer to radard's lead first, the rest of the list by
     what each slot is to long control. The table event carries the vision lead and the slots chosen for it;
+  - what a firmware's flag word says about an object's class is array_b_object_class.py's: on the Accord's radar one
+    class bit sits where the gate reads a verdict, and two classes give their range from further on. The targets are
+    translated before the logger pairs them with the CAN tracks;
   - the radar's CONNECT reply is logged once (array_b_recorder_connect): its resource byte says whether this firmware
     offers XCP DAQ, which the panda does not let through today.
 """
@@ -180,13 +183,13 @@ class ModelLead:
     self.sock = None
 
 
-def read_order(logger):
+def read_order(logger, how=None):
   """The reading order for a logger that keeps a slot table, or None (the logger then reads in its own order)."""
   try:
     if not hasattr(logger, "slot_cache"):
       return None
     from openpilot.starpilot.car.honda import array_b_read_order, xcp_radar_logger
-    return array_b_read_order.ReadOrder(logger, xcp_radar_logger)
+    return array_b_read_order.ReadOrder(logger, xcp_radar_logger, how)
   except Exception:
     cloudlog.exception("array_b_recorder: no read order")
     return None
@@ -213,10 +216,11 @@ def log_connect_reply(logger) -> None:
 class ArrayBRecorder:
   """The logger's card-facing surface, plus the candidate rotation and the give-up rule."""
 
-  def __init__(self, make_logger, bases: tuple[int, ...], lead_source=None):
+  def __init__(self, make_logger, bases: tuple[int, ...], lead_source=None, how=None):
     self.make_logger = make_logger   # base -> a started logger
     self.bases = bases
     self.lead_source = lead_source   # () -> (d, y, v, prob) of the vision lead, or None when nothing new
+    self.how = how                   # array_b_object_class.Reading for this firmware, or None
     self.index = 0
     self.logger = make_logger(bases[0])
     self._dress()
@@ -229,11 +233,16 @@ class ArrayBRecorder:
 
   def _dress(self) -> None:
     self.slot_table = slot_table(self.logger)
-    self.order = read_order(self.logger)
+    self.order = read_order(self.logger, self.how)
     try:
       log_connect_reply(self.logger)
     except Exception:
       cloudlog.exception("array_b_recorder: no connect log")
+    try:
+      from openpilot.starpilot.car.honda import array_b_object_class
+      array_b_object_class.dress(self.logger, self.how)
+    except Exception:
+      cloudlog.exception("array_b_recorder: targets left as read")
 
   def _see_lead(self, now_ns: int) -> None:
     if self.order is None:
@@ -356,7 +365,8 @@ def build(CP, *, send_lock, pm, params) -> ArrayBRecorder | None:
     except Exception:
       cloudlog.exception("array_b_recorder: no model lead")
       lead_source = None
-    recorder = ArrayBRecorder(make_logger, bases, lead_source)
+    from openpilot.starpilot.car.honda import array_b_object_class
+    recorder = ArrayBRecorder(make_logger, bases, lead_source, array_b_object_class.reading(firmware))
     if not recorder.logger.enabled:
       recorder.close()
       return None

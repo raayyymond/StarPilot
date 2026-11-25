@@ -485,9 +485,9 @@ def test_the_lead_is_read_every_radar_cycle_and_the_whole_list_every_three_secon
   lead = [(43.0, 0.0, 19.0, 0.95)]
   built = _led_recorder(monkeypatch, lead)
   try:
-    radar = {5: dict(x=41.5, v=-1.0, y=0.0, flags=0xE240),      # the lead
-             11: dict(x=30.0, v=-2.0, y=3.5, flags=0xE240),     # a car beside the lane, nearer than the lead
-             20: dict(x=60.0, v=-20.0, y=8.0, flags=0xE240),    # roadside clutter
+    radar = {5: dict(x=41.5, v=-1.0, y=0.0, flags=0xE840),      # the lead
+             11: dict(x=30.0, v=-2.0, y=3.5, flags=0xE840),     # a car beside the lane, nearer than the lead
+             20: dict(x=60.0, v=-20.0, y=8.0, flags=0xE840),    # roadside clutter
              30: dict(x=50.0, v=-20.0, y=0.0, flags=0x0000)}    # words the radar left in a slot it freed
     asked = _answer(built, radar, NOW, 480)                     # ten seconds
     assert built.order.leads == [5] and not built.order.failed
@@ -510,8 +510,8 @@ def test_two_leads_on_a_slow_radar_leave_every_other_read_to_the_rest_of_the_lis
   built = _led_recorder(monkeypatch, lead)
   monkeypatch.setattr(sys.modules[__name__], "STEP", 31_000_000)       # 32 reads a second: two leads alone would take them all
   try:
-    radar = {5: dict(x=41.5, v=-1.0, y=0.0, flags=0xE240), 7: dict(x=21.5, v=-3.0, y=0.3, flags=0xE240),
-             11: dict(x=30.0, v=-2.0, y=3.5, flags=0xE240)}
+    radar = {5: dict(x=41.5, v=-1.0, y=0.0, flags=0xE840), 7: dict(x=21.5, v=-3.0, y=0.3, flags=0xE840),
+             11: dict(x=30.0, v=-2.0, y=3.5, flags=0xE840)}
     _answer(built, radar, NOW, 100)
     _can(built.logger, NOW + 100 * STEP, (40.0, 0.0, -1.0), (20.0, 0.3, -3.0))
     start = NOW + 100 * STEP
